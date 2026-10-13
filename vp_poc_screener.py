@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.591"
+APP_VERSION = "0.99.592"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16820,8 +16820,9 @@ EMW_RISE_CANDIDATES = [1.5, 2.0, 3.0]           # v0.99.577 — the live candle'
                                                 # v0.99.583 — at least 1.5 average candles (user, QNT: "нет эффекта, когда цена со дна резко
                                                 # растёт к EMA — цена всё время возле EMA туда-сюда; нужна накачка свечи на фоне графика")
 EMW_MISS_CANDIDATES = [0, 1, 2]                 # the last closed candle closed under all the EMAs / all but one / but two
-EMW_ENTRY_CANDIDATES = [0.25, 0.0, -0.25, "W"]  # v0.99.575 — the limit: daily ATR before the EMA / at it / beyond it (into the wick);
-                                                # v0.99.577 "W" — by the reaction: a 4h close back under, the stop beyond the wick
+EMW_ENTRY_CANDIDATES = [0.25, 0.0, -0.25]       # v0.99.575 — the limit: daily ATR before the EMA / at it / beyond it (into the wick);
+                                                # v0.99.592 — the "W" entry (wait for a 4h close back under) is gone, user: "пока
+                                                # цена идёт снизу вверх и на W/M касание — не ждать откатов и закрытий, заходить сразу"
 EMW_WICK_WAIT = 12                              # 4h candles (2 days) the reaction may take after the touch
 EMW_WICK_BUF = 0.1                              # the stop's buffer beyond the wick: 0.1 x the stop candidate, in daily ATR
 # v0.99.591 — user: "смысл в том, чтобы откат был, сам факт: пришли до EMA, получили откат, за EMA
@@ -16860,7 +16861,7 @@ EMW_WATCH_PCT = 30.0                            # the "near the EMA" list: trigg
                                                 # (v0.99.589: 15 -> 30 — a weekly pump runs +50% and more; RSR's EMA 50 was 20% away)
 EMW_PREALERT_PCT = float(os.environ.get("VP_EMW_PREALERT_PCT", 5.0))   # v0.99.575 — "put the limit on" heads-up at this distance
 EMW_BACKTEST_TRIGGER = threading.Event()
-EMW_MODEL_VER = 591                             # a model of another layout is ignored and retrained
+EMW_MODEL_VER = 592                             # a model of another layout is ignored and retrained
 _emw_parts = {}
 _emw_had_data = {}
 _emw_levels = {}            # symbol -> the forming week's / month's levels
@@ -34606,7 +34607,7 @@ async function refreshEmw() {
   const pctOf = (atr, ap) => atr == null || ap == null ? '' : ` <span class="dim">(~${(atr * ap).toFixed(1)}%)</span>`;
   let h = `<details class="dim hint-block" style="margin-bottom:10px;"><summary style="cursor:pointer;"><b>📐 EMA W/M</b> — шорт: цена снизу резко дошла до EMA недели / месяца, вход на живой свече · как работает</summary>EMA текущей свечи совпадает с ценой ровно тогда, когда цена доходит до EMA закрытых свечей, поэтому уровень всей недели / месяца известен с её открытия и не перерисовывается. Цена проверяется каждые ${cfg.poll_sec || 30} сек, вход — лимиткой при касании (где именно — до EMA, на ней или за ней на прострел — выбирает обучение), а не после закрытия свечи; за ${cfg.prealert_pct}% до уровня приходит напоминание в Telegram, куда ставить лимитку. Стоп и тейк — по дневному ATR (реакция, а не недельный размах), сделка после касания проверяется по 4ч-свечам — быстрая реакция в тот же день засчитывается.
     <br>Условия (только шорт): последняя закрытая свеча закрылась под всеми или почти всеми EMA 7/14/28/50/100 (из тех, что у монеты уже есть), новая свеча открылась под уровнем, и сама живая свеча резко выросла к EMA — «рост» = от её минимума до EMA, в ATR недели / месяца, то есть в средних свечах этого графика: нужна накачка минимум в ${(cfg.rise || [1.5])[0]} средней свечи (цена, которая болтается у EMA обычными свечами, не торгуется).
-    <br>Обучение — на всех монетах вместе (у одной монеты слишком мало недельных касаний): EMA ${(cfg.emas || {})['1w'] ? cfg.emas['1w'].join('/') : ''} (неделя), ${(cfg.emas || {})['1M'] ? cfg.emas['1M'].join('/') : ''} (месяц) × рост живой свечи ≥ ${(cfg.rise || []).join('/')} ATR × под всеми EMA / кроме одной / кроме двух × вход: лимитка до EMA / на EMA / за EMA или по реакции (4ч закрылась обратно под EMA) × тейк — откат, который давали ${(cfg.take_q || []).join(' / ')}% касаний × стоп — за выносом, дальше которого не заходили ${(cfg.stop_q || []).join(' / ')}% откатов (оба в дневных ATR и считаются только по старой части истории) × держать до ${(cfg.hold || []).join('/')} дн. — ${cfg.combos} вариантов. Выбор на старых 70% истории, проверка на новых 30%; z считается по свечам (касания одной недели идут вместе), порог обучения z ≥ ${cfg.z_train} (поправка на весь перебор), теста z ≥ ${cfg.z_test}. Срок удержания выбирает обучение; комиссии и фандинг ${cfg.funding_pct_day}%/день учтены. Пересчёт раз в ${Math.round((cfg.refresh_sec || 86400) / 3600)} ч.</details>`;
+    <br>Обучение — на всех монетах вместе (у одной монеты слишком мало недельных касаний): EMA ${(cfg.emas || {})['1w'] ? cfg.emas['1w'].join('/') : ''} (неделя), ${(cfg.emas || {})['1M'] ? cfg.emas['1M'].join('/') : ''} (месяц) × рост живой свечи ≥ ${(cfg.rise || []).join('/')} ATR × под всеми EMA / кроме одной / кроме двух × вход: лимитка (сразу на касании) чуть до EMA / на EMA / чуть за EMA × тейк — откат, который давали ${(cfg.take_q || []).join(' / ')}% касаний × стоп — за выносом, дальше которого не заходили ${(cfg.stop_q || []).join(' / ')}% откатов (оба в дневных ATR и считаются только по старой части истории) × держать до ${(cfg.hold || []).join('/')} дн. — ${cfg.combos} вариантов. Выбор на старых 70% истории, проверка на новых 30%; z считается по свечам (касания одной недели идут вместе), порог обучения z ≥ ${cfg.z_train} (поправка на весь перебор), теста z ≥ ${cfg.z_test}. Срок удержания выбирает обучение; комиссии и фандинг ${cfg.funding_pct_day}%/день учтены. Пересчёт раз в ${Math.round((cfg.refresh_sec || 86400) / 3600)} ч.</details>`;
   if (d.enabled === false) h += '<div style="padding:10px 12px;margin-bottom:8px;background:var(--neg-bg);border:1px solid var(--neg);border-radius:var(--r-sm);font-size:var(--fs-sm);">⏸ <b>«EMA W/M» выключен в настройках</b> — обучение и живой скан не идут.</div>';
   if (d.backtest_running) {
     const pct = d.progress_total ? Math.round(d.progress_done / d.progress_total * 100) : 0;

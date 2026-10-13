@@ -19591,3 +19591,9 @@ v0.99.591 - EMA W/M take and stop learned from the touches themselves (user: "th
          on the old 70% of history, the new 30% only checks. Model version 591 —
          retrained from scratch. The signal / pre-alert messages and the tab say
          what the take and the stop are (in daily ATR and ≈%).
+v0.99.592 - EMA W/M: the "by the reaction" entry (wait for a 4h candle to close back
+         under the EMA) is gone (user: "while the price rises from below and
+         touches the weekly / monthly EMA — don't wait for pullbacks or closes,
+         enter right away"). Only the limit on the touch is left (a little before
+         the EMA / at it / a little past it — the backtest picks). Model version
+         592 — retrained from scratch.
