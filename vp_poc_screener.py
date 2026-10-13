@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.595"
+APP_VERSION = "0.99.596"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22535,8 +22535,9 @@ def api_amd_chart(symbol):
         if sig_time:
             target = float(sig_time)
             with _amd_results_lock:
-                live_match = next((s for s in _amd_results
-                                    if s["symbol"] == symbol and abs(s["time"] - target) < interval_sec), None)
+                live_match = min((s for s in _amd_results
+                                   if s["symbol"] == symbol and abs(s["time"] - target) < interval_sec),
+                                  key=lambda s: abs(s["time"] - target), default=None)   # v0.99.596 — the nearest
             if live_match:
                 found = {"time": live_match["time"], "direction": live_match["direction"],
                          "entry": live_match["entry"], "sl": live_match["sl"], "tp": live_match["tp"],
@@ -22603,7 +22604,8 @@ def api_snr_chart(symbol):
         found_exit_price = None
         tf = None
         with state_lock:
-            live_match = next((s for s in STATE["snr_signals"] if s["symbol"] == symbol and abs(s["time"] - target) < 86400), None)
+            live_match = min((s for s in STATE["snr_signals"] if s["symbol"] == symbol and abs(s["time"] - target) < 86400),
+                             key=lambda s: abs(s["time"] - target), default=None)   # v0.99.596 — the nearest, not the newest of the day
             bt_result = STATE["snr_results"].get(symbol)
         if live_match:
             tf = live_match["timeframe"]
@@ -29717,7 +29719,8 @@ def api_prv_chart(symbol):
         found_exit_price = None
         tf = None
         with state_lock:
-            live_match = next((s for s in STATE["prv_signals"] if s["symbol"] == symbol and abs(s["time"] - target) < 86400), None)
+            live_match = min((s for s in STATE["prv_signals"] if s["symbol"] == symbol and abs(s["time"] - target) < 86400),
+                             key=lambda s: abs(s["time"] - target), default=None)   # v0.99.596 — the nearest, not the newest of the day
             bt_result = STATE["prv_results"].get(symbol)
         if live_match:
             tf = live_match["timeframe"]
@@ -30125,8 +30128,9 @@ def api_mirror_chart(symbol):
             target = float(sig_time)
             interval_sec = INTERVAL_SECONDS.get(MIRROR_INTERVAL, 3600)
             with state_lock:
-                live_match = next((s for s in STATE["mirror_signals"]
-                                    if s["symbol"] == symbol and abs(s["time"] - target) < interval_sec), None)
+                live_match = min((s for s in STATE["mirror_signals"]
+                                   if s["symbol"] == symbol and abs(s["time"] - target) < interval_sec),
+                                  key=lambda s: abs(s["time"] - target), default=None)   # v0.99.596 — the nearest
                 bt_trades = list(STATE["mirror_backtest_results"].get(symbol, []))
             if live_match:
                 found_sig = {"time": live_match["time"], "direction": live_match["direction"],
@@ -30252,8 +30256,9 @@ def api_lsw_chart(symbol):
             target = float(sig_time)
             interval_sec = INTERVAL_SECONDS.get(LSW_INTERVAL, 3600)
             with state_lock:
-                live_match = next((s for s in STATE["lsw_signals"]
-                                    if s["symbol"] == symbol and abs(s["time"] - target) < interval_sec), None)
+                live_match = min((s for s in STATE["lsw_signals"]
+                                   if s["symbol"] == symbol and abs(s["time"] - target) < interval_sec),
+                                  key=lambda s: abs(s["time"] - target), default=None)   # v0.99.596 — the nearest
                 bt_trades = list(STATE["lsw_backtest_results"].get(symbol, []))
             if live_match:
                 found_sig = {"time": live_match["time"], "direction": live_match["direction"],

@@ -19632,3 +19632,8 @@ v0.99.595 - EMA W/M is alerts + history statistics now, no backtest selection an
          bot doesn't enter — your decision"; EMAs with too little history still
          alert, without statistics. The autotrade switch for EMA W/M is hidden.
          The tab shows the statistics instead of "confirmed on test".
+v0.99.596 - Charts of live signals (P/R, S/R, AMD, Mirror, Sweep): tapping an older
+         signal of a coin showed another one — the lookup took the first signal of
+         that coin within a day (P/R, S/R) or a candle (the others), i.e. the
+         newest; CFG with several signals a day always showed the open one. Now
+         the signal nearest to the tapped time is shown.
