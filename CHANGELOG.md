@@ -19614,3 +19614,21 @@ v0.99.594 - EMA W/M: a touch that fits the picture but whose EMA didn't pass the
          the reason (the EMA failed the test / too little history / outside the
          learned filter) and this EMA's learned stop / take if there is one. No
          trade on it; confirmed EMAs trade as before.
+v0.99.595 - EMA W/M is alerts + history statistics now, no backtest selection and no
+         autotrade (user: "remove all these backtests — just a notification at the
+         touch, I decide myself; search the history by our algorithm for all
+         similar trades and show what works more often"). The pattern is fixed: a
+         short, the live W/M candle reaches the EMA from below after a pump >= 1.5
+         ATR (from the live candle's or the last candles' low), the last closed
+         candle under all the EMAs but at most two, the entry at the EMA. Every
+         such touch on the history of all coins goes into the statistics per EMA:
+         the pullback within 7 days reached by 80 / 65 / 50% of them (and how
+         fast), how far past the entry the price went before the typical
+         pullback (50 / 75 / 90%), and stop / take combinations — "most
+         profitable" and "worked most often", with the share in profit, average
+         R and count (all history, fees and funding included, described — not
+         checked on new data). Each touch sends "🔔 … касание после накачки" with
+         that statistics in % of this coin, the suggested stop / take, and "the
+         bot doesn't enter — your decision"; EMAs with too little history still
+         alert, without statistics. The autotrade switch for EMA W/M is hidden.
+         The tab shows the statistics instead of "confirmed on test".

@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.594"
+APP_VERSION = "0.99.595"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16825,7 +16825,7 @@ EMW_RISE_CANDIDATES = [1.5, 2.0, 3.0]           # v0.99.577 — the live candle'
 # (EMW_RISE_LOOKBACK) and the live one, so a pump over two candles counts too
 EMW_RISE_MODES = ("live", "swing")
 EMW_MISS_CANDIDATES = [0, 1, 2]                 # the last closed candle closed under all the EMAs / all but one / but two
-EMW_ENTRY_CANDIDATES = [0.25, 0.0, -0.25]       # v0.99.575 — the limit: daily ATR before the EMA / at it / beyond it (into the wick);
+EMW_ENTRY_CANDIDATES = [0.0]                    # v0.99.595 — at the EMA only; v0.99.575 — the limit: daily ATR before the EMA / at it / beyond it (into the wick);
                                                 # v0.99.592 — the "W" entry (wait for a 4h close back under) is gone, user: "пока
                                                 # цена идёт снизу вверх и на W/M касание — не ждать откатов и закрытий, заходить сразу"
 EMW_WICK_WAIT = 12                              # 4h candles (2 days) the reaction may take after the touch
@@ -16856,8 +16856,16 @@ EMW_N_COMBOS = (sum(len(v) for v in EMW_EMAS.values()) * len(EMW_SIDES) * len(EM
                 * len(EMW_RISE_MODES) * len(EMW_MISS_CANDIDATES) * len(EMW_ENTRY_CANDIDATES) * len(EMW_COMBOS))   # 14580
 EMW_Z_TRAIN = round(statistics.NormalDist().inv_cdf(1 - 0.20 / EMW_N_COMBOS), 2)
 EMW_TEST_Z = 2.0
-EMW_MIN_TRAIN = 60
+EMW_MIN_TRAIN = 20                              # v0.99.595 — touches needed for the history statistics
 EMW_MIN_TEST = 20
+# v0.99.595 — user: "убрать все эти бэктесты: просто уведомление при касании, решение принимаю сам;
+# на истории искать по нашему алгоритму все похожие сделки и писать, что чаще отрабатывает".
+# The pattern is fixed (no more selection / pass-or-fail): a short, the live W/M candle reaches the
+# EMA from below after a pump >= EMW_RISE_MIN ATR (from the live candle's or the last candles' low),
+# the last closed candle under all the EMAs but at most EMW_MISS_MAX, the entry at the EMA. Every
+# such touch on the coins' history feeds the statistics shown in the tab and in each alert.
+EMW_RISE_MIN = 1.5
+EMW_MISS_MAX = 2
 EMW_REFRESH_SEC = int(os.environ.get("VP_EMW_REFRESH_SEC", 24 * 3600))
 EMW_POLL_SEC = int(os.environ.get("VP_EMW_POLL_SEC", 30))
 EMW_LEVELS_REFRESH_SEC = 6 * 3600
@@ -16866,7 +16874,7 @@ EMW_WATCH_PCT = 30.0                            # the "near the EMA" list: trigg
                                                 # (v0.99.589: 15 -> 30 — a weekly pump runs +50% and more; RSR's EMA 50 was 20% away)
 EMW_PREALERT_PCT = float(os.environ.get("VP_EMW_PREALERT_PCT", 5.0))   # v0.99.575 — "put the limit on" heads-up at this distance
 EMW_BACKTEST_TRIGGER = threading.Event()
-EMW_MODEL_VER = 593                             # a model of another layout is ignored and retrained
+EMW_MODEL_VER = 595                             # a model of another layout is ignored and retrained
 _emw_parts = {}
 _emw_had_data = {}
 _emw_levels = {}            # symbol -> the forming week's / month's levels
@@ -17028,6 +17036,36 @@ def _emw_res(t, hi, tk, sl):
     days = max(1.0, (te + 14400 - t[3]) / 86400)
     cost = (2 * AUTOTRADE_SIM_FEE_PCT + days * EMW_FUNDING_PCT_DAY / 100) * t[6] / (sl * t[10])
     return [round(r - cost, 3), te, code]
+
+
+def emw_hist_stats(touches):
+    """v0.99.595 — what the pattern's touches did (all history, within 7 days): the pullback reached
+    by 80 / 65 / 50% of them, how far past the EMA the price went before the typical (50%) pullback
+    in 50 / 75 / 90% of those, and the hours to it. Daily ATR and % of the price."""
+    hi = EMW_HOLD_CANDIDATES.index(7) if 7 in EMW_HOLD_CANDIDATES else 0
+    fin = [t for t in touches if t[16][3][hi][3]]
+    if len(fin) < EMW_MIN_TRAIN:
+        return {"n": len(fin)}
+    pb = []
+    for t in fin:
+        k = bisect.bisect_right(t[16][2], t[16][3][hi][2]) - 1
+        mf = t[16][0][k] if k >= 0 else 0.0
+        pb.append((mf, mf * t[10] / t[6] * 100))
+    pb_d = sorted((x[0] for x in pb), reverse=True)
+    pb_p = sorted((x[1] for x in pb), reverse=True)
+    q = lambda v, f: round(v[min(len(v) - 1, int(f * len(v)))], 2)
+    med = q(pb_d, 0.5)
+    os_d, os_p, hrs = [], [], []
+    for t in fin:
+        k = _emw_reach(t[16], hi, med)
+        if k is not None:
+            os_d.append(t[16][1][k]); os_p.append(t[16][1][k] * t[10] / t[6] * 100)
+            hrs.append((t[16][2][k] + 14400 - t[3]) / 3600)
+    os_d.sort(); os_p.sort()
+    return {"n": len(fin), "coins": None,
+            "pb": [[f, q(pb_d, f), q(pb_p, f)] for f in (0.8, 0.65, 0.5)],
+            "os": [[f, q(os_d, f), q(os_p, f)] for f in (0.5, 0.75, 0.9)] if os_d else [],
+            "pb_hours": _emw_pct(hrs, 0.5)}
 
 
 def emw_learn_take_stop(train, hi):
@@ -17288,30 +17326,25 @@ def emw_pool_select(parts, now=None):
             for sgn in EMW_SIDES:
                 items = sorted(by_setup.get((tf, n, sgn)) or [], key=lambda x: (x[1][3], x[0]))
                 key = emw_setup_key(tf, n, sgn)
-                best = None
-                for k, rm, bc, off in [(k_, m_, b_, o_) for k_ in EMW_RISE_CANDIDATES for m_ in EMW_RISE_MODES
-                                       for b_ in EMW_MISS_CANDIDATES for o_ in EMW_ENTRY_CANDIDATES]:
-                    ri = 22 if rm == "swing" else 5
-                    sub = [x for x in items if x[1][ri] >= k and x[1][17] <= bc and x[1][19] == off]
-                    train = [t for _, t in sub if bound.get(tf) is None or t[3] < bound[tf]]
-                    learned = {}
-                    for qt, qs, hold in EMW_COMBOS:
-                        hi = EMW_HOLD_CANDIDATES.index(hold)
-                        if hi not in learned:
-                            learned[hi] = emw_learn_take_stop(train, hi)
-                        ts = learned[hi].get((qt, qs))
-                        if ts is None:
-                            continue
-                        tr, te, pc, rows = _emw_trades(sub, hi, ts[0], ts[1], bound.get(tf))
-                        st_tr = emw_stats(tr)
-                        if st_tr["n"] < EMW_MIN_TRAIN or st_tr.get("z") is None:
-                            continue
-                        if best is None or (st_tr["z"], st_tr["avg"]) > (best["train"]["z"], best["train"]["avg"]):
-                            best = {"rise": k, "rise_mode": rm, "miss": bc, "off": off, "tk": ts[0], "sl": ts[1], "q_take": qt, "q_stop": qs, "hold": hold, "train": st_tr,
-                                    "test": emw_stats(te), "_pc": pc, "_rows": rows,
-                                    "hours": _emw_pct([(o[1] + 14400 - t[3]) / 3600 for _, t, o in rows], 0.5)}
-                sub = [x for x in items if x[1][22 if best and best["rise_mode"] == "swing" else 5] >= (best["rise"] if best else 0) and x[1][17] <= (best["miss"] if best else 9)
-                       and x[1][19] == (best["off"] if best else EMW_ENTRY_CANDIDATES[0])]
+                sub = [x for x in items if x[1][22] >= EMW_RISE_MIN and x[1][17] <= EMW_MISS_MAX and x[1][19] == 0.0]
+                allt = [t for _, t in sub]
+                learned = [emw_learn_take_stop(allt, hi) for hi in range(len(EMW_HOLD_CANDIDATES))]
+                grid = []
+                for qt, qs, hold in EMW_COMBOS:
+                    hi = EMW_HOLD_CANDIDATES.index(hold)
+                    ts = learned[hi].get((qt, qs))
+                    if ts is None:
+                        continue
+                    tr, _, pc, rows = _emw_trades(sub, hi, ts[0], ts[1], None)
+                    st = emw_stats(tr)
+                    if st["n"] < EMW_MIN_TRAIN:
+                        continue
+                    grid.append({"rise": EMW_RISE_MIN, "rise_mode": "swing", "miss": EMW_MISS_MAX, "off": 0.0,
+                                 "tk": ts[0], "sl": ts[1], "q_take": qt, "q_stop": qs, "hold": hold, "all": st, "_pc": pc, "_rows": rows,
+                                 "hours": _emw_pct([(o[1] + 14400 - t[3]) / 3600 for _, t, o in rows if o[2] == 1], 0.5)})
+                grid.sort(key=lambda g: (g["all"]["avg"], g["all"]["wr"]), reverse=True)
+                best = grid[0] if grid else None
+                hist = emw_hist_stats(allt)
                 fin = [x[1] for x in sub if x[1][14] is not None]
                 reacted = [t[11] for t in fin if t[14] == 1 and t[11] is not None]
                 hrs = [t[15] for t in fin if t[14] == 1 and t[15] is not None]
@@ -17326,16 +17359,16 @@ def emw_pool_select(parts, now=None):
                          "mfe7_p50": _emw_pct(mfe7, 0.5), "mfe7_p75": _emw_pct(mfe7, 0.75),
                          "atr_pct": round(statistics.median(atr_pct), 1) if atr_pct else None}
                 row = {"key": key, "tf": tf, "ema": n, "dir": "LONG" if sgn > 0 else "SHORT", "desc": emw_desc(tf, n, sgn),
-                       "learn": learn, "best": None, "significant": False, "passed": False}
+                       "learn": learn, "hist": hist, "best": None, "grid": [], "passed": False}
                 if best:
-                    te_ = best["test"]
-                    row["significant"] = best["train"]["z"] >= EMW_Z_TRAIN
-                    row["passed"] = bool(row["significant"] and te_["n"] >= EMW_MIN_TEST and te_.get("z") is not None
-                                         and te_["z"] >= EMW_TEST_Z and te_["avg"] > 0)
-                    row["best"] = {k_: best[k_] for k_ in ("rise", "rise_mode", "miss", "off", "tk", "sl", "q_take", "q_stop", "hold", "hours", "train", "test")}
+                    row["passed"] = True                   # v0.99.595 — "has statistics": alerts carry it
+                    pub = ("rise", "rise_mode", "miss", "off", "tk", "sl", "q_take", "q_stop", "hold", "hours", "all")
+                    row["best"] = {k_: best[k_] for k_ in pub}
+                    row["grid"] = [{k_: g[k_] for k_ in pub} for g in grid[:6]]
+                    often = max((g for g in grid if g["all"]["avg"] > 0), key=lambda g: (g["all"]["wr"], g["all"]["avg"]), default=None)
+                    row["often"] = {k_: often[k_] for k_ in pub} if often else None
                     coin_hist[key] = best["_pc"]
-                    keep = best["_rows"][-(400 if row["passed"] else 40):]
-                    trades_out[key] = [_emw_trade_row(sym, t, o, best, bound.get(tf)) for sym, t, o in keep][::-1]
+                    trades_out[key] = [_emw_trade_row(sym, t, o, best, None) for sym, t, o in best["_rows"][-200:]][::-1]
                 setups.append(row)
     return {"setups": setups, "chosen": [s["key"] for s in setups if s["passed"]], "bound": bound,
             "coins": len(parts), "touches": sum(len(v) for v in parts.values()), "z_train": EMW_Z_TRAIN,
@@ -17630,27 +17663,37 @@ def emw_fire(sym, lv, cfg, price, stop, take, ext, rise):
               "hold_days": cfg["best"]["hold"], "hold_until": time.time() + cfg["best"]["hold"] * 86400, "coin_hist": hist}
     with state_lock:
         STATE["emw_signals"].appendleft(record)
-    autotrade_result = None
-    if AUTOTRADE_ENABLED_EMW:
-        autotrade_result = execute_autotrade("emw", sym, direction, price, stop, take, risk_pct_override=module_risk_pct("emw"))
-        record["autotrade_fired"] = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
-        sim_execute_trade("emw", sym, direction, price, stop, take, autotrade_result.get("leverage") or 1, record,
-                          autotrade_result=autotrade_result)
-    _plan = planned_leverage(sym, direction, price, stop)
-    record["leverage"] = (autotrade_result or {}).get("leverage") or _plan
-    record["leverage_planned"] = not (autotrade_result or {}).get("leverage")
+    # v0.99.595 — an alert, not a trade (user: "решение принимаю сам"); the outcome of the suggested
+    # stop / take is still followed, for the live statistics
     arrow = "⬆️" if sgn > 0 else "⬇️"
-    move = (price - ext) / ext * 100
-    hist_txt = f"\nэта монета на этом уровне: {hist[0]} сделок, {hist[1]} в плюс, {hist[2]:+.2f}R" if hist else ""
-    if lv.get("wick") is not None:
-        hist_txt = f"\nреакция: 4ч-свеча закрылась обратно под уровнем, фитиль до {lv['wick']:.6g}" + hist_txt
-    send_telegram(f"{arrow} {sym.replace('_USDT', '')} | {cfg['desc']} · EMA W/M\n"
-                  f"живая свеча {'снизу' if sgn < 0 else 'сверху'} дошла до EMA {lv['ema']} ({lv['L']:.6g}); "
-                  f"рост от {ext:.6g} ({move:+.1f}%, {rise:.1f} ATR), была под {lv['n_def'] - lv['miss']} из {lv['n_def']} EMA\n"
-                  f"entry: {price:.6g}\nSL: {stop:.6g}  TP: {take:.6g}\nтейк — {emw_take_txt(cfg['best'], lv['datr'], price)}\nстоп — {emw_stop_pct_txt(cfg['best'], lv['datr'], price)}\n"
-                  f"держим до {cfg['best']['hold']} дн.{hist_txt}\n"
-                  f"плечо: {format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_EMW, _plan)}", category="emw")
+    move = (lv["L"] - ext) / ext * 100
+    hist_txt = f"\nэта монета на этом уровне: {hist[0]} раз, {hist[1]} в плюс, {hist[2]:+.2f}R" if hist else ""
+    send_telegram(f"🔔 {sym.replace('_USDT', '')} | {cfg['desc']} · EMA W/M — касание после накачки\n"
+                  f"живая свеча {'снизу' if sgn < 0 else 'сверху'} дошла до EMA {lv['ema']} ({lv['L']:.6g}), сейчас {price:.6g}; "
+                  f"рост от {ext:.6g} ({move:+.0f}%, {rise:.1f} ATR), была под {lv['n_def'] - lv['miss']} из {lv['n_def']} EMA\n"
+                  + emw_hist_txt(cfg, lv["datr"], price)
+                  + f"\nесли входить: SL {stop:.6g} · TP {take:.6g} · держать до {cfg['best']['hold']} дн.{hist_txt}\n"
+                  f"бот не входит — решение за тобой", category="emw")
     save_state()
+
+
+def emw_hist_txt(cfg, da, price):
+    """v0.99.595 — the history of the pattern on this EMA, in % of THIS coin (its daily ATR)"""
+    h = cfg.get("hist") or {}
+    b = cfg.get("best") or {}
+    pc = lambda v: f"{v * da / price * 100:.1f}%" if da and price else f"{v} ATR"
+    out = [f"📊 история: {h.get('n', 0)} похожих касаний этой EMA (все монеты)"]
+    if h.get("pb"):
+        out.append("• откат за 7 дн.: " + ", ".join(f"≥{pc(x[1])} у {x[0] * 100:.0f}%" for x in h["pb"])
+                   + (f" (обычно за ~{h['pb_hours']:.0f} ч)" if h.get("pb_hours") else ""))
+    if h.get("os"):
+        out.append("• вынос за вход перед откатом: " + ", ".join(f"до {pc(x[1])} у {x[0] * 100:.0f}%" for x in h["os"]))
+    for name, g in (("выгоднее всего было", b), ("чаще всего срабатывало", cfg.get("often"))):
+        if g and g.get("all") and not (name.startswith("чаще") and g.get("tk") == b.get("tk") and g.get("sl") == b.get("sl") and g.get("hold") == b.get("hold")):
+            a = g["all"]
+            out.append(f"• {name}: стоп +{pc(g['sl'])}, тейк −{pc(g['tk'])}, до {g['hold']} дн. — "
+                       f"{a['wr']}% в плюс, в среднем {a['avg']:+.2f}R ({a['n']} сделок)")
+    return "\n".join(out)
 
 
 def emw_prealert(sym, lv, cfg, price, stop, take, dist):
@@ -17662,13 +17705,13 @@ def emw_prealert(sym, lv, cfg, price, stop, take, dist):
                       f"EMA {lv['ema']}: {lv['L']:.6g}; сейчас {price:.6g}, рост от {base:.6g} ({rise_now:.1f} ATR)\n"
                       f"вход по реакции: после касания ждём закрытия 4ч-свечи обратно под {lv['T']:.6g}, стоп — "
                       f"{emw_stop_pct_txt(b, lv['datr'], lv['T'])}, тейк — {emw_take_txt(b, lv['datr'], lv['T'])}, держать до {b['hold']} дн."
-                      + ("\nбот войдёт сам" if AUTOTRADE_ENABLED_EMW else ""), category="emw")
+                      , category="emw")
         return
     where = {0.25: "чуть до EMA", 0.0: "на EMA", -0.25: "чуть за EMA (на прострел)"}.get(b.get("off"), "")
     send_telegram(f"📌 {sym.replace('_USDT', '')} | {cfg['desc']} · EMA W/M — цена в {dist:.1f}% от уровня\n"
                   f"EMA {lv['ema']}: {lv['L']:.6g}; сейчас {price:.6g}, рост от {base:.6g} ({rise_now:.1f} ATR)\n"
                   f"лимитка {where}: {lv['T']:.6g}\nSL: {stop:.6g} — {emw_stop_pct_txt(b, lv['datr'], lv['T'])}\nTP: {('%.6g' % take) if take is not None else '—'} — {emw_take_txt(b, lv['datr'], lv['T'])}\nдержать до {b['hold']} дн."
-                  + ("\nбот войдёт сам при касании" if AUTOTRADE_ENABLED_EMW else ""), category="emw")
+                  + "\n" + emw_hist_txt(cfg, lv["datr"], lv["T"]), category="emw")
 
 
 def emw_watch_alert(sym, lv, model, last, hi24, lo24, fired, now):
@@ -17691,21 +17734,20 @@ def emw_watch_alert(sym, lv, model, last, hi24, lo24, fired, now):
         return
     setup = next((x for x in (model or {}).get("setups") or [] if x["key"] == lv["key"]), None)
     b = (setup or {}).get("best")
-    why = ("эта EMA на истории не прошла проверку" if b and not setup.get("passed")
-           else "по этой EMA мало истории для проверки" if not b
-           else f"не подходит под выученный фильтр (под {lv['n_def'] - lv['miss']} из {lv['n_def']} EMA, нужно ≥ {lv['n_def'] - b['miss']})")
+    why = (f"похожих касаний этой EMA на истории меньше {EMW_MIN_TRAIN}" if not b
+           else f"под {lv['n_def'] - lv['miss']} из {lv['n_def']} EMA — меньше, чем в шаблоне")
     base = emw_base(lv, lv["ext_now"], "swing")
     lines = [f"👀 {sym.replace('_USDT', '')} | {emw_desc(lv['tf'], lv['ema'], sgn)} · EMA W/M — касание после накачки",
              f"EMA {lv['ema']}: {lv['L']:.6g}; сейчас {last:.6g}; рост от {base:.6g} ({(lv['L'] - base) / base * 100:+.0f}%, {rise:.1f} ATR), "
              f"была под {lv['n_def'] - lv['miss']} из {lv['n_def']} EMA",
-             f"⚠️ не подтверждено статистикой — {why}; бот не входит, только уведомление"]
+             f"⚠️ статистики нет: {why}; бот не входит — решение за тобой"]
     if b and b.get("sl") is not None and lv.get("datr"):
         stop = emw_sl_price(lv["L"], b["sl"], sgn, lv["datr"])
         take = emw_take_price(lv["L"], b["tk"], sgn, lv["datr"])
         lines.append(f"если входить от EMA: SL {stop:.6g} ({emw_stop_pct_txt(b, lv['datr'], lv['L'])}), "
                      f"TP {take:.6g} ({emw_take_txt(b, lv['datr'], lv['L'])})")
     with state_lock:
-        fired[fkey] = {"t": now, "skip": f"не подтверждено статистикой ({why}) — только уведомление"}
+        fired[fkey] = {"t": now, "skip": f"только уведомление: {why}"}
     send_telegram("\n".join(lines), category="emw")
 
 
@@ -29528,7 +29570,7 @@ def api_emw_status():
     except Exception as e:
         log_error(f"emw watch: {e}")
         watch = []
-    return jsonify({"enabled": EMW_ENABLED, "autotrade": AUTOTRADE_ENABLED_EMW,
+    return jsonify({"enabled": EMW_ENABLED, "autotrade": False,
                     "model": {k: v for k, v in model.items() if k not in ("coin_hist", "trades")} if model else None,
                     "watch": watch, "signals": sigs[:60], "honest": emw_honest_live(sigs), "in_flight": in_flight[:12],
                     "last_backtest_finished": st["emw_last_backtest_finished"], "backtest_running": st["emw_backtest_running"],
@@ -29537,7 +29579,7 @@ def api_emw_status():
                     "levels": {"coins": len(_emw_levels), "at": _emw_levels_meta["at"] or None,
                                "levels": sum(len(v) for v in list(_emw_levels.values()))},
                     "prices_at": max((p[3] for p in list(_emw_prices.values())), default=None),
-                    "config": {"emas": EMW_EMAS, "rise": EMW_RISE_CANDIDATES, "miss": EMW_MISS_CANDIDATES, "entry": EMW_ENTRY_CANDIDATES,
+                    "config": {"emas": EMW_EMAS, "rise": EMW_RISE_CANDIDATES, "rise_min": EMW_RISE_MIN, "miss": EMW_MISS_CANDIDATES, "entry": EMW_ENTRY_CANDIDATES,
                                "prealert_pct": EMW_PREALERT_PCT, "take_q": [round(x * 100) for x in EMW_TAKE_Q], "stop_q": [round(x * 100) for x in EMW_STOP_Q],
                                "trigger_datr": EMW_TRIGGER_DATR, "hold": EMW_HOLD_CANDIDATES, "poll_sec": EMW_POLL_SEC, "path_days": EMW_PATH_DAYS,
                                "refresh_sec": EMW_REFRESH_SEC, "combos": EMW_N_COMBOS, "z_train": EMW_Z_TRAIN,
@@ -32003,7 +32045,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradePrv"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow">
+      <div class="settingRow" style="display:none;"><!-- v0.99.595 — EMA W/M only alerts now -->
         <div>
           <div class="label">↳ EMA W/M</div>
           <div class="sub">только подтверждённые EMA; стоп и тейк — по дневному ATR, срок удержания (2 / 7 / 28 дн.) — из обучения; риск — свой «EMA» или общий</div>
@@ -34671,26 +34713,21 @@ async function refreshEmw() {
   const tfName = tf => tf === '1M' ? 'месяц' : 'неделя';
   const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
   const pctOf = (atr, ap) => atr == null || ap == null ? '' : ` <span class="dim">(~${(atr * ap).toFixed(1)}%)</span>`;
-  let h = `<details class="dim hint-block" style="margin-bottom:10px;"><summary style="cursor:pointer;"><b>📐 EMA W/M</b> — шорт: цена снизу резко дошла до EMA недели / месяца, вход на живой свече · как работает</summary>EMA текущей свечи совпадает с ценой ровно тогда, когда цена доходит до EMA закрытых свечей, поэтому уровень всей недели / месяца известен с её открытия и не перерисовывается. Цена проверяется каждые ${cfg.poll_sec || 30} сек, вход — лимиткой при касании (где именно — до EMA, на ней или за ней на прострел — выбирает обучение), а не после закрытия свечи; за ${cfg.prealert_pct}% до уровня приходит напоминание в Telegram, куда ставить лимитку. Стоп и тейк — по дневному ATR (реакция, а не недельный размах), сделка после касания проверяется по 4ч-свечам — быстрая реакция в тот же день засчитывается.
-    <br>Условия (только шорт): последняя закрытая свеча закрылась под всеми или почти всеми EMA 7/14/28/50/100 (из тех, что у монеты уже есть), новая свеча открылась под уровнем, и сама живая свеча резко выросла к EMA — «рост» = от её минимума до EMA, в ATR недели / месяца, то есть в средних свечах этого графика: нужна накачка минимум в ${(cfg.rise || [1.5])[0]} средней свечи (цена, которая болтается у EMA обычными свечами, не торгуется).
-    <br>Обучение — на всех монетах вместе (у одной монеты слишком мало недельных касаний): EMA ${(cfg.emas || {})['1w'] ? cfg.emas['1w'].join('/') : ''} (неделя), ${(cfg.emas || {})['1M'] ? cfg.emas['1M'].join('/') : ''} (месяц) × рост к EMA ≥ ${(cfg.rise || []).join('/')} ATR (самой живой свечи или от минимума последних свечей) × под всеми EMA / кроме одной / кроме двух × вход: лимитка (сразу на касании) чуть до EMA / на EMA / чуть за EMA × тейк — откат, который давали ${(cfg.take_q || []).join(' / ')}% касаний × стоп — за выносом, дальше которого не заходили ${(cfg.stop_q || []).join(' / ')}% откатов (оба в дневных ATR и считаются только по старой части истории) × держать до ${(cfg.hold || []).join('/')} дн. — ${cfg.combos} вариантов. Выбор на старых 70% истории, проверка на новых 30%; z считается по свечам (касания одной недели идут вместе), порог обучения z ≥ ${cfg.z_train} (поправка на весь перебор), теста z ≥ ${cfg.z_test}. Срок удержания выбирает обучение; комиссии и фандинг ${cfg.funding_pct_day}%/день учтены. Пересчёт раз в ${Math.round((cfg.refresh_sec || 86400) / 3600)} ч.</details>`;
-  if (d.enabled === false) h += '<div style="padding:10px 12px;margin-bottom:8px;background:var(--neg-bg);border:1px solid var(--neg);border-radius:var(--r-sm);font-size:var(--fs-sm);">⏸ <b>«EMA W/M» выключен в настройках</b> — обучение и живой скан не идут.</div>';
+  let h = `<details class="dim hint-block" style="margin-bottom:10px;"><summary style="cursor:pointer;"><b>📐 EMA W/M</b> — уведомление: цена снизу резко дошла до EMA недели / месяца на живой свече · как работает</summary>Бот не торгует сам — присылает уведомление при касании, решение за тобой. EMA текущей свечи совпадает с ценой ровно тогда, когда цена доходит до EMA закрытых свечей, поэтому уровень всей недели / месяца известен с её открытия и не перерисовывается. Цена проверяется каждые ${cfg.poll_sec || 30} сек; за ${cfg.prealert_pct}% до уровня приходит напоминание.
+    <br>Шаблон (только шорт): последняя закрытая свеча закрылась под всеми EMA 7/14/28/50/100 или всеми, кроме двух; новая свеча открылась под уровнем; к EMA была накачка ≥ ${cfg.rise_min || 1.5} средней свечи этого графика (ATR недели / месяца) — от минимума живой свечи или последних свечей.
+    <br>Статистика — все такие касания на истории всех монет (вход на EMA): какой откат и как часто был за 7 дней, как далеко выносило за вход перед откатом, и какие стоп / тейк чаще всего отрабатывали (тейк — откат, который давали ${(cfg.take_q || []).join(' / ')}% касаний, стоп — за выносом, дальше которого не заходили ${(cfg.stop_q || []).join(' / ')}% откатов, держать ${(cfg.hold || []).join(' / ')} дн.; комиссии и фандинг ${cfg.funding_pct_day}%/день учтены). Это описание прошлого, без проверки на новых данных. Пересчёт раз в ${Math.round((cfg.refresh_sec || 86400) / 3600)} ч.</details>`;
+  if (d.enabled === false) h += '<div style="padding:10px 12px;margin-bottom:8px;background:var(--neg-bg);border:1px solid var(--neg);border-radius:var(--r-sm);font-size:var(--fs-sm);">⏸ <b>«EMA W/M» выключен в настройках</b> — статистика и живой скан не идут.</div>';
   if (d.backtest_running) {
     const pct = d.progress_total ? Math.round(d.progress_done / d.progress_total * 100) : 0;
-    h += `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:4px;">обучение: ${d.progress_done}/${d.progress_total}${coresTxt(d.calc)}</div>
+    h += `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:4px;">пересчёт статистики: ${d.progress_done}/${d.progress_total}${coresTxt(d.calc)}</div>
       <div style="height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-bottom:10px;"><div style="height:100%;width:${pct}%;background:#7fd1ff;"></div></div>`;
   } else if (d.waiting_for_slot) h += '<div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">⏳ ждёт свободного слота бэктеста</div>';
-  else h += `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">последнее обучение: ${d.last_backtest_finished ? fmtDateTime(d.last_backtest_finished) : 'ещё не было — первое начнётся через ~15 мин после запуска'}</div>`;
+  else h += `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">статистика посчитана: ${d.last_backtest_finished ? fmtDateTime(d.last_backtest_finished) : 'ещё нет — первый пересчёт через ~15 мин после запуска'}</div>`;
   const lv = d.levels || {};
   h += `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">живой скан: ${lv.at ? `уровни ${lv.levels} на ${lv.coins} монетах (пересчёт ${fmtDateTime(lv.at)})` : 'уровни ещё считаются'}${d.prices_at ? ` · цена ${fmtDateTime(d.prices_at)}` : ''}</div>`;
-  h += `<div style="display:flex;gap:6px;margin-bottom:10px;"><button onclick="emwPost('/api/emw/restart_backtest')" class="zbtn">↻ Обучить заново</button>
-    <button onclick="emwPost('/api/reset/emw', 'Очистить модель и сигналы «EMA W/M»?')" class="zbtn" style="color:var(--neg);">🗑 Очистить</button></div>`;
-  if (m) {
-    const n = (m.chosen || []).length;
-    h += `<div style="padding:10px 12px;margin-bottom:10px;border-radius:var(--r-sm);font-size:var(--fs-sm);border:1px solid ${n ? 'var(--pos)' : 'var(--line)'};background:${n ? 'var(--pos-bg)' : 'var(--inset)'};">${n
-      ? `✅ Подтверждено на тесте: <b>${n}</b> — ${(m.setups || []).filter(s => s.passed).map(s => s.desc).join('; ')}. По ним идут сигналы${d.autotrade ? ' и сделки' : ''}.`
-      : `✗ Пока ни одна EMA не прошла честную проверку — сигналов нет, ниже только наблюдение и статистика. ${m.coins} монет, ${m.touches} касаний.`}</div>`;
-  }
+  h += `<div style="display:flex;gap:6px;margin-bottom:10px;"><button onclick="emwPost('/api/emw/restart_backtest')" class="zbtn">↻ Пересчитать статистику</button>
+    <button onclick="emwPost('/api/reset/emw', 'Очистить статистику и уведомления «EMA W/M»?')" class="zbtn" style="color:var(--neg);">🗑 Очистить</button></div>`;
+  if (m) h += `<div style="padding:10px 12px;margin-bottom:10px;border-radius:var(--r-sm);font-size:var(--fs-sm);border:1px solid var(--line);background:var(--inset);">🔔 Уведомления при каждом касании по шаблону — бот не входит сам. Статистика: ${m.coins} монет, ${(m.setups || []).reduce((a, s_) => a + ((s_.hist || {}).n || 0), 0)} касаний по шаблону.</div>`;
   // live: the forming candles' levels near the price
   const w = d.watch || [];
   _emwWatch = w;
@@ -34701,7 +34738,7 @@ async function refreshEmw() {
     const hist = r.hist ? ` · эта монета: ${r.hist[0]} сделок, ${r.hist[1]} в плюс, ${sgR(r.hist[2])}` : '';
     return `<div onclick="emwChartWatch(${i})" style="cursor:pointer;padding:8px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);${r.confirmed ? '' : 'opacity:.75;'}">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;"><span><b>${r.symbol.replace('_USDT', '')}</b> ${dirTxt} EMA ${r.ema} · ${tfName(r.tf)}</span>
-        <span class="dim" style="white-space:nowrap;">${r.confirmed ? '✅ по модели' : 'наблюдение'} · 📈</span></div>
+        <span class="dim" style="white-space:nowrap;">${r.confirmed ? '📊 есть статистика' : 'мало истории'} · 📈</span></div>
       <div>${near} · вход ≈ ${fmtNum(r.trigger)} (EMA ${fmtNum(r.level)}) · цена ${fmtNum(r.price)}${r.touched ? ' · <span class="dim">в этой свече уже касалась</span>' : ''}</div>
       <div class="dim">${r.rise_mode === 'swing' ? 'рост от минимума последних свечей' : 'свеча выросла от'} ${fmtNum(r.ext)} (${r.ext_pct > 0 ? '+' : ''}${r.ext_pct}% от входа) · ${r.rise} ATR${r.need_rise != null ? ` (нужно ≥ ${r.need_rise})` : ''} · под ${r.n_def - r.miss} из ${r.n_def} EMA${r.sl != null ? ` · SL ${fmtNum(r.sl)} · TP ${fmtNum(r.tp)}` : (r.wick_mode ? ' · вход по реакции (4ч закрылась обратно под уровнем)' : '')}${hist} · свеча до ${fmtDateTime(r.bar_end)}</div>
     </div>`;
@@ -34711,30 +34748,32 @@ async function refreshEmw() {
   _emwSigs = sigs;
   if (sigs.length) h += sigListHtml(sigs.map((sg, i) => sigItemHtml(sg, {onclick: `emwChartSig(${i})`, extra: [sg.desc || '', sg.level ? `EMA ${fmtNum(sg.level)}` : '', sg.ext ? `рост от ${fmtNum(sg.ext)}${sg.rise != null ? ` (${sg.rise} ATR)` : ''}` : '',
     sg.coin_hist ? `монета: ${sg.coin_hist[0]} сд., ${sg.coin_hist[1]} в плюс` : '', sg.leverage ? `плечо ${sg.leverage_planned ? '~' : ''}${sg.leverage}x` : '']})));
-  // what it learned, per EMA
+  // v0.99.595 — what the pattern's touches did, per EMA (descriptive, the whole history)
   if (m && m.setups) {
-    h += `<div class="secTitle" style="margin-top:10px;">Чему научился — все монеты вместе</div>
-      <div class="dim" style="font-size:var(--fs-xs);margin-bottom:6px;">«стоп» — насколько глубоко цена прокалывала EMA вверх перед разворотом (у касаний, давших реакцию ${cfg.react_datr} дневного ATR); «реакция» — максимальный ход вниз от входа за 2 и за 7 дней. В дневных ATR, в скобках — примерно в % цены. Лучший вариант выбран по обучению, тест его не видел.</div>`;
+    h += `<div class="secTitle" style="margin-top:10px;">Статистика по истории — все монеты вместе</div>
+      <div class="dim" style="font-size:var(--fs-xs);margin-bottom:6px;">все касания по шаблону, вход на EMA. В дневных ATR (в скобках — примерно в % цены).</div>`;
     for (const tf of ['1w', '1M']) {
       const rows = m.setups.filter(s => s.tf === tf);
       if (!rows.length) continue;
       h += `<div style="font-weight:700;margin:8px 0 2px;">${tf === '1w' ? 'Неделя' : 'Месяц'}</div>`;
       const setupHtml = s => {
-        const L = s.learn || {}, b = s.best;
-        const head = `<b>EMA ${s.ema}</b> ${s.dir === 'LONG' ? '<span class="dirb long">LONG</span>' : '<span class="dirb short">SHORT</span>'} ${s.passed ? '<span class="win">✅ подтверждено</span>' : (s.significant ? '<span class="dim">значимо на обучении, тест не прошёл</span>' : '')}`;
-        const learn = L.touches ? `касаний ${L.touches} (${L.coins} монет) · реакция ≥ ${cfg.react_datr} ATR: <b>${L.react_rate == null ? '—' : L.react_rate + '%'}</b>${L.react_hours != null ? `, обычно за ~${L.react_hours} ч` : ''}
-          <br>стоп: 75% разворотов прокалывали EMA не глубже <b>${L.mae_p75 ?? '—'} ATR</b>${pctOf(L.mae_p75, L.atr_pct)}, 90% — ${L.mae_p90 ?? '—'} ATR${pctOf(L.mae_p90, L.atr_pct)}
-          <br>реакция вниз за 2 дня: у половины до <b>${L.mfe2_p50 ?? '—'} ATR</b>${pctOf(L.mfe2_p50, L.atr_pct)}, у четверти — ${L.mfe2_p75 ?? '—'} ATR${pctOf(L.mfe2_p75, L.atr_pct)}; за 7 дней — ${L.mfe7_p50 ?? '—'} / ${L.mfe7_p75 ?? '—'} ATR · дневной ATR ≈ ${L.atr_pct ?? '—'}% цены` : '<span class="dim">касаний нет</span>';
-        const best = b ? `<div>лучшее: ${b.rise_mode === 'swing' ? 'рост от минимума последних свечей' : 'живая свеча выросла'} ≥ ${b.rise} ATR · ${['под всеми EMA', 'под всеми EMA, кроме одной', 'под всеми EMA, кроме двух'][b.miss || 0]} · ${b.off === 'W' ? 'вход по реакции (4ч закрылась обратно под EMA)' : 'лимитка ' + (b.off > 0 ? 'чуть до EMA' : (b.off < 0 ? 'чуть за EMA (на прострел)' : 'на EMA'))} · ${emwTakeStopTxt(b, L.atr_pct)} · держать до ${b.hold} дн.${b.hours != null ? ` · в сделке обычно ~${b.hours < 48 ? b.hours + ' ч' : Math.round(b.hours / 24) + ' дн.'}` : ''}</div>
-          <div style="display:flex;gap:12px;flex-wrap:wrap;"><span>обучение ${sgR(b.train.avg)} <span class="dim">n=${b.train.n} · WR ${b.train.wr}% · z=${b.train.z}</span></span>
-          <span>тест <b>${sgR(b.test.avg)}</b> <span class="dim">n=${b.test.n || 0}${b.test.n ? ` · WR ${b.test.wr}% · z=${b.test.z ?? '—'}` : ''}</span></span></div>
-          <details ontoggle="emwLoadTrades(this, '${s.key}')"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">сделки</summary><div class="btTradesBox"></div></details>`
-          : `<div class="dim">мало сделок для вывода (нужно ≥ ${m.min_train} на обучении)</div>`;
-        return `<div style="padding:8px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);"><div>${head}</div><div class="dim" style="margin:2px 0;">${learn}</div>${best}</div>`;
+        const L = s.learn || {}, b = s.best, H = s.hist || {};
+        const pc = v => pctOf(v, L.atr_pct);
+        const head = `<b>EMA ${s.ema}</b> <span class="dirb short">SHORT</span> <span class="dim">· касаний по шаблону ${H.n || 0}${L.coins ? ` (${L.coins} монет)` : ''}</span>`;
+        if (!b) return `<div style="padding:8px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);"><div>${head}</div><div class="dim">мало истории (нужно ≥ ${m.min_train} касаний) — уведомления всё равно приходят, без статистики</div></div>`;
+        const pb = (H.pb || []).map(x => `≥ <b>${x[1]} ATR</b> <span class="dim">(~${x[2]}%)</span> у ${Math.round(x[0] * 100)}%`).join(' · ');
+        const os = (H.os || []).map(x => `до <b>${x[1]} ATR</b> <span class="dim">(~${x[2]}%)</span> у ${Math.round(x[0] * 100)}%`).join(' · ');
+        const a = b.all || {};
+        const grid = (s.grid || []).map(g => `<tr><td>−${g.tk}${pc(g.tk)}</td><td>+${g.sl}${pc(g.sl)}</td><td>${g.hold} дн.</td><td>${g.all.wr}%</td><td>${sgR(g.all.avg)}</td><td class="dim">${g.all.n}</td></tr>`).join('');
+        return `<div style="padding:8px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);"><div>${head}</div>
+          ${pb ? `<div>откат за 7 дн.: ${pb}${H.pb_hours != null ? ` <span class="dim">· обычно за ~${H.pb_hours} ч</span>` : ''}</div>` : ''}
+          ${os ? `<div>вынос за вход перед откатом: ${os}</div>` : ''}
+          ${s.often && (s.often.tk !== b.tk || s.often.sl !== b.sl || s.often.hold !== b.hold) ? `<div style="margin-top:3px;">чаще всего срабатывало: тейк <b>−${s.often.tk} ATR</b>${pc(s.often.tk)} · стоп <b>+${s.often.sl} ATR</b>${pc(s.often.sl)} · до ${s.often.hold} дн. — <b>${s.often.all.wr}%</b> в плюс, в среднем ${sgR(s.often.all.avg)} <span class="dim">(${s.often.all.n} сделок)</span></div>` : ''}
+          <div style="margin-top:3px;">выгоднее всего было: тейк <b>−${b.tk} ATR</b>${pc(b.tk)} · стоп <b>+${b.sl} ATR</b>${pc(b.sl)} · до ${b.hold} дн. — <b>${a.wr}%</b> в плюс, в среднем ${sgR(a.avg)} <span class="dim">(${a.n} сделок${b.hours != null ? `, тейк обычно за ~${b.hours < 48 ? b.hours + ' ч' : Math.round(b.hours / 24) + ' дн.'}` : ''})</span></div>
+          <details><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">другие стоп / тейк</summary><div style="overflow-x:auto;"><table style="font-size:var(--fs-sm);white-space:nowrap;"><thead><tr><th>тейк</th><th>стоп</th><th>держать</th><th>в плюс</th><th>средний</th><th>сделок</th></tr></thead><tbody>${grid}</tbody></table></div></details>
+          <details ontoggle="emwLoadTrades(this, '${s.key}')"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">сделки на истории</summary><div class="btTradesBox"></div></details></div>`;
       };
-      const top = rows.filter(s => s.passed || s.significant || (s.best && s.best.test && s.best.test.avg > 0));
-      const rest = rows.filter(s => !top.includes(s));
-      h += top.map(setupHtml).join('') + (rest.length ? `<details><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);padding:6px 0;border-top:1px solid var(--line);">остальные EMA — без перевеса или мало данных (${rest.length})</summary>${rest.map(setupHtml).join('')}</details>` : '');
+      h += rows.map(setupHtml).join('');
     }
   }
   setPanelHtml(panel, h);
