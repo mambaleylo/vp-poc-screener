@@ -1,0 +1,17 @@
+# Секреты
+.env
+
+# База и её резервные копии (в ней история ваших запросов и Telegram ID)
+data/*.sqlite3
+data/*.sqlite3-*
+data/*.bak
+data/*.lock
+data/exports/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.log

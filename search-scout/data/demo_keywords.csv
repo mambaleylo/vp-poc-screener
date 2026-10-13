@@ -1,0 +1,403 @@
+# ТЕСТОВЫЕ СИНТЕТИЧЕСКИЕ ДАННЫЕ. Это НЕ реальная статистика Wordstat.
+# Числа сгенерированы скриптом для проверки работы бота (рост, стабильность, падение,
+# всплеск, сезонность, малый объём). Не используйте их для принятия решений.
+phrase,count,period,date,topic,source
+pdf в excel онлайн много файлов,917,month,2025-08-01,documents_files,demo-synthetic
+pdf в excel онлайн много файлов,898,month,2025-09-01,documents_files,demo-synthetic
+pdf в excel онлайн много файлов,993,month,2025-10-01,documents_files,demo-synthetic
+pdf в excel онлайн много файлов,1046,month,2025-11-01,documents_files,demo-synthetic
+pdf в excel онлайн много файлов,1190,month,2025-12-01,documents_files,demo-synthetic
+pdf в excel онлайн много файлов,1245,month,2026-01-01,documents_files,demo-synthetic
+pdf в excel онлайн много файлов,1348,month,2026-02-01,documents_files,demo-synthetic
+pdf в excel онлайн много файлов,1263,month,2026-03-01,documents_files,demo-synthetic
+pdf в excel онлайн много файлов,1388,month,2026-04-01,documents_files,demo-synthetic
+pdf в excel онлайн много файлов,1370,month,2026-05-01,documents_files,demo-synthetic
+pdf в excel онлайн много файлов,1469,month,2026-06-01,documents_files,demo-synthetic
+pdf в excel онлайн много файлов,1594,month,2026-07-01,documents_files,demo-synthetic
+pdf в excel онлайн много файлов,1546,month,2026-08-01,documents_files,demo-synthetic
+pdf в excel онлайн много файлов,1646,month,2026-09-01,documents_files,demo-synthetic
+объединить pdf онлайн,4083,month,2025-08-01,documents_files,demo-synthetic
+объединить pdf онлайн,4025,month,2025-09-01,documents_files,demo-synthetic
+объединить pdf онлайн,3843,month,2025-10-01,documents_files,demo-synthetic
+объединить pdf онлайн,4049,month,2025-11-01,documents_files,demo-synthetic
+объединить pdf онлайн,4173,month,2025-12-01,documents_files,demo-synthetic
+объединить pdf онлайн,3723,month,2026-01-01,documents_files,demo-synthetic
+объединить pdf онлайн,4171,month,2026-02-01,documents_files,demo-synthetic
+объединить pdf онлайн,4110,month,2026-03-01,documents_files,demo-synthetic
+объединить pdf онлайн,3910,month,2026-04-01,documents_files,demo-synthetic
+объединить pdf онлайн,3807,month,2026-05-01,documents_files,demo-synthetic
+объединить pdf онлайн,4256,month,2026-06-01,documents_files,demo-synthetic
+объединить pdf онлайн,3908,month,2026-07-01,documents_files,demo-synthetic
+объединить pdf онлайн,3771,month,2026-08-01,documents_files,demo-synthetic
+объединить pdf онлайн,3774,month,2026-09-01,documents_files,demo-synthetic
+распознать таблицу из pdf в excel,629,month,2025-08-01,documents_files,demo-synthetic
+распознать таблицу из pdf в excel,651,month,2025-09-01,documents_files,demo-synthetic
+распознать таблицу из pdf в excel,713,month,2025-10-01,documents_files,demo-synthetic
+распознать таблицу из pdf в excel,749,month,2025-11-01,documents_files,demo-synthetic
+распознать таблицу из pdf в excel,771,month,2025-12-01,documents_files,demo-synthetic
+распознать таблицу из pdf в excel,863,month,2026-01-01,documents_files,demo-synthetic
+распознать таблицу из pdf в excel,837,month,2026-02-01,documents_files,demo-synthetic
+распознать таблицу из pdf в excel,900,month,2026-03-01,documents_files,demo-synthetic
+распознать таблицу из pdf в excel,979,month,2026-04-01,documents_files,demo-synthetic
+распознать таблицу из pdf в excel,994,month,2026-05-01,documents_files,demo-synthetic
+распознать таблицу из pdf в excel,1071,month,2026-06-01,documents_files,demo-synthetic
+распознать таблицу из pdf в excel,1073,month,2026-07-01,documents_files,demo-synthetic
+распознать таблицу из pdf в excel,1135,month,2026-08-01,documents_files,demo-synthetic
+распознать таблицу из pdf в excel,1073,month,2026-09-01,documents_files,demo-synthetic
+конвертер word в pdf скачать бесплатно,2885,month,2025-08-01,documents_files,demo-synthetic
+конвертер word в pdf скачать бесплатно,2765,month,2025-09-01,documents_files,demo-synthetic
+конвертер word в pdf скачать бесплатно,2541,month,2025-10-01,documents_files,demo-synthetic
+конвертер word в pdf скачать бесплатно,2454,month,2025-11-01,documents_files,demo-synthetic
+конвертер word в pdf скачать бесплатно,2265,month,2025-12-01,documents_files,demo-synthetic
+конвертер word в pdf скачать бесплатно,2180,month,2026-01-01,documents_files,demo-synthetic
+конвертер word в pdf скачать бесплатно,2139,month,2026-02-01,documents_files,demo-synthetic
+конвертер word в pdf скачать бесплатно,1913,month,2026-03-01,documents_files,demo-synthetic
+конвертер word в pdf скачать бесплатно,1767,month,2026-04-01,documents_files,demo-synthetic
+конвертер word в pdf скачать бесплатно,1582,month,2026-05-01,documents_files,demo-synthetic
+конвертер word в pdf скачать бесплатно,1451,month,2026-06-01,documents_files,demo-synthetic
+конвертер word в pdf скачать бесплатно,1432,month,2026-07-01,documents_files,demo-synthetic
+конвертер word в pdf скачать бесплатно,1224,month,2026-08-01,documents_files,demo-synthetic
+конвертер word в pdf скачать бесплатно,1066,month,2026-09-01,documents_files,demo-synthetic
+генератор счетов для ип онлайн,667,month,2025-08-01,invoices_acts,demo-synthetic
+генератор счетов для ип онлайн,773,month,2025-09-01,invoices_acts,demo-synthetic
+генератор счетов для ип онлайн,760,month,2025-10-01,invoices_acts,demo-synthetic
+генератор счетов для ип онлайн,832,month,2025-11-01,invoices_acts,demo-synthetic
+генератор счетов для ип онлайн,957,month,2025-12-01,invoices_acts,demo-synthetic
+генератор счетов для ип онлайн,963,month,2026-01-01,invoices_acts,demo-synthetic
+генератор счетов для ип онлайн,1001,month,2026-02-01,invoices_acts,demo-synthetic
+генератор счетов для ип онлайн,1069,month,2026-03-01,invoices_acts,demo-synthetic
+генератор счетов для ип онлайн,1144,month,2026-04-01,invoices_acts,demo-synthetic
+генератор счетов для ип онлайн,1185,month,2026-05-01,invoices_acts,demo-synthetic
+генератор счетов для ип онлайн,1144,month,2026-06-01,invoices_acts,demo-synthetic
+генератор счетов для ип онлайн,1157,month,2026-07-01,invoices_acts,demo-synthetic
+генератор счетов для ип онлайн,1254,month,2026-08-01,invoices_acts,demo-synthetic
+генератор счетов для ип онлайн,1293,month,2026-09-01,invoices_acts,demo-synthetic
+акт выполненных работ онлайн бесплатно,2398,month,2025-08-01,invoices_acts,demo-synthetic
+акт выполненных работ онлайн бесплатно,2655,month,2025-09-01,invoices_acts,demo-synthetic
+акт выполненных работ онлайн бесплатно,2631,month,2025-10-01,invoices_acts,demo-synthetic
+акт выполненных работ онлайн бесплатно,2435,month,2025-11-01,invoices_acts,demo-synthetic
+акт выполненных работ онлайн бесплатно,2554,month,2025-12-01,invoices_acts,demo-synthetic
+акт выполненных работ онлайн бесплатно,2463,month,2026-01-01,invoices_acts,demo-synthetic
+акт выполненных работ онлайн бесплатно,2645,month,2026-02-01,invoices_acts,demo-synthetic
+акт выполненных работ онлайн бесплатно,2485,month,2026-03-01,invoices_acts,demo-synthetic
+акт выполненных работ онлайн бесплатно,2417,month,2026-04-01,invoices_acts,demo-synthetic
+акт выполненных работ онлайн бесплатно,2411,month,2026-05-01,invoices_acts,demo-synthetic
+акт выполненных работ онлайн бесплатно,2521,month,2026-06-01,invoices_acts,demo-synthetic
+акт выполненных работ онлайн бесплатно,2416,month,2026-07-01,invoices_acts,demo-synthetic
+акт выполненных работ онлайн бесплатно,2529,month,2026-08-01,invoices_acts,demo-synthetic
+акт выполненных работ онлайн бесплатно,2639,month,2026-09-01,invoices_acts,demo-synthetic
+как автоматизировать выставление счетов,118,month,2025-08-01,invoices_acts,demo-synthetic
+как автоматизировать выставление счетов,123,month,2025-09-01,invoices_acts,demo-synthetic
+как автоматизировать выставление счетов,146,month,2025-10-01,invoices_acts,demo-synthetic
+как автоматизировать выставление счетов,145,month,2025-11-01,invoices_acts,demo-synthetic
+как автоматизировать выставление счетов,144,month,2025-12-01,invoices_acts,demo-synthetic
+как автоматизировать выставление счетов,151,month,2026-01-01,invoices_acts,demo-synthetic
+как автоматизировать выставление счетов,161,month,2026-02-01,invoices_acts,demo-synthetic
+как автоматизировать выставление счетов,181,month,2026-03-01,invoices_acts,demo-synthetic
+как автоматизировать выставление счетов,194,month,2026-04-01,invoices_acts,demo-synthetic
+как автоматизировать выставление счетов,193,month,2026-05-01,invoices_acts,demo-synthetic
+как автоматизировать выставление счетов,191,month,2026-06-01,invoices_acts,demo-synthetic
+как автоматизировать выставление счетов,208,month,2026-07-01,invoices_acts,demo-synthetic
+как автоматизировать выставление счетов,236,month,2026-08-01,invoices_acts,demo-synthetic
+как автоматизировать выставление счетов,230,month,2026-09-01,invoices_acts,demo-synthetic
+коммерческое предложение шаблон,921,month,2025-08-01,invoices_acts,demo-synthetic
+коммерческое предложение шаблон,1323,month,2025-09-01,invoices_acts,demo-synthetic
+коммерческое предложение шаблон,1676,month,2025-10-01,invoices_acts,demo-synthetic
+коммерческое предложение шаблон,2412,month,2025-11-01,invoices_acts,demo-synthetic
+коммерческое предложение шаблон,2804,month,2025-12-01,invoices_acts,demo-synthetic
+коммерческое предложение шаблон,2894,month,2026-01-01,invoices_acts,demo-synthetic
+коммерческое предложение шаблон,2646,month,2026-02-01,invoices_acts,demo-synthetic
+коммерческое предложение шаблон,2386,month,2026-03-01,invoices_acts,demo-synthetic
+коммерческое предложение шаблон,1702,month,2026-04-01,invoices_acts,demo-synthetic
+коммерческое предложение шаблон,1248,month,2026-05-01,invoices_acts,demo-synthetic
+коммерческое предложение шаблон,859,month,2026-06-01,invoices_acts,demo-synthetic
+коммерческое предложение шаблон,765,month,2026-07-01,invoices_acts,demo-synthetic
+коммерческое предложение шаблон,910,month,2026-08-01,invoices_acts,demo-synthetic
+коммерческое предложение шаблон,1218,month,2026-09-01,invoices_acts,demo-synthetic
+аналитика wildberries сервис цена,1500,month,2025-08-01,marketplaces,demo-synthetic
+аналитика wildberries сервис цена,1532,month,2025-09-01,marketplaces,demo-synthetic
+аналитика wildberries сервис цена,1808,month,2025-10-01,marketplaces,demo-synthetic
+аналитика wildberries сервис цена,1909,month,2025-11-01,marketplaces,demo-synthetic
+аналитика wildberries сервис цена,1865,month,2025-12-01,marketplaces,demo-synthetic
+аналитика wildberries сервис цена,2064,month,2026-01-01,marketplaces,demo-synthetic
+аналитика wildberries сервис цена,2162,month,2026-02-01,marketplaces,demo-synthetic
+аналитика wildberries сервис цена,2126,month,2026-03-01,marketplaces,demo-synthetic
+аналитика wildberries сервис цена,2425,month,2026-04-01,marketplaces,demo-synthetic
+аналитика wildberries сервис цена,2458,month,2026-05-01,marketplaces,demo-synthetic
+аналитика wildberries сервис цена,2649,month,2026-06-01,marketplaces,demo-synthetic
+аналитика wildberries сервис цена,2666,month,2026-07-01,marketplaces,demo-synthetic
+аналитика wildberries сервис цена,2567,month,2026-08-01,marketplaces,demo-synthetic
+аналитика wildberries сервис цена,2794,month,2026-09-01,marketplaces,demo-synthetic
+калькулятор юнит экономики ozon,746,month,2025-08-01,marketplaces,demo-synthetic
+калькулятор юнит экономики ozon,907,month,2025-09-01,marketplaces,demo-synthetic
+калькулятор юнит экономики ozon,960,month,2025-10-01,marketplaces,demo-synthetic
+калькулятор юнит экономики ozon,1012,month,2025-11-01,marketplaces,demo-synthetic
+калькулятор юнит экономики ozon,996,month,2025-12-01,marketplaces,demo-synthetic
+калькулятор юнит экономики ozon,1013,month,2026-01-01,marketplaces,demo-synthetic
+калькулятор юнит экономики ozon,1196,month,2026-02-01,marketplaces,demo-synthetic
+калькулятор юнит экономики ozon,1266,month,2026-03-01,marketplaces,demo-synthetic
+калькулятор юнит экономики ozon,1175,month,2026-04-01,marketplaces,demo-synthetic
+калькулятор юнит экономики ozon,1301,month,2026-05-01,marketplaces,demo-synthetic
+калькулятор юнит экономики ozon,1277,month,2026-06-01,marketplaces,demo-synthetic
+калькулятор юнит экономики ozon,1467,month,2026-07-01,marketplaces,demo-synthetic
+калькулятор юнит экономики ozon,1526,month,2026-08-01,marketplaces,demo-synthetic
+калькулятор юнит экономики ozon,1448,month,2026-09-01,marketplaces,demo-synthetic
+как отслеживать цены конкурентов на wildberries,298,month,2025-08-01,marketplaces,demo-synthetic
+как отслеживать цены конкурентов на wildberries,302,month,2025-09-01,marketplaces,demo-synthetic
+как отслеживать цены конкурентов на wildberries,290,month,2025-10-01,marketplaces,demo-synthetic
+как отслеживать цены конкурентов на wildberries,315,month,2025-11-01,marketplaces,demo-synthetic
+как отслеживать цены конкурентов на wildberries,296,month,2025-12-01,marketplaces,demo-synthetic
+как отслеживать цены конкурентов на wildberries,287,month,2026-01-01,marketplaces,demo-synthetic
+как отслеживать цены конкурентов на wildberries,301,month,2026-02-01,marketplaces,demo-synthetic
+как отслеживать цены конкурентов на wildberries,309,month,2026-03-01,marketplaces,demo-synthetic
+как отслеживать цены конкурентов на wildberries,287,month,2026-04-01,marketplaces,demo-synthetic
+как отслеживать цены конкурентов на wildberries,292,month,2026-05-01,marketplaces,demo-synthetic
+как отслеживать цены конкурентов на wildberries,320,month,2026-06-01,marketplaces,demo-synthetic
+как отслеживать цены конкурентов на wildberries,306,month,2026-07-01,marketplaces,demo-synthetic
+как отслеживать цены конкурентов на wildberries,297,month,2026-08-01,marketplaces,demo-synthetic
+как отслеживать цены конкурентов на wildberries,300,month,2026-09-01,marketplaces,demo-synthetic
+бот для записи клиентов в салон,473,month,2025-08-01,telegram_bots,demo-synthetic
+бот для записи клиентов в салон,514,month,2025-09-01,telegram_bots,demo-synthetic
+бот для записи клиентов в салон,557,month,2025-10-01,telegram_bots,demo-synthetic
+бот для записи клиентов в салон,612,month,2025-11-01,telegram_bots,demo-synthetic
+бот для записи клиентов в салон,615,month,2025-12-01,telegram_bots,demo-synthetic
+бот для записи клиентов в салон,648,month,2026-01-01,telegram_bots,demo-synthetic
+бот для записи клиентов в салон,667,month,2026-02-01,telegram_bots,demo-synthetic
+бот для записи клиентов в салон,758,month,2026-03-01,telegram_bots,demo-synthetic
+бот для записи клиентов в салон,750,month,2026-04-01,telegram_bots,demo-synthetic
+бот для записи клиентов в салон,861,month,2026-05-01,telegram_bots,demo-synthetic
+бот для записи клиентов в салон,892,month,2026-06-01,telegram_bots,demo-synthetic
+бот для записи клиентов в салон,831,month,2026-07-01,telegram_bots,demo-synthetic
+бот для записи клиентов в салон,886,month,2026-08-01,telegram_bots,demo-synthetic
+бот для записи клиентов в салон,977,month,2026-09-01,telegram_bots,demo-synthetic
+заказать телеграм бота для магазина цена,863,month,2025-08-01,telegram_bots,demo-synthetic
+заказать телеграм бота для магазина цена,853,month,2025-09-01,telegram_bots,demo-synthetic
+заказать телеграм бота для магазина цена,954,month,2025-10-01,telegram_bots,demo-synthetic
+заказать телеграм бота для магазина цена,908,month,2025-11-01,telegram_bots,demo-synthetic
+заказать телеграм бота для магазина цена,896,month,2025-12-01,telegram_bots,demo-synthetic
+заказать телеграм бота для магазина цена,935,month,2026-01-01,telegram_bots,demo-synthetic
+заказать телеграм бота для магазина цена,938,month,2026-02-01,telegram_bots,demo-synthetic
+заказать телеграм бота для магазина цена,860,month,2026-03-01,telegram_bots,demo-synthetic
+заказать телеграм бота для магазина цена,849,month,2026-04-01,telegram_bots,demo-synthetic
+заказать телеграм бота для магазина цена,891,month,2026-05-01,telegram_bots,demo-synthetic
+заказать телеграм бота для магазина цена,890,month,2026-06-01,telegram_bots,demo-synthetic
+заказать телеграм бота для магазина цена,895,month,2026-07-01,telegram_bots,demo-synthetic
+заказать телеграм бота для магазина цена,928,month,2026-08-01,telegram_bots,demo-synthetic
+заказать телеграм бота для магазина цена,921,month,2026-09-01,telegram_bots,demo-synthetic
+конструктор телеграм ботов бесплатно,2349,month,2025-08-01,telegram_bots,demo-synthetic
+конструктор телеграм ботов бесплатно,1972,month,2025-09-01,telegram_bots,demo-synthetic
+конструктор телеграм ботов бесплатно,1953,month,2025-10-01,telegram_bots,demo-synthetic
+конструктор телеграм ботов бесплатно,1827,month,2025-11-01,telegram_bots,demo-synthetic
+конструктор телеграм ботов бесплатно,1849,month,2025-12-01,telegram_bots,demo-synthetic
+конструктор телеграм ботов бесплатно,1591,month,2026-01-01,telegram_bots,demo-synthetic
+конструктор телеграм ботов бесплатно,1473,month,2026-02-01,telegram_bots,demo-synthetic
+конструктор телеграм ботов бесплатно,1419,month,2026-03-01,telegram_bots,demo-synthetic
+конструктор телеграм ботов бесплатно,1305,month,2026-04-01,telegram_bots,demo-synthetic
+конструктор телеграм ботов бесплатно,1172,month,2026-05-01,telegram_bots,demo-synthetic
+конструктор телеграм ботов бесплатно,1061,month,2026-06-01,telegram_bots,demo-synthetic
+конструктор телеграм ботов бесплатно,1048,month,2026-07-01,telegram_bots,demo-synthetic
+конструктор телеграм ботов бесплатно,872,month,2026-08-01,telegram_bots,demo-synthetic
+конструктор телеграм ботов бесплатно,808,month,2026-09-01,telegram_bots,demo-synthetic
+парсер цен конкурентов для маркетплейса,402,month,2025-08-01,data_scraping,demo-synthetic
+парсер цен конкурентов для маркетплейса,401,month,2025-09-01,data_scraping,demo-synthetic
+парсер цен конкурентов для маркетплейса,487,month,2025-10-01,data_scraping,demo-synthetic
+парсер цен конкурентов для маркетплейса,506,month,2025-11-01,data_scraping,demo-synthetic
+парсер цен конкурентов для маркетплейса,545,month,2025-12-01,data_scraping,demo-synthetic
+парсер цен конкурентов для маркетплейса,572,month,2026-01-01,data_scraping,demo-synthetic
+парсер цен конкурентов для маркетплейса,595,month,2026-02-01,data_scraping,demo-synthetic
+парсер цен конкурентов для маркетплейса,568,month,2026-03-01,data_scraping,demo-synthetic
+парсер цен конкурентов для маркетплейса,622,month,2026-04-01,data_scraping,demo-synthetic
+парсер цен конкурентов для маркетплейса,625,month,2026-05-01,data_scraping,demo-synthetic
+парсер цен конкурентов для маркетплейса,670,month,2026-06-01,data_scraping,demo-synthetic
+парсер цен конкурентов для маркетплейса,664,month,2026-07-01,data_scraping,demo-synthetic
+парсер цен конкурентов для маркетплейса,723,month,2026-08-01,data_scraping,demo-synthetic
+парсер цен конкурентов для маркетплейса,815,month,2026-09-01,data_scraping,demo-synthetic
+выгрузить данные с сайта в excel,338,month,2025-08-01,data_scraping,demo-synthetic
+выгрузить данные с сайта в excel,363,month,2025-09-01,data_scraping,demo-synthetic
+выгрузить данные с сайта в excel,347,month,2025-10-01,data_scraping,demo-synthetic
+выгрузить данные с сайта в excel,346,month,2025-11-01,data_scraping,demo-synthetic
+выгрузить данные с сайта в excel,372,month,2025-12-01,data_scraping,demo-synthetic
+выгрузить данные с сайта в excel,374,month,2026-01-01,data_scraping,demo-synthetic
+выгрузить данные с сайта в excel,352,month,2026-02-01,data_scraping,demo-synthetic
+выгрузить данные с сайта в excel,360,month,2026-03-01,data_scraping,demo-synthetic
+выгрузить данные с сайта в excel,333,month,2026-04-01,data_scraping,demo-synthetic
+выгрузить данные с сайта в excel,340,month,2026-05-01,data_scraping,demo-synthetic
+выгрузить данные с сайта в excel,372,month,2026-06-01,data_scraping,demo-synthetic
+выгрузить данные с сайта в excel,353,month,2026-07-01,data_scraping,demo-synthetic
+выгрузить данные с сайта в excel,352,month,2026-08-01,data_scraping,demo-synthetic
+выгрузить данные с сайта в excel,362,month,2026-09-01,data_scraping,demo-synthetic
+как автоматизировать рутинные задачи в excel,187,month,2025-08-01,routine_automation,demo-synthetic
+как автоматизировать рутинные задачи в excel,216,month,2025-09-01,routine_automation,demo-synthetic
+как автоматизировать рутинные задачи в excel,228,month,2025-10-01,routine_automation,demo-synthetic
+как автоматизировать рутинные задачи в excel,253,month,2025-11-01,routine_automation,demo-synthetic
+как автоматизировать рутинные задачи в excel,243,month,2025-12-01,routine_automation,demo-synthetic
+как автоматизировать рутинные задачи в excel,287,month,2026-01-01,routine_automation,demo-synthetic
+как автоматизировать рутинные задачи в excel,267,month,2026-02-01,routine_automation,demo-synthetic
+как автоматизировать рутинные задачи в excel,284,month,2026-03-01,routine_automation,demo-synthetic
+как автоматизировать рутинные задачи в excel,316,month,2026-04-01,routine_automation,demo-synthetic
+как автоматизировать рутинные задачи в excel,333,month,2026-05-01,routine_automation,demo-synthetic
+как автоматизировать рутинные задачи в excel,327,month,2026-06-01,routine_automation,demo-synthetic
+как автоматизировать рутинные задачи в excel,335,month,2026-07-01,routine_automation,demo-synthetic
+как автоматизировать рутинные задачи в excel,388,month,2026-08-01,routine_automation,demo-synthetic
+как автоматизировать рутинные задачи в excel,368,month,2026-09-01,routine_automation,demo-synthetic
+массовая рассылка писем программа,607,month,2025-08-01,routine_automation,demo-synthetic
+массовая рассылка писем программа,610,month,2025-09-01,routine_automation,demo-synthetic
+массовая рассылка писем программа,593,month,2025-10-01,routine_automation,demo-synthetic
+массовая рассылка писем программа,607,month,2025-11-01,routine_automation,demo-synthetic
+массовая рассылка писем программа,601,month,2025-12-01,routine_automation,demo-synthetic
+массовая рассылка писем программа,636,month,2026-01-01,routine_automation,demo-synthetic
+массовая рассылка писем программа,575,month,2026-02-01,routine_automation,demo-synthetic
+массовая рассылка писем программа,618,month,2026-03-01,routine_automation,demo-synthetic
+массовая рассылка писем программа,578,month,2026-04-01,routine_automation,demo-synthetic
+массовая рассылка писем программа,591,month,2026-05-01,routine_automation,demo-synthetic
+массовая рассылка писем программа,614,month,2026-06-01,routine_automation,demo-synthetic
+массовая рассылка писем программа,583,month,2026-07-01,routine_automation,demo-synthetic
+массовая рассылка писем программа,584,month,2026-08-01,routine_automation,demo-synthetic
+массовая рассылка писем программа,3105,month,2026-09-01,routine_automation,demo-synthetic
+отчет по продажам автоматически в телеграм,141,month,2025-08-01,analytics_reports,demo-synthetic
+отчет по продажам автоматически в телеграм,159,month,2025-09-01,analytics_reports,demo-synthetic
+отчет по продажам автоматически в телеграм,182,month,2025-10-01,analytics_reports,demo-synthetic
+отчет по продажам автоматически в телеграм,194,month,2025-11-01,analytics_reports,demo-synthetic
+отчет по продажам автоматически в телеграм,180,month,2025-12-01,analytics_reports,demo-synthetic
+отчет по продажам автоматически в телеграм,194,month,2026-01-01,analytics_reports,demo-synthetic
+отчет по продажам автоматически в телеграм,205,month,2026-02-01,analytics_reports,demo-synthetic
+отчет по продажам автоматически в телеграм,237,month,2026-03-01,analytics_reports,demo-synthetic
+отчет по продажам автоматически в телеграм,246,month,2026-04-01,analytics_reports,demo-synthetic
+отчет по продажам автоматически в телеграм,257,month,2026-05-01,analytics_reports,demo-synthetic
+отчет по продажам автоматически в телеграм,250,month,2026-06-01,analytics_reports,demo-synthetic
+отчет по продажам автоматически в телеграм,252,month,2026-07-01,analytics_reports,demo-synthetic
+отчет по продажам автоматически в телеграм,288,month,2026-08-01,analytics_reports,demo-synthetic
+отчет по продажам автоматически в телеграм,294,month,2026-09-01,analytics_reports,demo-synthetic
+дашборд для малого бизнеса,406,month,2025-08-01,analytics_reports,demo-synthetic
+дашборд для малого бизнеса,427,month,2025-09-01,analytics_reports,demo-synthetic
+дашборд для малого бизнеса,408,month,2025-10-01,analytics_reports,demo-synthetic
+дашборд для малого бизнеса,372,month,2025-11-01,analytics_reports,demo-synthetic
+дашборд для малого бизнеса,417,month,2025-12-01,analytics_reports,demo-synthetic
+дашборд для малого бизнеса,388,month,2026-01-01,analytics_reports,demo-synthetic
+дашборд для малого бизнеса,409,month,2026-02-01,analytics_reports,demo-synthetic
+дашборд для малого бизнеса,424,month,2026-03-01,analytics_reports,demo-synthetic
+дашборд для малого бизнеса,379,month,2026-04-01,analytics_reports,demo-synthetic
+дашборд для малого бизнеса,378,month,2026-05-01,analytics_reports,demo-synthetic
+дашборд для малого бизнеса,377,month,2026-06-01,analytics_reports,demo-synthetic
+дашборд для малого бизнеса,402,month,2026-07-01,analytics_reports,demo-synthetic
+дашборд для малого бизнеса,387,month,2026-08-01,analytics_reports,demo-synthetic
+дашборд для малого бизнеса,405,month,2026-09-01,analytics_reports,demo-synthetic
+аналог amocrm для малого бизнеса,721,month,2025-08-01,cheap_alternatives,demo-synthetic
+аналог amocrm для малого бизнеса,717,month,2025-09-01,cheap_alternatives,demo-synthetic
+аналог amocrm для малого бизнеса,812,month,2025-10-01,cheap_alternatives,demo-synthetic
+аналог amocrm для малого бизнеса,819,month,2025-11-01,cheap_alternatives,demo-synthetic
+аналог amocrm для малого бизнеса,894,month,2025-12-01,cheap_alternatives,demo-synthetic
+аналог amocrm для малого бизнеса,998,month,2026-01-01,cheap_alternatives,demo-synthetic
+аналог amocrm для малого бизнеса,1042,month,2026-02-01,cheap_alternatives,demo-synthetic
+аналог amocrm для малого бизнеса,983,month,2026-03-01,cheap_alternatives,demo-synthetic
+аналог amocrm для малого бизнеса,1080,month,2026-04-01,cheap_alternatives,demo-synthetic
+аналог amocrm для малого бизнеса,1105,month,2026-05-01,cheap_alternatives,demo-synthetic
+аналог amocrm для малого бизнеса,1107,month,2026-06-01,cheap_alternatives,demo-synthetic
+аналог amocrm для малого бизнеса,1286,month,2026-07-01,cheap_alternatives,demo-synthetic
+аналог amocrm для малого бизнеса,1312,month,2026-08-01,cheap_alternatives,demo-synthetic
+аналог amocrm для малого бизнеса,1292,month,2026-09-01,cheap_alternatives,demo-synthetic
+чем заменить 1с для ип,465,month,2025-08-01,cheap_alternatives,demo-synthetic
+чем заменить 1с для ип,484,month,2025-09-01,cheap_alternatives,demo-synthetic
+чем заменить 1с для ип,507,month,2025-10-01,cheap_alternatives,demo-synthetic
+чем заменить 1с для ип,507,month,2025-11-01,cheap_alternatives,demo-synthetic
+чем заменить 1с для ип,541,month,2025-12-01,cheap_alternatives,demo-synthetic
+чем заменить 1с для ип,640,month,2026-01-01,cheap_alternatives,demo-synthetic
+чем заменить 1с для ип,675,month,2026-02-01,cheap_alternatives,demo-synthetic
+чем заменить 1с для ип,674,month,2026-03-01,cheap_alternatives,demo-synthetic
+чем заменить 1с для ип,734,month,2026-04-01,cheap_alternatives,demo-synthetic
+чем заменить 1с для ип,741,month,2026-05-01,cheap_alternatives,demo-synthetic
+чем заменить 1с для ип,727,month,2026-06-01,cheap_alternatives,demo-synthetic
+чем заменить 1с для ип,754,month,2026-07-01,cheap_alternatives,demo-synthetic
+чем заменить 1с для ип,805,month,2026-08-01,cheap_alternatives,demo-synthetic
+чем заменить 1с для ип,907,month,2026-09-01,cheap_alternatives,demo-synthetic
+чек для самозанятого как сформировать,1000,month,2025-08-01,freelancers,demo-synthetic
+чек для самозанятого как сформировать,1470,month,2025-09-01,freelancers,demo-synthetic
+чек для самозанятого как сформировать,2111,month,2025-10-01,freelancers,demo-synthetic
+чек для самозанятого как сформировать,2494,month,2025-11-01,freelancers,demo-synthetic
+чек для самозанятого как сформировать,2932,month,2025-12-01,freelancers,demo-synthetic
+чек для самозанятого как сформировать,3022,month,2026-01-01,freelancers,demo-synthetic
+чек для самозанятого как сформировать,3158,month,2026-02-01,freelancers,demo-synthetic
+чек для самозанятого как сформировать,2739,month,2026-03-01,freelancers,demo-synthetic
+чек для самозанятого как сформировать,1973,month,2026-04-01,freelancers,demo-synthetic
+чек для самозанятого как сформировать,1423,month,2026-05-01,freelancers,demo-synthetic
+чек для самозанятого как сформировать,914,month,2026-06-01,freelancers,demo-synthetic
+чек для самозанятого как сформировать,848,month,2026-07-01,freelancers,demo-synthetic
+чек для самозанятого как сформировать,1009,month,2026-08-01,freelancers,demo-synthetic
+чек для самозанятого как сформировать,1493,month,2026-09-01,freelancers,demo-synthetic
+генератор описаний товаров для маркетплейса,1147,month,2025-08-01,content_generation,demo-synthetic
+генератор описаний товаров для маркетплейса,1239,month,2025-09-01,content_generation,demo-synthetic
+генератор описаний товаров для маркетплейса,1170,month,2025-10-01,content_generation,demo-synthetic
+генератор описаний товаров для маркетплейса,1375,month,2025-11-01,content_generation,demo-synthetic
+генератор описаний товаров для маркетплейса,1374,month,2025-12-01,content_generation,demo-synthetic
+генератор описаний товаров для маркетплейса,1574,month,2026-01-01,content_generation,demo-synthetic
+генератор описаний товаров для маркетплейса,1628,month,2026-02-01,content_generation,demo-synthetic
+генератор описаний товаров для маркетплейса,1722,month,2026-03-01,content_generation,demo-synthetic
+генератор описаний товаров для маркетплейса,1790,month,2026-04-01,content_generation,demo-synthetic
+генератор описаний товаров для маркетплейса,1734,month,2026-05-01,content_generation,demo-synthetic
+генератор описаний товаров для маркетплейса,1945,month,2026-06-01,content_generation,demo-synthetic
+генератор описаний товаров для маркетплейса,1840,month,2026-07-01,content_generation,demo-synthetic
+генератор описаний товаров для маркетплейса,2129,month,2026-08-01,content_generation,demo-synthetic
+генератор описаний товаров для маркетплейса,2206,month,2026-09-01,content_generation,demo-synthetic
+онлайн запись клиентов для салона цена,1249,month,2025-08-01,booking_scheduling,demo-synthetic
+онлайн запись клиентов для салона цена,1357,month,2025-09-01,booking_scheduling,demo-synthetic
+онлайн запись клиентов для салона цена,1292,month,2025-10-01,booking_scheduling,demo-synthetic
+онлайн запись клиентов для салона цена,1264,month,2025-11-01,booking_scheduling,demo-synthetic
+онлайн запись клиентов для салона цена,1353,month,2025-12-01,booking_scheduling,demo-synthetic
+онлайн запись клиентов для салона цена,1250,month,2026-01-01,booking_scheduling,demo-synthetic
+онлайн запись клиентов для салона цена,1213,month,2026-02-01,booking_scheduling,demo-synthetic
+онлайн запись клиентов для салона цена,1244,month,2026-03-01,booking_scheduling,demo-synthetic
+онлайн запись клиентов для салона цена,1268,month,2026-04-01,booking_scheduling,demo-synthetic
+онлайн запись клиентов для салона цена,1366,month,2026-05-01,booking_scheduling,demo-synthetic
+онлайн запись клиентов для салона цена,1384,month,2026-06-01,booking_scheduling,demo-synthetic
+онлайн запись клиентов для салона цена,1259,month,2026-07-01,booking_scheduling,demo-synthetic
+онлайн запись клиентов для салона цена,1325,month,2026-08-01,booking_scheduling,demo-synthetic
+онлайн запись клиентов для салона цена,1281,month,2026-09-01,booking_scheduling,demo-synthetic
+напоминание клиентам о записи через телеграм,96,month,2025-08-01,booking_scheduling,demo-synthetic
+напоминание клиентам о записи через телеграм,96,month,2025-09-01,booking_scheduling,demo-synthetic
+напоминание клиентам о записи через телеграм,108,month,2025-10-01,booking_scheduling,demo-synthetic
+напоминание клиентам о записи через телеграм,103,month,2025-11-01,booking_scheduling,demo-synthetic
+напоминание клиентам о записи через телеграм,122,month,2025-12-01,booking_scheduling,demo-synthetic
+напоминание клиентам о записи через телеграм,116,month,2026-01-01,booking_scheduling,demo-synthetic
+напоминание клиентам о записи через телеграм,136,month,2026-02-01,booking_scheduling,demo-synthetic
+напоминание клиентам о записи через телеграм,129,month,2026-03-01,booking_scheduling,demo-synthetic
+напоминание клиентам о записи через телеграм,132,month,2026-04-01,booking_scheduling,demo-synthetic
+напоминание клиентам о записи через телеграм,145,month,2026-05-01,booking_scheduling,demo-synthetic
+напоминание клиентам о записи через телеграм,157,month,2026-06-01,booking_scheduling,demo-synthetic
+напоминание клиентам о записи через телеграм,155,month,2026-07-01,booking_scheduling,demo-synthetic
+напоминание клиентам о записи через телеграм,168,month,2026-08-01,booking_scheduling,demo-synthetic
+напоминание клиентам о записи через телеграм,172,month,2026-09-01,booking_scheduling,demo-synthetic
+интеграция google таблиц с телеграм,245,month,2025-08-01,integrations,demo-synthetic
+интеграция google таблиц с телеграм,270,month,2025-09-01,integrations,demo-synthetic
+интеграция google таблиц с телеграм,275,month,2025-10-01,integrations,demo-synthetic
+интеграция google таблиц с телеграм,311,month,2025-11-01,integrations,demo-synthetic
+интеграция google таблиц с телеграм,297,month,2025-12-01,integrations,demo-synthetic
+интеграция google таблиц с телеграм,357,month,2026-01-01,integrations,demo-synthetic
+интеграция google таблиц с телеграм,356,month,2026-02-01,integrations,demo-synthetic
+интеграция google таблиц с телеграм,383,month,2026-03-01,integrations,demo-synthetic
+интеграция google таблиц с телеграм,403,month,2026-04-01,integrations,demo-synthetic
+интеграция google таблиц с телеграм,417,month,2026-05-01,integrations,demo-synthetic
+интеграция google таблиц с телеграм,416,month,2026-06-01,integrations,demo-synthetic
+интеграция google таблиц с телеграм,415,month,2026-07-01,integrations,demo-synthetic
+интеграция google таблиц с телеграм,470,month,2026-08-01,integrations,demo-synthetic
+интеграция google таблиц с телеграм,466,month,2026-09-01,integrations,demo-synthetic
+синхронизация 1с и crm,19,month,2025-08-01,integrations,demo-synthetic
+синхронизация 1с и crm,20,month,2025-09-01,integrations,demo-synthetic
+синхронизация 1с и crm,20,month,2025-10-01,integrations,demo-synthetic
+синхронизация 1с и crm,19,month,2025-11-01,integrations,demo-synthetic
+синхронизация 1с и crm,19,month,2025-12-01,integrations,demo-synthetic
+синхронизация 1с и crm,19,month,2026-01-01,integrations,demo-synthetic
+синхронизация 1с и crm,19,month,2026-02-01,integrations,demo-synthetic
+синхронизация 1с и crm,19,month,2026-03-01,integrations,demo-synthetic
+синхронизация 1с и crm,18,month,2026-04-01,integrations,demo-synthetic
+синхронизация 1с и crm,19,month,2026-05-01,integrations,demo-synthetic
+синхронизация 1с и crm,21,month,2026-06-01,integrations,demo-synthetic
+синхронизация 1с и crm,20,month,2026-07-01,integrations,demo-synthetic
+синхронизация 1с и crm,21,month,2026-08-01,integrations,demo-synthetic
+синхронизация 1с и crm,20,month,2026-09-01,integrations,demo-synthetic
+сервис проверки контрагентов для ип,340,30d,2026-10-01,smb_automation,demo-synthetic
+бот для учета заказов в телеграм,210,30d,2026-10-01,telegram_bots,demo-synthetic
+pdf в excel без потери форматирования,520,30d,2026-10-01,documents_files,demo-synthetic
+как сократить время на отчеты для маркетплейса,60,30d,2026-10-01,analytics_reports,demo-synthetic
+что такое crm,5000,30d,2026-10-01,smb_automation,demo-synthetic
+# Фраза без данных о частотности (пустое значение = «нет данных», не ноль):
+аналог битрикс24 для салона,,30d,2026-10-01,cheap_alternatives,demo-synthetic
