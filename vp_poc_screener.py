@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.588"
+APP_VERSION = "0.99.589"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16850,7 +16850,8 @@ EMW_REFRESH_SEC = int(os.environ.get("VP_EMW_REFRESH_SEC", 24 * 3600))
 EMW_POLL_SEC = int(os.environ.get("VP_EMW_POLL_SEC", 30))
 EMW_LEVELS_REFRESH_SEC = 6 * 3600
 EMW_MAX_DRIFT_R = 0.25                          # live entry at most this far past the trigger toward the take
-EMW_WATCH_PCT = 15.0                            # the "near the EMA" list: trigger within this % of the price
+EMW_WATCH_PCT = 30.0                            # the "near the EMA" list: trigger within this % of the price
+                                                # (v0.99.589: 15 -> 30 — a weekly pump runs +50% and more; RSR's EMA 50 was 20% away)
 EMW_PREALERT_PCT = float(os.environ.get("VP_EMW_PREALERT_PCT", 5.0))   # v0.99.575 — "put the limit on" heads-up at this distance
 EMW_BACKTEST_TRIGGER = threading.Event()
 EMW_MODEL_VER = 583                             # a model of another layout is ignored and retrained
@@ -17792,6 +17793,8 @@ def emw_watch_list(model, limit=60):
         levels = {s: list(v) for s, v in _emw_levels.items()}
         prices = dict(_emw_prices)
     now = time.time()
+    with state_lock:
+        fired = dict(STATE.get("emw_fired") or {})
     rows = []
     for sym, lvs in levels.items():
         px = prices.get(sym)
@@ -17801,6 +17804,8 @@ def emw_watch_list(model, limit=60):
         for lv in lvs:
             if now >= lv["bar_end"]:
                 continue
+            if f"{sym}|{lv['key']}|{lv['bar_time']}" in fired:
+                continue                              # v0.99.589 — this candle's touch is decided (a signal, or skipped)
             sgn = lv["sgn"]
             dist = sgn * (last - lv["T"]) / last * 100
             if dist > EMW_WATCH_PCT:
@@ -17811,6 +17816,14 @@ def emw_watch_list(model, limit=60):
             lv = emw_lv_cfg(lv, setup)
             dist = sgn * (last - lv["T"]) / last * 100
             if dist > EMW_WATCH_PCT:
+                continue
+            # v0.99.589 — user (RSR, EMA 28 W): "28 тут больше как на пробой — цена у неё стояла, а отскок
+            # должен быть от 50": the price already reached this EMA in this candle, and even from the
+            # candle's lowest low the rise to it is under what the model needs — the touch came without
+            # a pump, the level is done for this candle (the rise before the touch can only be smaller)
+            need = ((setup or {}).get("best") or {}).get("rise") or min(EMW_RISE_CANDIDATES)
+            ext_lo = min(lv["ext_now"], last) if sgn < 0 else max(lv["ext_now"], last)
+            if (lv["touched"] or sgn * (last - lv["T"]) < 0) and emw_rise(lv["L"], lv["A"], ext_lo, sgn) < need:
                 continue
             cfg = emw_chosen_cfg(model, lv["key"], lv["miss"], lv.get("rise_now"))
             stop, take = emw_trade_prices(lv, cfg or setup) if (cfg or (setup and setup.get("best"))) else (None, None)

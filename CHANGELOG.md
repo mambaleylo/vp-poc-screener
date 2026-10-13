@@ -19561,3 +19561,11 @@ v0.99.587 - Neuro: a signal that stayed virtual now says why in its result messa
 v0.99.588 - Neuro: tapping a live signal in a coin card said "сделка не найдена" — the
          chart looked only in the backtest trades. It now finds the live signal
          first (entry / stop / take / exit as recorded), then the backtest.
+v0.99.589 - EMA W/M "Сейчас у EMA" list (user, RSR EMA28(W): "28 looks like a breakout
+         level, the bounce should come from 50"): a level the live candle already
+         reached without a pump (even from the candle's lowest low the rise to it
+         is under what the model needs) is dropped for this candle — such a touch
+         was never a trade (the scan's rise filter skips it), but the list kept
+         showing it. Levels whose touch is already decided (signal or skip) are
+         dropped too. The list now reaches 30% from the price (was 15%), so the
+         next EMA up during a big weekly pump (RSR's EMA 50, 20% away) is shown.
