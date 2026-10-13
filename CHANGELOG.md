@@ -19597,3 +19597,11 @@ v0.99.592 - EMA W/M: the "by the reaction" entry (wait for a 4h candle to close 
          enter right away"). Only the limit on the touch is left (a little before
          the EMA / at it / a little past it — the backtest picks). Model version
          592 — retrained from scratch.
+v0.99.593 - EMA W/M: the rise to the EMA is measured two ways and the backtest picks
+         (user, RENDER monthly EMA 14: September pumped 1.36 -> 1.95, October only
+         finished the last ~10% to the EMA, so the live-candle rise was ~0.3 ATR
+         and the touch was skipped): "live" — the live candle's own rise, as
+         before; "swing" — from the lowest low of the last closed candles (4 weeks
+         / 3 months) and the live one, so a pump over two candles counts. Shown in
+         the tab ("рост от минимума последних свечей"). Model version 593 —
+         retrained from scratch.
