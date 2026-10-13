@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.593"
+APP_VERSION = "0.99.594"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17671,6 +17671,44 @@ def emw_prealert(sym, lv, cfg, price, stop, take, dist):
                   + ("\nбот войдёт сам при касании" if AUTOTRADE_ENABLED_EMW else ""), category="emw")
 
 
+def emw_watch_alert(sym, lv, model, last, hi24, lo24, fired, now):
+    """v0.99.594 — user (RSR, weekly EMA 50: a pump +55% into it, a short from it made the move):
+    "надо, чтобы такое не пропускал". A touch that fits the picture — the price came from under
+    (almost) all the EMAs, the rise to this one >= the smallest rise the model knows (from the
+    live candle or the last candles' low), the live candle reached it — but whose EMA / filters
+    did NOT pass the honest test is no longer silent: one Telegram heads-up per level and candle,
+    marked as unconfirmed, no trade. The stop / take shown are this EMA's learned variant, if any."""
+    sgn = lv["sgn"]
+    fkey = f"{sym}|{lv['key']}|{lv['bar_time']}"
+    if fkey in fired or lv["miss"] > max(EMW_MISS_CANDIDATES):
+        return
+    if not (lv.get("touched") or ((hi24 >= lv["T"]) if sgn < 0 else (lo24 <= lv["T"]))):
+        return
+    if sgn * (last - lv["T"]) < -1.0 * (lv.get("datr") or 0):
+        return                                    # already far through the EMA: a breakout, not a reaction
+    rise = emw_rise_lv(lv, lv["ext_now"], "swing")
+    if rise < min(EMW_RISE_CANDIDATES):
+        return
+    setup = next((x for x in (model or {}).get("setups") or [] if x["key"] == lv["key"]), None)
+    b = (setup or {}).get("best")
+    why = ("эта EMA на истории не прошла проверку" if b and not setup.get("passed")
+           else "по этой EMA мало истории для проверки" if not b
+           else f"не подходит под выученный фильтр (под {lv['n_def'] - lv['miss']} из {lv['n_def']} EMA, нужно ≥ {lv['n_def'] - b['miss']})")
+    base = emw_base(lv, lv["ext_now"], "swing")
+    lines = [f"👀 {sym.replace('_USDT', '')} | {emw_desc(lv['tf'], lv['ema'], sgn)} · EMA W/M — касание после накачки",
+             f"EMA {lv['ema']}: {lv['L']:.6g}; сейчас {last:.6g}; рост от {base:.6g} ({(lv['L'] - base) / base * 100:+.0f}%, {rise:.1f} ATR), "
+             f"была под {lv['n_def'] - lv['miss']} из {lv['n_def']} EMA",
+             f"⚠️ не подтверждено статистикой — {why}; бот не входит, только уведомление"]
+    if b and b.get("sl") is not None and lv.get("datr"):
+        stop = emw_sl_price(lv["L"], b["sl"], sgn, lv["datr"])
+        take = emw_take_price(lv["L"], b["tk"], sgn, lv["datr"])
+        lines.append(f"если входить от EMA: SL {stop:.6g} ({emw_stop_pct_txt(b, lv['datr'], lv['L'])}), "
+                     f"TP {take:.6g} ({emw_take_txt(b, lv['datr'], lv['L'])})")
+    with state_lock:
+        fired[fkey] = {"t": now, "skip": f"не подтверждено статистикой ({why}) — только уведомление"}
+    send_telegram("\n".join(lines), category="emw")
+
+
 def emw_scan_tick():
     """one pass over the forming candles' levels against the live price"""
     tickers = get_tickers() or []
@@ -17700,6 +17738,7 @@ def emw_scan_tick():
                 continue
             cfg = emw_chosen_cfg(model, lv["key"], lv["miss"])
             if not cfg:
+                emw_watch_alert(sym, lv, model, last, hi24, lo24, fired, now)   # v0.99.594
                 continue
             lv = emw_lv_cfg(lv, cfg)
             fkey = f"{sym}|{lv['key']}|{lv['bar_time']}"

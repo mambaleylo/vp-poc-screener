@@ -19605,3 +19605,12 @@ v0.99.593 - EMA W/M: the rise to the EMA is measured two ways and the backtest p
          / 3 months) and the live one, so a pump over two candles counts. Shown in
          the tab ("рост от минимума последних свечей"). Model version 593 —
          retrained from scratch.
+v0.99.594 - EMA W/M: a touch that fits the picture but whose EMA didn't pass the honest
+         test is no longer silent (user, RSR weekly EMA 50: "it must not miss such").
+         When the live candle reaches the EMA after a pump (rise >= 1.5 ATR from
+         the live candle or the last candles' low), the price was under (almost)
+         all the EMAs and it isn't already far through, one Telegram heads-up per
+         level and candle: "👀 … не подтверждено статистикой — бот не входит" with
+         the reason (the EMA failed the test / too little history / outside the
+         learned filter) and this EMA's learned stop / take if there is one. No
+         trade on it; confirmed EMAs trade as before.
