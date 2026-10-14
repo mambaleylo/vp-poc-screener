@@ -19646,3 +19646,11 @@ v0.99.597 - EMA W/M (user, STX | EMA14(M): entry 0.4155, stop 12.0, the 4h candl
          own height away) no longer stretches the scale — the candles keep their
          size and the line's tag is pinned to the edge with ↑ / ↓; lines, zones and
          dots never draw outside their panel.
+v0.99.598 - Zones "мониторинг молчит 8 мин — бот завис или выключен" after a restart: all
+         public exchange requests share one queue, and the EMA W/M statistics
+         being recomputed from scratch put thousands of candle requests in front
+         of the zones monitor — one pass took 8+ minutes. Live work now has its own
+         lane: the zones monitor (and its orphan-order sweep), the EMA W/M live
+         scan and opening a trade make their requests through 3 separate slots
+         and don't wait in the backtests' spacing queue (they are few, the
+         exchange limits aren't at risk). Backtests are queued as before.

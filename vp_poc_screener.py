@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.597"
+APP_VERSION = "0.99.598"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -165,7 +165,50 @@ WORKERS = int(os.environ.get("VP_WORKERS", 8))  # was 12 (before that, 8) — lo
 # a request in flight at any moment; the rest block briefly on the
 # semaphore instead of all firing at once.
 GLOBAL_MAX_CONCURRENT_REQUESTS = int(os.environ.get("VP_GLOBAL_MAX_CONCURRENT_REQUESTS", 10))
-GLOBAL_HTTP_SEMAPHORE = threading.Semaphore(GLOBAL_MAX_CONCURRENT_REQUESTS)
+# v0.99.598 — user ("мониторинг молчит 8 мин — бот завис или выключен" right after a restart): the
+# backtests (EMA W/M retraining from scratch) queued thousands of candle requests in front of the
+# zones monitor, one pass of which then took 8+ minutes. Work that guards money or reacts to the
+# live price runs inside `with live_http():` — its public requests take their own small lane
+# (GLOBAL_LIVE_CONCURRENT slots) and skip the app-wide spacing queue; they are few, so the
+# exchange's rate limits aren't at risk. Everything else is queued as before.
+GLOBAL_LIVE_CONCURRENT = int(os.environ.get("VP_GLOBAL_LIVE_CONCURRENT", 3))
+_http_tl = threading.local()
+
+
+def _http_is_live():
+    return getattr(_http_tl, "live", 0) > 0
+
+
+class live_http:
+    """marks the requests made inside as live (see GLOBAL_LIVE_CONCURRENT)"""
+    def __enter__(self):
+        _http_tl.live = getattr(_http_tl, "live", 0) + 1
+        return self
+
+    def __exit__(self, *a):
+        _http_tl.live = max(0, getattr(_http_tl, "live", 1) - 1)
+        return False
+
+
+class _PrioSemaphore:
+    def __init__(self, n, n_live):
+        self._bulk, self._live = threading.Semaphore(n), threading.Semaphore(n_live)
+
+    def __enter__(self):
+        sem = self._live if _http_is_live() else self._bulk
+        sem.acquire()
+        stack = getattr(_http_tl, "held", None)
+        if stack is None:
+            stack = _http_tl.held = []
+        stack.append(sem)
+        return self
+
+    def __exit__(self, *a):
+        _http_tl.held.pop().release()
+        return False
+
+
+GLOBAL_HTTP_SEMAPHORE = _PrioSemaphore(GLOBAL_MAX_CONCURRENT_REQUESTS, GLOBAL_LIVE_CONCURRENT)
 # v0.99.268 — per direct user follow-up ("а потом повторные?"): the
 # v0.99.267 startup stagger only guarantees separation for the very
 # FIRST backtest cycle after a restart — after that, each of the 7
@@ -219,6 +262,9 @@ def _global_rate_gate():
     queues up in true request order) rather than just an average that
     a burst could still momentarily violate."""
     t_enter = time.time()
+    if _http_is_live():   # v0.99.598 — the live lane doesn't queue behind the backtests
+        _exchange_load_record(0.0)
+        return
     with _global_rate_lock:
         now = time.time()
         wait = _global_last_request_started[0] + GLOBAL_MIN_REQUEST_INTERVAL - now
@@ -4768,7 +4814,7 @@ def reconcile_positions_and_orders():
 def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_pct_override=None, allow_stack=False, all_in_margin_pct=None):
     """v0.99.331 — runs the real implementation inside this module's own
     account context (sub-account keys if configured, else main)."""
-    with using_account(mode):
+    with using_account(mode), live_http():   # v0.99.598 — a trade being opened never waits for the backtests
         return _execute_autotrade_impl(mode, symbol, direction, entry, sl, tp, extra=extra,
                                        risk_pct_override=risk_pct_override, allow_stack=allow_stack,
                                        all_in_margin_pct=all_in_margin_pct)
@@ -17928,7 +17974,8 @@ def emw_live_loop():
                 time.sleep(300)
                 continue
             emw_refresh_levels()
-            emw_scan_tick()
+            with live_http():   # v0.99.598 — the touch must be seen while it happens
+                emw_scan_tick()
             if time.time() - last_track > 300:
                 last_track = time.time()
                 emw_track_outcomes()
@@ -26637,7 +26684,8 @@ def zones_monitor_loop():
     while True:
         heartbeat("zones_monitor_loop")
         try:
-            last_track = zones_monitor_tick(last_track)
+            with live_http():   # v0.99.598
+                last_track = zones_monitor_tick(last_track)
             zones_act("monitor", ok=True, error=None)
         except Exception as e:
             log_error(f"zones_monitor_loop: {e}")
@@ -26645,7 +26693,8 @@ def zones_monitor_loop():
         if time.time() - last_sweep >= 300 and GATE_API_KEY:   # v0.99.497 — every 5 min (was hourly)
             last_sweep = time.time()
             try:
-                zones_orphan_sweep()
+                with live_http():
+                    zones_orphan_sweep()
             except Exception as e:
                 log_error(f"zones orphan sweep: {e}")
         time.sleep(ZONES_POLL_SEC)
