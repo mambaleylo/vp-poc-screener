@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.599"
+APP_VERSION = "0.99.600"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -27168,6 +27168,8 @@ def api_self_update():
     same = new_version == APP_VERSION
     if not same:   # v0.99.561 — the same version: nothing to restart for
         self_restart("update", 1.5)
+    else:
+        start_update_retry()   # v0.99.600
     return jsonify({"ok": True, "old_version": APP_VERSION, "new_version": new_version, "same": same})
 
 
@@ -27181,10 +27183,11 @@ def api_boot():
     return jsonify({"boot": _PROC_START, "version": APP_VERSION})
 
 
-def self_update_download():
+def self_update_download(only_if_newer=False):
     """Fresh file from GitHub main, checked (a whole, compiling bot), swapped in
     place of this one (old kept as .bak). Returns the new version; RuntimeError
-    with a human message otherwise — the current file then stays."""
+    with a human message otherwise — the current file then stays.
+    only_if_newer — the same version as running: nothing is written (the retries)."""
     try:
         r = requests.get(SELF_UPDATE_URL, params={"nocache": int(time.time())}, timeout=60)
         r.raise_for_status()
@@ -27194,6 +27197,8 @@ def self_update_download():
     m_ = re.search(rb'^APP_VERSION = "([^"]+)"', code, re.M)
     if not m_ or b"app.run(" not in code or len(code) < 100000:
         raise RuntimeError("скачанный файл не похож на бота — оставил текущую версию")
+    if only_if_newer and m_.group(1).decode() == APP_VERSION:
+        return APP_VERSION
     try:
         compile(code, "vp_poc_screener.py", "exec")   # a broken download never replaces a working bot
     except SyntaxError as e:
@@ -27208,6 +27213,44 @@ def self_update_download():
         pass
     os.replace(tmp, me)
     return m_.group(1).decode()
+
+
+# v0.99.600 — user: after "✅ Уже последняя версия … GitHub отдаёт его с задержкой" the bot itself
+# retries every 30 s and restarts on the new version as soon as GitHub serves it. Not forever: the
+# whole bot file is downloaded each time — after UPDATE_RETRY_MAX_SEC it stops and says so.
+UPDATE_RETRY_SEC = 30
+UPDATE_RETRY_MAX_SEC = 20 * 60
+_update_retry = {"running": False, "lock": threading.Lock()}
+
+
+def start_update_retry():
+    """True when a retry loop was started (False — one is already running)"""
+    with _update_retry["lock"]:
+        if _update_retry["running"]:
+            return False
+        _update_retry["running"] = True
+
+    def run():
+        t_end = time.time() + UPDATE_RETRY_MAX_SEC
+        try:
+            while time.time() < t_end:
+                time.sleep(UPDATE_RETRY_SEC)
+                try:
+                    nv = self_update_download(only_if_newer=True)
+                except RuntimeError as e:
+                    log_error(f"update retry: {e}")
+                    continue
+                if nv != APP_VERSION:
+                    tg_outbox_push(f"🔄 GitHub отдал новую версию: v{APP_VERSION} → v{nv}, перезапускаю…")
+                    zones_save()
+                    self_restart("update", 3)
+                    return
+            tg_outbox_push(f"ℹ️ За {UPDATE_RETRY_MAX_SEC // 60} мин новой версии на GitHub не появилось — перестал проверять. "
+                           f"/update — проверить снова.")
+        finally:
+            _update_retry["running"] = False
+    threading.Thread(target=run, daemon=True, name="update_retry").start()
+    return True
 
 
 def save_everything_before_exit(wait_tg=10.0):
@@ -27370,8 +27413,11 @@ def bot_command(txt, msg_t=None):
             tg_outbox_push(f"⚠️ Обновление не удалось: {e}")
             return True
         if nv == APP_VERSION:   # v0.99.561 — nothing new: no restart (user: "если уже последняя — перезапускать не надо")
+            started = start_update_retry()
             tg_outbox_push(f"✅ Уже последняя версия v{nv} — перезапуск не нужен. Если обновление только что вышло, "
-                           f"GitHub отдаёт его с задержкой до ~5 мин — повторите /update чуть позже.")
+                           f"GitHub отдаёт его с задержкой до ~5 мин — "
+                           + (f"проверяю сам каждые {UPDATE_RETRY_SEC} с (до {UPDATE_RETRY_MAX_SEC // 60} мин) и обновлюсь, как только появится."
+                              if started else "уже проверяю сам, обновлюсь, как только появится."))
             return True
         tg_outbox_push(f"🔄 Обновление v{APP_VERSION} → v{nv}, перезапускаю…")
         zones_save()
@@ -34210,7 +34256,7 @@ async function selfUpdate() {
   let r;
   try { r = await (await fetch('/api/self_update', {method: 'POST'})).json(); } catch (e) { return alert('ошибка сети'); }
   if (!r.ok) return alert(r.error || 'не получилось');
-  if (r.same) return alert(`Уже последняя версия (${r.new_version}) — перезапуск не нужен. Если обновление только что вышло, GitHub отдаёт его с задержкой до ~5 мин — попробуйте чуть позже.`);   // v0.99.561
+  if (r.same) return alert(`Уже последняя версия (${r.new_version}) — перезапуск не нужен. Если обновление только что вышло, GitHub отдаёт его с задержкой до ~5 мин — бот проверяет сам каждые 30 с (до 20 мин) и обновится, как только оно появится.`);   // v0.99.561
   alert(`Обновление ${r.old_version} → ${r.new_version}, перезапускаю.`);
   const t0 = Date.now();
   const wait = async () => {

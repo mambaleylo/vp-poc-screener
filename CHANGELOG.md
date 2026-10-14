@@ -19661,3 +19661,9 @@ v0.99.599 - P/R pooled check showed "−22 600 538R / сделку" (user): on a
          is now no trade — in the P/R backtest and live signal, the Neuro
          backtest and the AMD backtest. Reproduced on a flat coin with one tick:
          worst trade −26R before, −1.3R after.
+v0.99.600 - /update (and the web update button) answering "✅ Уже последняя версия … GitHub
+         отдаёт его с задержкой" now keeps trying by itself (user): every 30 s it
+         checks GitHub and, as soon as a newer version is served, says so and
+         restarts on it. A second /update meanwhile doesn't start another loop.
+         It stops after 20 minutes (the whole bot file is downloaded each time)
+         with "новой версии не появилось — /update, чтобы проверить снова".
