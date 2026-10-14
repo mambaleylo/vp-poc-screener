@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.596"
+APP_VERSION = "0.99.597"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16843,6 +16843,11 @@ EMW_TAKE_Q = [0.5, 0.65, 0.8]                   # the take: a pullback this shar
 EMW_STOP_Q = [0.7, 0.8, 0.9]                    # the stop: this share of those pullbacks stayed inside it
 EMW_STOP_BUF_DATR = 0.1                         # ...plus this margin beyond (daily ATR)
 EMW_MIN_STOP_DATR = 0.25                        # never tighter than a quarter of a day's range
+# v0.99.597 — user (STX | EMA14(M): entry 0.4155, stop 12.0 — 29x the price): the touches that DID come
+# back include ones that first ran +200…300% (a breakout that faded weeks later), so the 90% of
+# "how far it went against first" can be dozens of daily ATR. A stop past this is no stop: such a
+# take / stop pair is left out (the shares that need it simply aren't offered)
+EMW_MAX_STOP_DATR = 6.0
 EMW_HOLD_CANDIDATES = [2, 7, 28]                # days, then the trade is closed at market
 EMW_TRIGGER_DATR = 0.25                         # the entry sits this many daily ATR before the EMA
 EMW_DATR_LEN = 14
@@ -16874,7 +16879,7 @@ EMW_WATCH_PCT = 30.0                            # the "near the EMA" list: trigg
                                                 # (v0.99.589: 15 -> 30 — a weekly pump runs +50% and more; RSR's EMA 50 was 20% away)
 EMW_PREALERT_PCT = float(os.environ.get("VP_EMW_PREALERT_PCT", 5.0))   # v0.99.575 — "put the limit on" heads-up at this distance
 EMW_BACKTEST_TRIGGER = threading.Event()
-EMW_MODEL_VER = 595                             # a model of another layout is ignored and retrained
+EMW_MODEL_VER = 597                             # a model of another layout is ignored and retrained
 _emw_parts = {}
 _emw_had_data = {}
 _emw_levels = {}            # symbol -> the forming week's / month's levels
@@ -17090,6 +17095,8 @@ def emw_learn_take_stop(train, hi):
             continue
         for qs in EMW_STOP_Q:
             sl = against[min(len(against) - 1, int(qs * len(against)))] + EMW_STOP_BUF_DATR
+            if sl > EMW_MAX_STOP_DATR:
+                continue
             out[(qt, qs)] = (round(tk, 2), round(max(EMW_MIN_STOP_DATR, sl), 2))
     return out
 
@@ -34520,8 +34527,13 @@ function emwPanel(ctx, box, cs, opt) {
   let lo = Infinity, hi = -Infinity;
   cs.forEach(c => { lo = Math.min(lo, c.low); hi = Math.max(hi, c.high); });
   (opt.series || []).forEach(s => s.vals.forEach(v => { if (okV(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); } }));
-  (opt.hlines || []).forEach(l => { if (okV(l.p) && l.fit !== false) { lo = Math.min(lo, l.p); hi = Math.max(hi, l.p); } });
   const f = v => opt.log ? Math.log(Math.max(v, 1e-12)) : v;
+  // v0.99.597 — user (STX: a stop 29x the price squashed the 4h candles into one strip): a line far
+  // outside the candles (more than their own height away) doesn't stretch the scale — its tag is
+  // pinned to the edge with an arrow instead
+  const cspan = (f(hi) - f(lo)) || Math.abs(f(hi)) * 0.02 || 1;
+  const near = v => f(v) >= f(lo) - cspan && f(v) <= f(hi) + cspan;
+  (opt.hlines || []).forEach(l => { if (okV(l.p) && l.fit !== false && near(l.p)) { lo = Math.min(lo, l.p); hi = Math.max(hi, l.p); } });
   let a = f(lo), b = f(hi);
   const pad = (b - a) * 0.07 || Math.abs(a) * 0.02 || 1;
   a -= pad; b += pad;
@@ -34538,8 +34550,11 @@ function emwPanel(ctx, box, cs, opt) {
     const w = String(l.label || '').split(' ')[0].replace(/:$/, '');
     return ({'стоп': 'SL', 'тейк': 'TP'})[w] || w;
   };
-  const tags = (opt.hlines || []).filter(l => okV(l.p)).map(l => ({y: Y(l.p), p: l.p, color: l.color, name: tagName(l)}))
-    .filter(t_ => t_.y >= box.y - 2 && t_.y <= box.y + box.h + 2).sort((t1, t2) => t1.y - t2.y);
+  const inBox = y => y >= box.y - 2 && y <= box.y + box.h + 2;
+  const tags = (opt.hlines || []).filter(l => okV(l.p)).map(l => {
+    const y = Y(l.p), off = y < box.y - 2 ? '↑' : (y > box.y + box.h + 2 ? '↓' : '');
+    return {y: off ? (off === '↑' ? box.y : box.y + box.h) : y, p: l.p, color: l.color, name: tagName(l) + (off ? ' ' + off : ''), off};
+  }).sort((t1, t2) => t1.y - t2.y);
   for (let i = 0; i < tags.length; i++) {
     tags[i].ty = Math.max(box.y + PH / 2, Math.min(box.y + box.h - PH / 2, tags[i].y));
     if (i && tags[i].ty - tags[i - 1].ty < PH + 1) tags[i].ty = tags[i - 1].ty + PH + 1;
@@ -34567,8 +34582,9 @@ function emwPanel(ctx, box, cs, opt) {
     const zt = z.to != null ? z.to : (z.tTo != null ? idxOf(z.tTo) : n - 1);
     if (z.p1 == null || z.p2 == null || zf == null || zf < 0) return;
     const x0 = X(zf) - step / 2, x1 = X(Math.min(n - 1, Math.max(zf, zt))) + step / 2;
+    const cl = y => Math.max(box.y, Math.min(box.y + box.h, y));   // v0.99.597 — never past the panel
     ctx.fillStyle = z.color; ctx.globalAlpha = z.alpha || 0.13;
-    ctx.fillRect(x0, Math.min(Y(z.p1), Y(z.p2)), Math.max(1, x1 - x0), Math.abs(Y(z.p1) - Y(z.p2)));
+    ctx.fillRect(x0, Math.min(cl(Y(z.p1)), cl(Y(z.p2))), Math.max(1, x1 - x0), Math.abs(cl(Y(z.p1)) - cl(Y(z.p2))));
     ctx.globalAlpha = 1;
   });
   (opt.vlines || []).forEach(v => {
@@ -34590,13 +34606,13 @@ function emwPanel(ctx, box, cs, opt) {
     ctx.stroke(); ctx.lineWidth = 1;
   });
   (opt.hlines || []).forEach(l => {
-    if (!okV(l.p)) return;
+    if (!okV(l.p) || !inBox(Y(l.p))) return;
     const y = Y(l.p), x0 = l.from != null ? X(l.from) - step / 2 : box.x;
     ctx.strokeStyle = l.color; ctx.lineWidth = l.width || 2; if (l.dash) ctx.setLineDash(l.dash);
     ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(box.x + pw, y); ctx.stroke(); ctx.setLineDash([]); ctx.lineWidth = 1;
   });
   (opt.dots || []).forEach(dt => {
-    const i = idxOf(dt.t); if (i < 0 || !okV(dt.p)) return;
+    const i = idxOf(dt.t); if (i < 0 || !okV(dt.p) || !inBox(Y(dt.p))) return;
     const r = dt.r || 4, x = X(i), y = Y(dt.p);
     ctx.fillStyle = dt.color; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = '#0b0d12'; ctx.lineWidth = 1.5; ctx.stroke(); ctx.lineWidth = 1;
@@ -34614,7 +34630,7 @@ function emwPanel(ctx, box, cs, opt) {
     ctx.fillStyle = t_.color; ctx.beginPath();
     if (ctx.roundRect) ctx.roundRect(x, t_.ty - PH / 2, w, PH, 4); else ctx.rect(x, t_.ty - PH / 2, w, PH);
     ctx.fill();
-    if (Math.abs(t_.ty - t_.y) > 1) {   // pushed off its line: a short connector
+    if (!t_.off && Math.abs(t_.ty - t_.y) > 1) {   // pushed off its line: a short connector
       ctx.strokeStyle = t_.color; ctx.beginPath(); ctx.moveTo(box.x + pw - 6, t_.y); ctx.lineTo(x, t_.ty); ctx.stroke();
     }
     let fs = 11;

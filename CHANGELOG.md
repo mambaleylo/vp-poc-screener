@@ -19637,3 +19637,12 @@ v0.99.596 - Charts of live signals (P/R, S/R, AMD, Mirror, Sweep): tapping an ol
          that coin within a day (P/R, S/R) or a candle (the others), i.e. the
          newest; CFG with several signals a day always showed the open one. Now
          the signal nearest to the tapped time is shown.
+v0.99.597 - EMA W/M (user, STX | EMA14(M): entry 0.4155, stop 12.0, the 4h candles
+         squashed into one strip): (1) the stop "beyond what 70/80/90% of the
+         pullbacks went against first" could be dozens of daily ATR — touches
+         that first ran +200…300% and faded weeks later still count as pullbacks;
+         a pair needing a stop past 6 daily ATR is now left out (model 597,
+         recomputed). (2) Charts: a line far outside the candles (more than their
+         own height away) no longer stretches the scale — the candles keep their
+         size and the line's tag is pinned to the edge with ↑ / ↓; lines, zones and
+         dots never draw outside their panel.
