@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.598"
+APP_VERSION = "0.99.599"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13934,7 +13934,7 @@ def amd_detect_signals(candles):
         # Entry = close of D candle (next bar open approximation in backtest)
         entry = c["close"]
         sl_dist = abs(entry - sl)
-        if sl_dist <= 0:
+        if _sl_too_tight(entry, sl_dist):   # v0.99.599
             continue
 
         if direction == "LONG":
@@ -13977,7 +13977,7 @@ def amd_backtest_symbol(symbol):
             entry_bar = candles[i + 1]
             entry = entry_bar["open"]
             sl_dist = abs(entry - sig["sl"])
-            if sl_dist <= 0:
+            if _sl_too_tight(entry, sl_dist):   # v0.99.599
                 continue
             sl = entry - sl_dist if sig["direction"] == "LONG" else entry + sl_dist
             tp = entry + sl_dist * AMD_RR if sig["direction"] == "LONG" else entry - sl_dist * AMD_RR
@@ -14633,6 +14633,17 @@ def close_position_for_mode(mode, symbol, direction):
     except Exception as e:
         log_error(f"close_position_for_mode {mode} {symbol}: {e}")
         return {"ok": False, "reason": str(e)}
+
+
+# v0.99.599 — user (P/R pooled: "−22 600 538R / сделку"): on a coin whose candles stood still the
+# ATR is ~0, so the stop sat a hair from the entry and the fees / the time exit divided by that risk
+# gave millions of R. A stop closer than this share of the price is below the fees and the tick:
+# no trade, in the backtests and live alike.
+MIN_SL_FRAC = 0.001
+
+
+def _sl_too_tight(entry, sl_dist):
+    return not sl_dist or sl_dist <= 0 or not entry or sl_dist < abs(entry) * MIN_SL_FRAC
 
 
 def _net_r(t):
@@ -16081,7 +16092,7 @@ def prv_simulate_trades(candles, ma_type, kc_length, band_mult, rr, atr_length=P
         entry_bar = candles[i + 1]
         entry = entry_bar["open"]
         sl_dist = atr[i] * sl_atr_mult
-        if sl_dist <= 0:
+        if _sl_too_tight(entry, sl_dist):   # v0.99.599
             continue
         sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
         tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
@@ -16551,7 +16562,7 @@ def prv_scan_symbol_live(symbol):
             return None
         entry = c["close"]
         sl_dist = atr[last_idx] * PRV_SL_ATR_MULT
-        if sl_dist <= 0:
+        if _sl_too_tight(entry, sl_dist):   # v0.99.599
             return None
         sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
         tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
@@ -20273,7 +20284,7 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
         entry = entry_bar["open"]
         atr = atr14[i]
         sl_dist = NEURO_SL_ATR_MULT * atr
-        if sl_dist <= 0:
+        if _sl_too_tight(entry, sl_dist):   # v0.99.599
             continue
         sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
         tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr

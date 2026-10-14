@@ -19654,3 +19654,10 @@ v0.99.598 - Zones "мониторинг молчит 8 мин — бот зав�
          scan and opening a trade make their requests through 3 separate slots
          and don't wait in the backtests' spacing queue (they are few, the
          exchange limits aren't at risk). Backtests are queued as before.
+v0.99.599 - P/R pooled check showed "−22 600 538R / сделку" (user): on a coin whose candles
+         stood still the ATR is ~0, the ATR stop sat a hair from the entry, and
+         the fees / a time exit divided by that risk gave millions of R per trade,
+         wrecking the pooled average and z. A stop closer than 0.1% of the price
+         is now no trade — in the P/R backtest and live signal, the Neuro
+         backtest and the AMD backtest. Reproduced on a flat coin with one tick:
+         worst trade −26R before, −1.3R after.
