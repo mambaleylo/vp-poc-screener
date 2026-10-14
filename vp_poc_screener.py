@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.600"
+APP_VERSION = "0.99.601"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3724,6 +3724,19 @@ def _cc_dict(row):
             "low": row[3], "close": row[4], "volume": row[5]}
 
 
+class _HeldLock:
+    """a lock already acquired: `with` releases it on the way out"""
+    def __init__(self, lock):
+        self._lock = lock
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self._lock.release()
+        return False
+
+
 def get_candles_range(symbol, interval, start_ts, end_ts):
     """Cached front for _get_candles_range_live() — see the block comment
     above. Same arguments, same return value."""
@@ -3740,7 +3753,15 @@ def get_candles_range(symbol, interval, start_ts, end_ts):
     key = (symbol, interval)
     with _candle_cache_locks_guard:
         lock = _candle_cache_locks.setdefault(key, threading.Lock())
-    with lock:
+    # v0.99.601 — a live caller (the zones monitor…) never waits behind a slow job holding this
+    # coin's cache (it may itself be queued in the backtest lane): it reads the exchange directly
+    if _http_is_live():
+        if not lock.acquire(blocking=False):
+            return _get_candles_range_live(symbol, interval, start_ts, end_ts)
+        guard = _HeldLock(lock)   # taken already: the `with` only releases it
+    else:
+        guard = lock
+    with guard:
         try:
             cov_s, cov_e, rows = _cc_load(symbol, interval)
         except Exception as e:
@@ -26485,6 +26506,19 @@ def _zones_ladder_tick(group, now, p, pos_map):
 
 
 _zones_revive_check = [0.0]
+# v0.99.601 — what the monitor is doing right now (no lock: read even if something hangs), so a
+# silent monitor says where it stands
+_ZMON = {"stage": "", "since": 0.0}
+
+
+def _zmon(stage):
+    _ZMON["stage"], _ZMON["since"] = stage, time.time()
+
+
+def zones_monitor_stuck_txt(now=None):
+    now = now or time.time()
+    st, since = _ZMON.get("stage"), _ZMON.get("since") or 0
+    return f"висит на: {st} ({int((now - since) // 60)} мин)" if st and now - since > 60 else ""
 
 
 def zones_monitor_tick(last_track=0.0):
@@ -26499,6 +26533,7 @@ def zones_monitor_tick(last_track=0.0):
         real_tails = [z for z in ZONES["zones"] if z.get("status") not in ("watch", "in_trade") and _zones_real_live(z)]
     if not active and not any_appr and not real_tails:
         return last_track
+    _zmon("цены с биржи")
     prices = _zones_symbols_and_prices()
     now = time.time()
     p = zones_params()
@@ -26528,6 +26563,7 @@ def zones_monitor_tick(last_track=0.0):
     ax_map = zones_author_exits()   # v0.99.519
     pos_map = {"_px": prices, "_ax": ax_map}
     if real_tails or any(_zones_real_live(z) for g in groups.values() for z in g) or (AUTOTRADE_ENABLED_ZONES and groups):
+        _zmon("позиции и ордера на бирже")
         try:
             with using_account("zones"):
                 for x in get_open_positions() or []:
@@ -26545,6 +26581,7 @@ def zones_monitor_tick(last_track=0.0):
         g.sort(key=lambda z: -max(z["levels"]) if z["side"] == "long" else min(z["levels"]))
         if pos_map is None and any((z.get("trade") or {}).get("real") for z in g):
             continue   # no exchange answer this round: don't decide anything about the real orders
+        _zmon(f"лесенка {g[0].get('symbol')}")
         try:
             changed = _zones_ladder_tick(g, now, p, pos_map if pos_map is not None else {"_px": prices, "_ax": ax_map}) or changed
         except Exception as e:
@@ -26552,6 +26589,7 @@ def zones_monitor_tick(last_track=0.0):
     for z in real_tails:   # our record is closed, the exchange side not yet (position / limits left)
         if pos_map is None:
             break
+        _zmon(f"хвост на бирже {z.get('symbol')}")
         try:
             changed = _zones_real_step(z["trade"], pos_map) or changed
         except Exception as e:
@@ -26562,6 +26600,7 @@ def zones_monitor_tick(last_track=0.0):
         changed = True   # keep the last good tick on disk (a restart knows how long it was off)
     if now - last_track >= 120:
         last_track = now
+        _zmon("сопровождение сделок")
         for z in active:
             if z.get("status") == "in_trade" and z.get("trade") and not z["trade"].get("legs"):
                 try:
@@ -26589,7 +26628,9 @@ def zones_monitor_tick(last_track=0.0):
                 except Exception as e:
                     log_error(f"zones track {z['symbol']}: {e}")
     if changed:
+        _zmon("сохранение")
         zones_save()
+    _zmon("")
     return last_track
 
 
@@ -26704,8 +26745,10 @@ def zones_monitor_loop():
         if time.time() - last_sweep >= 300 and GATE_API_KEY:   # v0.99.497 — every 5 min (was hourly)
             last_sweep = time.time()
             try:
+                _zmon("проверка лишних ордеров")
                 with live_http():
                     zones_orphan_sweep()
+                _zmon("")
             except Exception as e:
                 log_error(f"zones orphan sweep: {e}")
         time.sleep(ZONES_POLL_SEC)
@@ -27354,7 +27397,8 @@ def bot_ping_text(msg_t=None):
         mon = ZONES.get("monitor_ok")
     lag = f" · ответ через {max(0, int(now - msg_t))} с" if msg_t else ""
     mon_txt = (f"цены проверены {int(now - mon)} с назад" if mon and now - mon < 600
-               else ("⚠️ мониторинг молчит " + (f"{int((now - mon) // 60)} мин" if mon else "с запуска")))
+               else ("⚠️ мониторинг молчит " + (f"{int((now - mon) // 60)} мин" if mon else "с запуска")
+                     + (f" — {zones_monitor_stuck_txt(now)}" if zones_monitor_stuck_txt(now) else "")))
     return f"🏓 На связи{lag}\nv{APP_VERSION} · работает {up // 86400} д {up % 86400 // 3600} ч {up % 3600 // 60} мин · {mon_txt}"
 
 
@@ -28983,6 +29027,7 @@ def api_zones_status():
         approach = ZONES.get("approach")
         act = json.loads(json.dumps(ZONES_ACT, default=str))
         mon_ok = ZONES.get("monitor_ok")
+    act["stuck"] = zones_monitor_stuck_txt()   # v0.99.601
     # v0.99.493 — what the ladders are doing now, for the "Состояние" block
     lad = [z["trade"] for z in zones if (z.get("trade") or {}).get("legs") and not z.get("own") and not z.get("oc")]
     live = [t for t in lad if t.get("status") in ("PENDING", "OPEN")]
@@ -33741,7 +33786,7 @@ function zStatusHtml(d) {
   const mAge = m.t ? now - m.t : null;
   if (mAge == null) out.push(row('⏳', 'мониторинг зон запускается…'));
   else if (m.ok === false) out.push(row('🔴', `<span class="loss">мониторинг: ошибка</span> — ${m.error || ''} (повторяю каждые 20 с)`));
-  else if (mAge > 120) out.push(row('🔴', `<span class="loss">мониторинг молчит ${ago(m.t)}</span> — бот завис или выключен`));
+  else if (mAge > 120) out.push(row('🔴', `<span class="loss">мониторинг молчит ${ago(m.t)}</span> — ${a.stuck || 'бот завис или выключен'}`));
   else out.push(row('🟢', `бот работает · проверка цен ${ago(m.t)}`));
   const b = a.boot;
   if (b) out.push(row('🔁', `запущен ${hm(b.t)} (v${b.version}) · восстановлено с диска: активных зон ${b.zones}, лесенок ${b.ladders}${b.positions ? `, в позиции ${b.positions}` : ''}${b.real ? `, с ордерами на бирже ${b.real}` : ''}`));

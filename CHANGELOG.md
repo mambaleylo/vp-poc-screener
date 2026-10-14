@@ -19667,3 +19667,11 @@ v0.99.600 - /update (and the web update button) answering "✅ Уже после
          restarts on it. A second /update meanwhile doesn't start another loop.
          It stops after 20 minutes (the whole bot file is downloaded each time)
          with "новой версии не появилось — /update, чтобы проверить снова".
+v0.99.601 - Zones monitor still went silent on v0.99.600 (/ping: "мониторинг молчит 15
+         мин"). A second way it could wait: every coin's candle cache has a lock,
+         and a slow job (the training zones' replay from the chart, the finders)
+         holding it while queued in the backtest lane kept the monitor waiting on
+         the same coin. A live caller now never waits for that lock — it reads the
+         exchange directly. And the monitor records what it is doing: when it is
+         silent, /ping and the tab say where it stands ("висит на: лесенка TAO_USDT
+         (6 мин)", "позиции и ордера на бирже", …) instead of only "бот завис".
