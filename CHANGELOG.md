@@ -19675,3 +19675,12 @@ v0.99.601 - Zones monitor still went silent on v0.99.600 (/ping: "монитор
          exchange directly. And the monitor records what it is doing: when it is
          silent, /ping and the tab say where it stands ("висит на: лесенка TAO_USDT
          (6 мин)", "позиции и ордера на бирже", …) instead of only "бот завис".
+v0.99.602 - Zones monitor after a restart (user's /ping: at 15:49 "молчит 21 мин", at 15:54
+         "13 мин"): one pass walked every ladder reading its candles — with
+         hundreds of our finders' observation ladders that took 8–13 minutes, and
+         the "last check" stamp was the time the pass BEGAN, so the numbers jumped
+         around. Now: the ladders with orders on the exchange first, then the
+         author's posts, and the finders' observation-only ladders get at most
+         20 s per pass (checked-longest-ago first, the rest next pass — their
+         candles since the last check are all read then); the stamp is when the
+         pass ENDED; a long pass shows "круг проверки идёт уже N мин, сейчас: …".

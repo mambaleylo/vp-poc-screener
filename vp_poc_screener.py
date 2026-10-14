@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.601"
+APP_VERSION = "0.99.602"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -26506,6 +26506,7 @@ def _zones_ladder_tick(group, now, p, pos_map):
 
 
 _zones_revive_check = [0.0]
+ZONES_OBS_BUDGET_SEC = float(os.environ.get("VP_ZONES_OBS_BUDGET_SEC", 20))   # v0.99.602
 # v0.99.601 — what the monitor is doing right now (no lock: read even if something hangs), so a
 # silent monitor says where it stands
 _ZMON = {"stage": "", "since": 0.0}
@@ -26517,8 +26518,12 @@ def _zmon(stage):
 
 def zones_monitor_stuck_txt(now=None):
     now = now or time.time()
-    st, since = _ZMON.get("stage"), _ZMON.get("since") or 0
-    return f"висит на: {st} ({int((now - since) // 60)} мин)" if st and now - since > 60 else ""
+    st, since, ps = _ZMON.get("stage"), _ZMON.get("since") or 0, _ZMON.get("pass_start") or 0
+    if st and now - since > 60:
+        return f"висит на: {st} ({int((now - since) // 60)} мин)"
+    if ps and now - ps > 120:   # v0.99.602 — no single step is stuck, the pass itself is long
+        return f"круг проверки идёт уже {int((now - ps) // 60)} мин, сейчас: {st or '—'}"
+    return ""
 
 
 def zones_monitor_tick(last_track=0.0):
@@ -26533,6 +26538,7 @@ def zones_monitor_tick(last_track=0.0):
         real_tails = [z for z in ZONES["zones"] if z.get("status") not in ("watch", "in_trade") and _zones_real_live(z)]
     if not active and not any_appr and not real_tails:
         return last_track
+    _ZMON["pass_start"] = time.time()
     _zmon("цены с биржи")
     prices = _zones_symbols_and_prices()
     now = time.time()
@@ -26577,11 +26583,27 @@ def zones_monitor_tick(last_track=0.0):
         except Exception as e:
             log_error(f"zones positions: {e}")
             pos_map = None
-    for g in groups.values():
+    # v0.99.602 — user (/ping right after a restart: "молчит 21 мин", 5 min later "13 мин"): one
+    # pass walked hundreds of ladders, each reading its candles — 8…13 minutes. Now the ladders
+    # with orders on the exchange go first, then the author's posts (they may place orders), and
+    # our finders' observation-only ladders get at most ZONES_OBS_BUDGET_SEC per pass — the ones
+    # checked longest ago first, the rest on the next pass (their candles since the last check are
+    # all read then, nothing is missed)
+    def _gprio(g):
+        if any(_zones_real_live(z) for z in g):
+            return 0
+        return 2 if all(z.get("own") or z.get("oc") for z in g) else 1
+    glist = sorted(groups.values(), key=lambda g: (_gprio(g), min((z.get("trade") or {}).get("chk_at", 0) for z in g)))
+    obs_until = None
+    for k_, g in enumerate(glist):
+        if _gprio(g) == 2:
+            obs_until = obs_until or time.time() + ZONES_OBS_BUDGET_SEC   # counted from the first of them
+            if time.time() > obs_until:
+                break
         g.sort(key=lambda z: -max(z["levels"]) if z["side"] == "long" else min(z["levels"]))
         if pos_map is None and any((z.get("trade") or {}).get("real") for z in g):
             continue   # no exchange answer this round: don't decide anything about the real orders
-        _zmon(f"лесенка {g[0].get('symbol')}")
+        _zmon(f"лесенка {g[0].get('symbol')} ({k_ + 1}/{len(glist)})")
         try:
             changed = _zones_ladder_tick(g, now, p, pos_map if pos_map is not None else {"_px": prices, "_ax": ax_map}) or changed
         except Exception as e:
@@ -26595,7 +26617,7 @@ def zones_monitor_tick(last_track=0.0):
         except Exception as e:
             log_error(f"zones ladder tail {z.get('symbol')}: {e}")
     with _zones_lock:
-        ZONES["monitor_ok"] = now
+        ZONES["monitor_ok"] = time.time()   # v0.99.602 — when the pass ENDED (was: when it began)
     if now - last_ok > 60:
         changed = True   # keep the last good tick on disk (a restart knows how long it was off)
     if now - last_track >= 120:
@@ -26631,6 +26653,7 @@ def zones_monitor_tick(last_track=0.0):
         _zmon("сохранение")
         zones_save()
     _zmon("")
+    _ZMON["pass_start"] = 0.0
     return last_track
 
 
