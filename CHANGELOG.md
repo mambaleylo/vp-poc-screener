@@ -19719,3 +19719,14 @@ v0.99.605 - Zones: the stop research (15 variants replayed over every finished l
          whole history it would otherwise be the heaviest part of every 30-minute
          learning pass. The confirmed stop's choice is unchanged: the top-1 on the
          older 70%, used only while it beats the plain stop on the newer 30%.
+v0.99.606 - Zones: the margin is planned for the ladders that are usually on at once (user:
+         "the balance isn't enough for all the limits — find the most trades at
+         once, keep counting, cap the risk so that many can open"). Counted: on the
+         history replay (fill → exit, the maximum of every busy day) and live (the
+         ladders holding orders or a position on the exchange, the maximum per
+         day, 60 days kept); the plan N = the 90th percentile of those days (at
+         least 3). One ladder's margin is capped at 90% of the balance / N — a
+         ladder whose risk needs more gets a proportionally smaller risk, and its
+         autotrade line says "риск 14% → 8.4%: залог одной лесенки не больше $180
+         (90% баланса на 5 лесенок разом)". The "💼 Лесенки одновременно и залог"
+         card shows the numbers.

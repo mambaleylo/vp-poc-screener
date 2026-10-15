@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.605"
+APP_VERSION = "0.99.606"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24174,6 +24174,58 @@ ZONES_STOPX_RET_H = (2, 4, 8)           # hours after the stop's touch to close 
 ZONES_STOPX_HARD = (3.0, 6.0)           # the exchange stop this % of the price beyond the planned one
 
 
+# v0.99.606 — user: "не хватает баланса на все лимитки — определять максимальное количество сделок,
+# вести подсчёт на будущее и ограничивать риск так, чтобы такое количество можно было открыть". How many
+# ladders are on at once is counted (the history replay + live, by day); the margin of one ladder is
+# capped at ZONES_MARGIN_USE of the balance / that number — a ladder whose risk would need more gets a
+# smaller risk (and says so).
+ZONES_MARGIN_USE = 0.9          # the share of the balance the ladders' margin may take together
+ZONES_CONC_MIN = 3              # never plan for fewer ladders at once
+ZONES_CONC_Q = 0.9              # the "usual most" = this quantile of the busy days' maximum
+
+
+def zones_conc_from_runs(results):
+    """ladders open at once on the history (fill -> exit): the maximum of every busy day"""
+    ev = []
+    for r in results:
+        if r and r.get("t_in") is not None and r.get("t_out") is not None:
+            ev.append((r["t_in"], 1))
+            ev.append((r["t_out"] + 1, -1))
+    ev.sort()
+    cur, by_day = 0, {}
+    for t, d in ev:
+        cur += d
+        k = int(t // 86400)
+        by_day[k] = max(by_day.get(k, 0), cur)
+    days = sorted(v for v in by_day.values() if v > 0)
+    if not days:
+        return {"days": 0}
+    return {"days": len(days), "max": days[-1], "q": days[min(len(days) - 1, int(ZONES_CONC_Q * len(days)))]}
+
+
+def zones_conc_live_note(n_now):
+    """the live count of ladders with orders / a position on the exchange, its maximum per day (60 days)"""
+    day = time.strftime("%Y-%m-%d", time.gmtime())
+    with _zones_lock:
+        cl = ZONES.setdefault("conc_live", {})
+        if n_now > cl.get(day, -1):
+            cl[day] = n_now
+            for k in sorted(cl)[:-60]:
+                cl.pop(k, None)
+            return True
+    return False
+
+
+def zones_conc_target():
+    """how many ladders the margin is planned for: the usual most at once on the history and live"""
+    with _zones_lock:
+        hist = ((ZONES.get("learned") or {}).get("conc") or {})
+        live = sorted(v for v in (ZONES.get("conc_live") or {}).values() if v > 0)
+    lq = live[min(len(live) - 1, int(ZONES_CONC_Q * len(live)))] if live else 0
+    n = max(ZONES_CONC_MIN, hist.get("q") or 0, lq)
+    return {"n": int(n), "hist": hist, "live_q": lq, "live_max": live[-1] if live else 0, "live_days": len(live)}
+
+
 ZONES_STOPX_ENABLED = os.environ.get("VP_ZONES_STOPX", "1") == "1"   # v0.99.604
 ZONES_STOPX_MIN_TEST = 20
 
@@ -24696,7 +24748,12 @@ def zones_learn():
         except Exception as e:
             log_error(f"zones stopx research: {e}")
             stopx = None
-    learned = {"at": now, "n": len(rs), "rule": rule, "author_exit": ax_cmp, "stopx": stopx, "tp_auto": tp_auto, "tp_rows": tp_rows, "be_rows": be_rows,
+    try:   # v0.99.606
+        conc = zones_conc_from_runs(per)
+    except Exception as e:
+        log_error(f"zones conc: {e}")
+        conc = None
+    learned = {"at": now, "n": len(rs), "rule": rule, "author_exit": ax_cmp, "stopx": stopx, "conc": conc, "tp_auto": tp_auto, "tp_rows": tp_rows, "be_rows": be_rows,
                "be_auto": rule.get("be"),
                "tp_by": "auto" if auto else round(rf * 100, 2),
                "res": res, "risk_tab": risk_tab, "edge": edge, "diag": diag,
@@ -26100,6 +26157,17 @@ def _zones_real_place(tr):
             stop_px = tr.get("hard") or tr["sl"]   # v0.99.604 — sized for the exchange's (emergency) stop
             margin, lev, skip = compute_risk_based_position(direction, avg, stop_px, cap, mmr, equity, risk_pct=risk,
                                                             symbol=sym, tiers_by_symbol=tb)
+            # v0.99.606 — the margin of one ladder at most ZONES_MARGIN_USE / N of the balance, N = the
+            # ladders usually on at once: a bigger one gets a proportionally smaller risk
+            ct = zones_conc_target()
+            slot = (equity or 0) * ZONES_MARGIN_USE / ct["n"]
+            if not skip and margin and slot and margin > slot * 1.02:
+                risk0, risk = risk, round(risk * slot / margin, 3)
+                margin, lev, skip = compute_risk_based_position(direction, avg, stop_px, cap, mmr, equity, risk_pct=risk,
+                                                                symbol=sym, tiers_by_symbol=tb)
+                rec["risk_pct"] = risk
+                rec["risk_capped"] = (f"риск {risk0:g}% → {risk:.2g}%: залог одной лесенки не больше ${slot:.0f} "
+                                      f"({ZONES_MARGIN_USE * 100:.0f}% баланса на {ct['n']} лесенок разом)")
             contracts, idx, per, m_act = 0, [], 0, 0.0
             if not skip:
                 contracts, _n, m_act, skip = compute_contracts_from_margin(sym, avg, margin, lev)
@@ -26182,7 +26250,8 @@ def _zones_real_place(tr):
                                   "seen": False, "done": False, "cancelled": False}
                     rec["status"] = "LIMITS"
                     rec["detail"] = (rec["detail"] or "") + f" лимиток {len(legs)} × {per} контр., плечо {lev}x" \
-                        + (f", убыток на стопе ${rec['loss_at_stop']:.2f}" if rec.get("loss_at_stop") is not None else "")
+                        + (f", убыток на стопе ${rec['loss_at_stop']:.2f}" if rec.get("loss_at_stop") is not None else "") \
+                        + (f"; {rec['risk_capped']}" if rec.get("risk_capped") else "")
                 else:
                     rec["status"] = "ERROR"
     except Exception as e:
@@ -26843,6 +26912,11 @@ def zones_monitor_tick(last_track=0.0):
             changed = _zones_ladder_tick(g, now, p, pos_map if pos_map is not None else {"_px": prices, "_ax": ax_map}) or changed
         except Exception as e:
             log_error(f"zones ladder {g[0].get('symbol')}: {e}")
+    try:   # v0.99.606 — ladders holding orders / a position on the exchange right now
+        n_on = sum(1 for g in groups.values() for z in g if _zones_real_live(z)) + len(real_tails)
+        changed = zones_conc_live_note(n_on) or changed
+    except Exception as e:
+        log_error(f"zones conc live: {e}")
     for z in real_tails:   # our record is closed, the exchange side not yet (position / limits left)
         if pos_map is None:
             break
@@ -29304,6 +29378,7 @@ def api_zones_status():
     act["now"] = time.time()
     return jsonify({"posts": posts, "zones": zones, "learned": learned, "stats": stats, "params": zones_params(),
                     "stopx_live": zones_stopx_rule(), "stopx_txt": zones_stopx_txt(zones_stopx_rule()),   # v0.99.604
+                    "conc": zones_conc_target(), "margin_use": ZONES_MARGIN_USE,   # v0.99.606
                     "act": act,
                     "approach": approach, "autotrade_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
                     "pb": zones_pb_stats(), "pb_variant": zones_pb_variant(), "pb_tg": zones_pb_tg(),   # v0.99.523
@@ -34070,6 +34145,19 @@ function zStatusHtml(d) {
   if (o && o.checked) out.push(row('🧹', `проверка «лишних» ордеров на бирже ${ago(o.checked)}${o.n ? ` — снято ${o.n}` : ' — всё чисто'}`));
   return `<div class="zcard"><div class="zh">📟 Состояние</div><div style="font-size:var(--fs-sm);">${out.join('')}</div></div>`;
 }
+// v0.99.606 — how many ladders are on at once, and the margin one ladder may take
+function zonesConcCard(d, card) {
+  const c = d.conc;
+  if (!c) return '';
+  const h = c.hist || {}, slot = Math.round((d.margin_use || 0.9) * 100 / c.n * 10) / 10;
+  return card('💼 Лесенки одновременно и залог', `<div style="font-size:var(--fs-sm);">
+    Обычно одновременно открыто до <b>${c.n}</b> лесенок — под столько бот держит залог.
+    <div class="zkv" style="margin-top:6px;">
+      <div>по истории постов</div><div>${h.days ? `обычно до ${h.q}, максимум ${h.max} <span class="dim">(${h.days} дн. с позициями)</span>` : '—'}</div>
+      <div>вживую на бирже</div><div>${c.live_days ? `обычно до ${c.live_q}, максимум ${c.live_max} <span class="dim">(${c.live_days} дн.)</span>` : 'считаю с этого дня'}</div>
+    </div>
+    <div style="margin-top:6px;">Залог одной лесенки — не больше <b>~${slot}%</b> баланса (${Math.round((d.margin_use || 0.9) * 100)}% баланса / ${c.n}). Если при твоём риске лесенке нужно больше — бот уменьшает риск именно этой лесенки и пишет об этом в её автосделке.</div></div>`);
+}
 // v0.99.603 — the stops on the history: what the price did after them, and the confirmed-stop variants
 function zonesStopxCard(x, card, d) {
   if (!x || !x.after) return '';
@@ -34306,7 +34394,7 @@ async function refreshZones() {
     ${act.length ? zonePostBlocks(act) : '<div class="dim" style="margin-bottom:10px;">нет — новые посты из группы появятся здесь</div>'}
     ${zoneTradesHtml(closedTr)}
     <div class="zsec">Правила и риск</div>
-    ${ruleCard}${zonesStopxCard(lr.stopx, card, d)}${diagCard}${riskCard}${apCard}${hypCard}${behCard}
+    ${ruleCard}${zonesStopxCard(lr.stopx, card, d)}${zonesConcCard(d, card)}${diagCard}${riskCard}${apCard}${hypCard}${behCard}
     <div class="zsec">Источники</div>
     ${zutHtml(ut)}
     <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 10px;">или ${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
