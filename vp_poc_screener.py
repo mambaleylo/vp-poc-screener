@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.603"
+APP_VERSION = "0.99.604"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24174,6 +24174,66 @@ ZONES_STOPX_RET_H = (2, 4, 8)           # hours after the stop's touch to close 
 ZONES_STOPX_HARD = (3.0, 6.0)           # the exchange stop this % of the price beyond the planned one
 
 
+ZONES_STOPX_ENABLED = os.environ.get("VP_ZONES_STOPX", "1") == "1"   # v0.99.604
+ZONES_STOPX_MIN_TEST = 20
+
+
+def zones_stopx_rule():
+    """v0.99.604 — the confirmed stop for NEW ladders (user: "да"): the research's best variant,
+    only while it beat the plain stop on the newer ladders it wasn't chosen on. None = plain stop.
+    Re-checked after every learning pass — a variant that stops winning is dropped by itself."""
+    if not ZONES_STOPX_ENABLED:
+        return None
+    with _zones_lock:
+        x = (ZONES.get("learned") or {}).get("stopx") or {}
+    b, base = x.get("best"), x.get("base")
+    if not b or not base or b.get("kind") not in ("close", "ret"):
+        return None
+    bt, st = b.get("test") or {}, base.get("test") or {}
+    if (bt.get("n") or 0) < ZONES_STOPX_MIN_TEST or bt.get("avg_r") is None or st.get("avg_r") is None \
+            or bt["avg_r"] <= st["avg_r"]:
+        return None
+    return {"kind": b["kind"], "k_h": b["k_h"], "hard": float(b["hard"]), "risk_x": b.get("risk_x")}
+
+
+def zones_stopx_txt(sx):
+    if not sx:
+        return ""
+    why = (f"свечи 15м закрываются за стопом {sx['k_h']} ч подряд" if sx["kind"] == "close" and sx["k_h"]
+           else "первая свеча 15м закрылась за стопом" if sx["kind"] == "close"
+           else f"цена за {sx['k_h']} ч не закрылась обратно за 2-й точкой входа")
+    return f"стоп с подтверждением: закрою, когда {why}; на бирже аварийный стоп на {sx['hard']:g}% дальше"
+
+
+def zones_stopx_check(tr, c, sec, s):
+    """v0.99.604 — one candle against the ladder's confirmed stop (the same rule as the research,
+    judged on 15-minute closes: a 1-minute close only counts when it ends a 15-minute candle).
+    True = confirmed: close the trade at this close."""
+    sx = tr.get("stopx")
+    if not sx or tr.get("sl_be"):
+        return False
+    c_end = c["time"] + sec
+    if c_end % 900:
+        return False
+    sl = tr["sl"]
+    beyond = (c["close"] < sl) if s > 0 else (c["close"] > sl)
+    if sx["kind"] == "close":
+        if beyond:
+            tr["sx_t"] = tr.get("sx_t") or c_end
+            return c_end - tr["sx_t"] >= sx["k_h"] * 3600
+        tr["sx_t"] = None
+        return False
+    second = tr["legs"][1]["lim"] if len(tr["legs"]) > 1 else tr["legs"][0]["lim"]
+    if not tr.get("sx_t") and ((c["low"] <= sl) if s > 0 else (c["high"] >= sl)):
+        tr["sx_t"] = c["time"]
+    if tr.get("sx_t"):
+        if (c["close"] > second) if s > 0 else (c["close"] < second):
+            tr["sx_t"] = None
+            return False
+        return c_end - tr["sx_t"] >= sx["k_h"] * 3600
+    return False
+
+
 def zone_ladder_sim_stopx(cs, group, tp_pct, start, end, buf=None, be=None, kind="base", k_h=0, hard=0.0):
     """zone_ladder_sim() with a confirmed stop: the hard stop (the exchange's) hard % beyond the planned
     one; the planned one closes the trade only when confirmed — kind "close": candle closes beyond it
@@ -26026,7 +26086,8 @@ def _zones_real_place(tr):
             lims = [l["lim"] for l in tr["legs"]]
             avg = sum(lims) / len(lims)
             rec["entry"], rec["risk_pct"] = avg, risk
-            margin, lev, skip = compute_risk_based_position(direction, avg, tr["sl"], cap, mmr, equity, risk_pct=risk,
+            stop_px = tr.get("hard") or tr["sl"]   # v0.99.604 — sized for the exchange's (emergency) stop
+            margin, lev, skip = compute_risk_based_position(direction, avg, stop_px, cap, mmr, equity, risk_pct=risk,
                                                             symbol=sym, tiers_by_symbol=tb)
             contracts, idx, per, m_act = 0, [], 0, 0.0
             if not skip:
@@ -26057,8 +26118,8 @@ def _zones_real_place(tr):
             if not skip and equity:
                 mult = float(spec.get("quanto_multiplier") or 1)
                 budget = equity * risk / 100
-                done_loss = sum(abs(l["fill"] - tr["sl"]) for l in tr["legs"] if l["fill"] is not None) * per * mult
-                loss_of = lambda ii: done_loss + sum(abs(lims[i] - tr["sl"]) + (lims[i] + tr["sl"]) * 0.0006 for i in ii) * per * mult
+                done_loss = sum(abs(l["fill"] - stop_px) for l in tr["legs"] if l["fill"] is not None) * per * mult
+                loss_of = lambda ii: done_loss + sum(abs(lims[i] - stop_px) + (lims[i] + stop_px) * 0.0006 for i in ii) * per * mult
                 first_loss = loss_of(idx)
                 if loss_of(idx) > budget * 1.05:
                     # v0.99.521 — the lots go to deeper lines (closer to the stop: less loss
@@ -26091,7 +26152,7 @@ def _zones_real_place(tr):
                 rec["status"], rec["detail"] = "SKIPPED", skip
             elif AUTOTRADE_DRY_RUN:
                 rec["status"] = "DRY_RUN"
-                rec["detail"] = f"dry-run: лимитки {len(idx)} × {per} контр. по {lev}x, стоп {tr['sl']:.6g}"
+                rec["detail"] = f"dry-run: лимитки {len(idx)} × {per} контр. по {lev}x, стоп {stop_px:.6g}"
             else:
                 set_leverage(sym, lev)
                 legs = []
@@ -26223,7 +26284,8 @@ def _zones_real_step(tr, pos_map):
                     tot = sum(l_.get("filled") or 0 for l_ in r["legs"] if l_ is not leg) + f
                     zones_notify(f"💰 {sym}: на бирже исполнилась лимитка {leg['i'] + 1}/{len(tr['legs'])} по "
                                  f"{float(o.get('fill_price') or leg['price']):.6g} ({f} контр.) · в позиции {tot} контр. · "
-                                 f"стоп {tr['sl']:.6g} ставлю на бирже")
+                                 f"стоп {(tr.get('hard') or tr['sl']):.6g} ставлю на бирже"
+                                 + (" (аварийный; обычный закрою по подтверждению)" if tr.get("hard") else ""))
                 leg["filled"], changed = f, True
                 r["t_change"] = now
             if o.get("status") == "finished":
@@ -26324,7 +26386,7 @@ def _zones_real_step(tr, pos_map):
                     r[f"{kind}_id"] = None
                     r[f"{kind}_lost"] = r.get(f"{kind}_lost", 0) + 1
                     changed = True
-            sl_eff = r.get("be_px") or tr["sl"]
+            sl_eff = r.get("be_px") or tr.get("hard") or tr["sl"]   # v0.99.604 — the emergency stop when confirmed
             if not r.get("sl_id"):
                 try:
                     if place("sl", sl_eff) and r.get("sl_lost"):
@@ -26414,7 +26476,7 @@ def _zones_real_live(z):
 
 def _zones_ladder_finish(tr, group, res, px, tx):
     s = 1 if tr["direction"] == "LONG" else -1
-    pn = zones_ladder_pnl(tr, s, tr["sl"], px)
+    pn = zones_ladder_pnl(tr, s, tr.get("hard") or tr["sl"], px)   # v0.99.604 — R to the stop the risk is sized for
     with _zones_lock:
         tr.update({"status": "CLOSED", "result": res, "exit_price": px, "exit_time": tx, "entry": pn["avg"],
                    "pnl_r": round(pn["r"], 3), "pnl_pct": round(pn["pct"], 2), "filled": pn["filled"]})
@@ -26505,11 +26567,14 @@ def _zones_ladder_tick(group, now, p, pos_map):
         tr = {"kind": "ladder", "symbol": sym, "direction": "LONG" if s > 0 else "SHORT", "time": int(now),
               "legs": [{"level": v, "lim": x, "fill": None, "t": None} for v, x in zip(pl["levels"], pl["limits"])],
               "sl": pl["sl"], "tp_pct": lead.get("oc_tp") or p["tp"], "tp": None, "entry": None, "status": "PENDING", "result": None,
+              "stopx": None if (lead.get("own") or lead.get("oc")) else zones_stopx_rule(),   # v0.99.604
               "be": None if lead.get("oc") else p.get("be"),
               "chk_t": int(max(lead["post_time"], now - 3 * 86400)), "zones": [z["id"] for z in group],
               "params": {k: p[k] for k in ("buf", "tp")}, "no_auto": zones_post_no_auto(post),
               "autotrade_fired": False, "autotrade": None, "real": None, "exit_price": None, "exit_time": None,
               "pnl_r": None}
+        if tr["stopx"]:   # v0.99.604 — the exchange's (emergency) stop this much farther
+            tr["hard"] = tr["sl"] * (1 - s * tr["stopx"]["hard"] / 100)
         with _zones_lock:
             lead["trade"] = tr
             for zz in group:
@@ -26518,6 +26583,7 @@ def _zones_ladder_tick(group, now, p, pos_map):
         zones_znotify(lead, f"📋 {sym} {'лонг' if s > 0 else 'шорт'}: лимитки {len(tr['legs'])} шт. — {lim_txt}\n"
                             f"стоп {tr['sl']:.6g} ({p['buf']:g}% за дальней линией) · тейк +{tr['tp_pct']:g}% от средней цены входа"
                             + (f" · безубыток после +{tr['be']:g}%" if tr.get("be") else "")
+                            + (f"\n🛑 {zones_stopx_txt(tr['stopx'])} ({tr['hard']:.6g}); риск считается до него" if tr.get("stopx") else "")
                             + (f"\n⚠️ {tr['no_auto']} — без автосделки" if tr["no_auto"] else ""))
         changed = True
     # v0.99.492 — the real limits sit on the exchange only while the price is near
@@ -26587,7 +26653,15 @@ def _zones_ladder_tick(group, now, p, pos_map):
             if c["time"] < t0 or c["time"] + sec > now:
                 continue
             had_be = bool(tr.get("sl_be"))
-            new = zones_ladder_step(tr, c, s, tr["sl"], tr["tp_pct"], tr.get("be"))
+            new = zones_ladder_step(tr, c, s, tr.get("hard") or tr["sl"], tr["tp_pct"], tr.get("be"))
+            if (not tr.get("result") and tr.get("stopx") and any(l["fill"] is not None for l in tr["legs"])
+                    and zones_stopx_check(tr, c, sec, s)):
+                # v0.99.604 — the stop confirmed: the exchange's position goes at the market now
+                if tr.get("real") and _zones_pos(pos_map, sym, s) and not _zones_close_real(sym, tr["direction"], "confirmed stop"):
+                    break   # the exchange didn't confirm: this candle again next round
+                tr["result"], tr["exit"], tr["t_out"] = "LOSS", c["close"], c["time"]
+                zones_znotify(lead, f"🛑 {sym}: стоп подтвердился — {zones_stopx_txt(tr['stopx']).split(';')[0].replace('стоп с подтверждением: закрою, когда ', '')}"
+                                    f"; закрыл по {c['close']:.6g}", important=True)
             tr["chk_t"] = c["time"] + sec
             changed = True
             if tr.get("sl_be") and not had_be and not tr.get("result"):
@@ -29218,6 +29292,7 @@ def api_zones_status():
     act["monitor_age"] = round(time.time() - mon_ok) if mon_ok else None
     act["now"] = time.time()
     return jsonify({"posts": posts, "zones": zones, "learned": learned, "stats": stats, "params": zones_params(),
+                    "stopx_live": zones_stopx_rule(), "stopx_txt": zones_stopx_txt(zones_stopx_rule()),   # v0.99.604
                     "act": act,
                     "approach": approach, "autotrade_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
                     "pb": zones_pb_stats(), "pb_variant": zones_pb_variant(), "pb_tg": zones_pb_tg(),   # v0.99.523
@@ -33985,8 +34060,11 @@ function zStatusHtml(d) {
   return `<div class="zcard"><div class="zh">📟 Состояние</div><div style="font-size:var(--fs-sm);">${out.join('')}</div></div>`;
 }
 // v0.99.603 — the stops on the history: what the price did after them, and the confirmed-stop variants
-function zonesStopxCard(x, card) {
+function zonesStopxCard(x, card, d) {
   if (!x || !x.after) return '';
+  const live = (d || {}).stopx_live
+    ? `<div class="zbanner pos" style="margin-bottom:8px;">▶ <b>Включено в торговле</b> (новые лесенки по постам автора): ${d.stopx_txt}. Позиция считается от аварийного стопа — риск в % тот же, позиция меньше в ~${d.stopx_live.risk_x} раза. Лесенки, открытые раньше, доживают со своим стопом.</div>`
+    : `<div class="zbanner warn" style="margin-bottom:8px;">Сейчас в торговле обычный стоп — ни один вариант с подтверждением не обыграл его на новых лесенках${(x.best && x.best.test && x.best.test.n < 20) ? ' (или новых лесенок меньше 20)' : ''}.</div>`;
   const a = x.after, f = v => v == null ? '—' : v;
   const R = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
   const N = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${(+v).toFixed(2)}</span>`;
@@ -34000,7 +34078,7 @@ function zonesStopxCard(x, card) {
   const verdict = !b ? '' : (b.test.avg_r != null && base.test.avg_r != null && b.test.avg_r > base.test.avg_r
     ? `<div class="zbanner pos">На новых ${b.test.n} лесенках (их выбор не видел) лучше обычного стопа: <b>${name(b)}</b> — ${R(b.test.avg_r)} против ${R(base.test.avg_r)} на сделку. Риск на сделку для этого нужен меньше в ~${b.risk_x} раза (убыток считается до стопа на бирже).</div>`
     : `<div class="zbanner warn">Лучший на обучении вариант (<b>${name(b)}</b>) на новых лесенках не лучше обычного стопа: ${R(b.test.avg_r)} против ${R(base.test.avg_r)}. Пока менять стоп не на что.</div>`);
-  return card('🛑 Стопы на истории — что было после и стоп с подтверждением', `
+  return card('🛑 Стопы на истории — что было после и стоп с подтверждением', `${live}
     <div style="font-size:var(--fs-sm);">Выбито стопом по нынешним правилам: <b>${a.n}</b> лесенок. После стопа цена всё-таки дошла до тейка в <b>${f(a.tp_pct)}%</b> случаев (обычно через ~${f(a.tp_hours)} ч), вернулась к средней цене входа — в ${f(a.avg_pct)}%, закрылась обратно за 2-й точкой входа — в ${f(a.second_pct)}%.</div>
     <div class="zkv" style="margin-top:6px;font-size:var(--fs-sm);">
       <div>вынос за стоп, вернулись</div><div>~${f(a.os_back)}% (80% — до ${f(a.os_back_p80)}%)</div>
@@ -34010,7 +34088,7 @@ function zonesStopxCard(x, card) {
     </div>
     <div style="overflow-x:auto;margin-top:8px;"><table style="font-size:var(--fs-xs);white-space:nowrap;width:100%;"><thead><tr style="text-transform:none;"><th style="text-align:left;">закрывать, когда</th><th>тест R</th><th>+%</th><th>риск</th></tr></thead><tbody>${rows}</tbody></table></div>
     ${verdict}
-    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">R — к убытку при стопе на бирже (на него и считается риск), «биржа» — стоп на бирже дальше обычного, «тест R» — на новых лесенках, «+%» — доля сделок в плюс на тесте, «риск ×» — во сколько раз этот убыток больше обычного стопа: настолько же меньше надо ставить % риска. Выбор — на старых ${x.cut} лесенках, проверка — на новых ${x.n - x.cut}. Только разбор: торговля пока не меняется.</div>`);
+    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">R — к убытку при стопе на бирже (на него и считается риск), «биржа» — стоп на бирже дальше обычного, «тест R» — на новых лесенках, «+%» — доля сделок в плюс на тесте, «риск ×» — во сколько раз этот убыток больше обычного стопа: настолько же меньше надо ставить % риска. Выбор — на старых ${x.cut} лесенках, проверка — на новых ${x.n - x.cut}. Пересчитывается при каждом обучении: перестанет выигрывать — бот сам вернётся к обычному стопу.</div>`);
 }
 async function refreshZones() {
   const panel = document.getElementById('zonesPanel');
@@ -34217,7 +34295,7 @@ async function refreshZones() {
     ${act.length ? zonePostBlocks(act) : '<div class="dim" style="margin-bottom:10px;">нет — новые посты из группы появятся здесь</div>'}
     ${zoneTradesHtml(closedTr)}
     <div class="zsec">Правила и риск</div>
-    ${ruleCard}${zonesStopxCard(lr.stopx, card)}${diagCard}${riskCard}${apCard}${hypCard}${behCard}
+    ${ruleCard}${zonesStopxCard(lr.stopx, card, d)}${diagCard}${riskCard}${apCard}${hypCard}${behCard}
     <div class="zsec">Источники</div>
     ${zutHtml(ut)}
     <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 10px;">или ${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>

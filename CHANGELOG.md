@@ -19701,3 +19701,15 @@ v0.99.603 - Zones: research of the stops on the history, step one of a confirmed
          risk is sized for it) and how much lower the risk % must be. Chosen on
          the older 70% of the ladders, checked on the newer 30%. Shown in the
          "🛑 Стопы на истории" card; the live trading doesn't change yet.
+v0.99.604 - Zones: the confirmed stop is live (user: "да"). New ladders from the author's
+         posts take the stop research's best variant while it beats the plain stop
+         on the newer ladders it wasn't chosen on (≥ 20 of them; re-checked after
+         every learning pass, back to the plain stop by itself otherwise): the
+         exchange gets an emergency stop that much farther (e.g. +3%), the position
+         is sized for it (same risk %, a smaller position — the leverage and the
+         liquidation follow), and the bot closes at the market only when the stop
+         is confirmed on 15-minute closes (e.g. closes beyond it N hours in a row);
+         a failed close is retried next round. R of these trades is counted to the
+         emergency stop. Ladders opened before keep their plain stop; our finders'
+         ladders are not affected. The ladder's message and the "🛑" card say what
+         is switched on.
