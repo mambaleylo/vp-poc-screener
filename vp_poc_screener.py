@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.607"
+APP_VERSION = "0.99.608"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -27543,6 +27543,24 @@ def _zut_local_only():
 
 
 SELF_UPDATE_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/main/vp_poc_screener.py"
+# v0.99.608 — user: "грузится 605 версия всё ещё" — raw.githubusercontent.com caches a branch URL for
+# up to ~5 minutes, so right after a release it served an older file. The latest commit of main is
+# asked from the GitHub API first and THAT commit's file is downloaded (a commit URL is never stale);
+# the branch URL is only the fallback when the API doesn't answer (its limit: 60 requests an hour).
+SELF_UPDATE_API = "https://api.github.com/repos/mambaleylo/vp-poc-screener/commits/main"
+SELF_UPDATE_RAW_AT = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{sha}/vp_poc_screener.py"
+
+
+def self_update_url():
+    """the file of main's latest commit (exact), or the branch URL (may lag up to ~5 min)"""
+    try:
+        r = requests.get(SELF_UPDATE_API, headers={"Accept": "application/vnd.github.sha"}, timeout=20)
+        sha = r.text.strip() if r.status_code == 200 else ""
+        if re.fullmatch(r"[0-9a-f]{40}", sha):
+            return SELF_UPDATE_RAW_AT.format(sha=sha)
+    except Exception as e:
+        log_error(f"self update: latest commit not asked ({e}) — the branch URL")
+    return SELF_UPDATE_URL
 
 
 @app.route("/api/self_update", methods=["POST"])
@@ -27581,7 +27599,7 @@ def self_update_download(only_if_newer=False):
     with a human message otherwise — the current file then stays.
     only_if_newer — the same version as running: nothing is written (the retries)."""
     try:
-        r = requests.get(SELF_UPDATE_URL, params={"nocache": int(time.time())}, timeout=60)
+        r = requests.get(self_update_url(), params={"nocache": int(time.time())}, timeout=60)
         r.raise_for_status()
         code = r.content
     except Exception as e:

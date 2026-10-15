@@ -19736,3 +19736,8 @@ v0.99.607 - Zones margin plan: the number of ladders at once is now the average 
          there may have been anomalies"). Each day takes the live count where it
          was counted, else the history replay; days without a ladder count as 0.
          The card shows the average and the 7 days.
+v0.99.608 - /update downloaded an older version right after a release (user: "грузится 605
+         версия всё ещё"): raw.githubusercontent.com caches the branch URL for up to
+         ~5 minutes. The bot now asks the GitHub API for main's latest commit and
+         downloads that commit's file (a commit URL is never stale); the branch URL
+         stays as the fallback when the API doesn't answer.
