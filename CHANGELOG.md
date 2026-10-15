@@ -19730,3 +19730,9 @@ v0.99.606 - Zones: the margin is planned for the ladders that are usually on at 
          autotrade line says "риск 14% → 8.4%: залог одной лесенки не больше $180
          (90% баланса на 5 лесенок разом)". The "💼 Лесенки одновременно и залог"
          card shows the numbers.
+v0.99.607 - Zones margin plan: the number of ladders at once is now the average of the last
+         7 calendar days' maximum (rounded up, at least 3) instead of the 90th
+         percentile of all history (user: "the average of the last week — earlier
+         there may have been anomalies"). Each day takes the live count where it
+         was counted, else the history replay; days without a ladder count as 0.
+         The card shows the average and the 7 days.

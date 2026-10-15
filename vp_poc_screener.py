@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.606"
+APP_VERSION = "0.99.607"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24199,8 +24199,9 @@ def zones_conc_from_runs(results):
         by_day[k] = max(by_day.get(k, 0), cur)
     days = sorted(v for v in by_day.values() if v > 0)
     if not days:
-        return {"days": 0}
-    return {"days": len(days), "max": days[-1], "q": days[min(len(days) - 1, int(ZONES_CONC_Q * len(days)))]}
+        return {"days": 0, "by_day": {}}
+    return {"days": len(days), "max": days[-1], "q": days[min(len(days) - 1, int(ZONES_CONC_Q * len(days)))],
+            "by_day": {str(k): v for k, v in sorted(by_day.items())[-60:]}}
 
 
 def zones_conc_live_note(n_now):
@@ -24216,14 +24217,30 @@ def zones_conc_live_note(n_now):
     return False
 
 
+ZONES_CONC_DAYS = 7   # v0.99.607 — user: "the average of the last week at least — earlier there may have been anomalies"
+
+
 def zones_conc_target():
-    """how many ladders the margin is planned for: the usual most at once on the history and live"""
+    """how many ladders the margin is planned for: the average of the last ZONES_CONC_DAYS calendar
+    days' maximum at once (rounded up, at least ZONES_CONC_MIN) — live where it was counted, else the
+    history replay of the posts; days without a ladder count as 0"""
     with _zones_lock:
-        hist = ((ZONES.get("learned") or {}).get("conc") or {})
-        live = sorted(v for v in (ZONES.get("conc_live") or {}).values() if v > 0)
-    lq = live[min(len(live) - 1, int(ZONES_CONC_Q * len(live)))] if live else 0
-    n = max(ZONES_CONC_MIN, hist.get("q") or 0, lq)
-    return {"n": int(n), "hist": hist, "live_q": lq, "live_max": live[-1] if live else 0, "live_days": len(live)}
+        hist = dict((ZONES.get("learned") or {}).get("conc") or {})
+        live_raw = dict(ZONES.get("conc_live") or {})
+    live = {}
+    for k, v in live_raw.items():
+        try:
+            live[int(time.mktime(time.strptime(k, "%Y-%m-%d")) - time.timezone) // 86400] = v
+        except (ValueError, OverflowError):
+            continue
+    hb = {int(k): v for k, v in (hist.get("by_day") or {}).items()}
+    today = int(time.time() // 86400)
+    week = [live.get(d, hb.get(d, 0)) for d in range(today - ZONES_CONC_DAYS + 1, today + 1)]
+    avg = sum(week) / len(week)
+    lv = sorted(v for v in live.values() if v > 0)
+    return {"n": int(max(ZONES_CONC_MIN, math.ceil(avg - 1e-9))), "avg": round(avg, 2), "week": week,
+            "hist": {k: hist.get(k) for k in ("days", "q", "max")}, "live_q": lv[min(len(lv) - 1, int(ZONES_CONC_Q * len(lv)))] if lv else 0,
+            "live_max": lv[-1] if lv else 0, "live_days": len(lv)}
 
 
 ZONES_STOPX_ENABLED = os.environ.get("VP_ZONES_STOPX", "1") == "1"   # v0.99.604
@@ -34151,7 +34168,7 @@ function zonesConcCard(d, card) {
   if (!c) return '';
   const h = c.hist || {}, slot = Math.round((d.margin_use || 0.9) * 100 / c.n * 10) / 10;
   return card('💼 Лесенки одновременно и залог', `<div style="font-size:var(--fs-sm);">
-    Обычно одновременно открыто до <b>${c.n}</b> лесенок — под столько бот держит залог.
+    Залог рассчитан на <b>${c.n}</b> лесенок разом — в среднем столько было открыто одновременно за последние 7 дней (${c.avg}, по дням: ${(c.week || []).join(' · ')}; не меньше 3).
     <div class="zkv" style="margin-top:6px;">
       <div>по истории постов</div><div>${h.days ? `обычно до ${h.q}, максимум ${h.max} <span class="dim">(${h.days} дн. с позициями)</span>` : '—'}</div>
       <div>вживую на бирже</div><div>${c.live_days ? `обычно до ${c.live_q}, максимум ${c.live_max} <span class="dim">(${c.live_days} дн.)</span>` : 'считаю с этого дня'}</div>
