@@ -19741,3 +19741,14 @@ v0.99.608 - /update downloaded an older version right after a release (user: "г
          ~5 minutes. The bot now asks the GitHub API for main's latest commit and
          downloads that commit's file (a commit URL is never stale); the branch URL
          stays as the fallback when the API doesn't answer.
+v0.99.609 - Zones: the take in the coin's own daily moves (user: "on BTC a 20% take isn't the
+         same as 20% on a coin moving 15% a day — a mechanism for an adequate take on
+         coins like BTC"). The history is replayed with the take = k x the coin's
+         daily ATR at the post (k 0.5…8, kept within 0.5–40%) next to today's
+         one-for-all fixed %; k is chosen on the older 70% of the ladders and is used
+         for new ladders only while it beats the fixed take on the newer 30% (≥ 20)
+         — otherwise the fixed take stays. The ladder's message says "тейк +X% (k
+         дневных хода монеты)"; the "🎯 Тейк по волатильности монеты" card shows the
+         table and what it means for calm vs wild coins. The stop is not touched.
+         Recomputed once a day and when new ladders close. (v0.99.608's
+         latest-commit download is included.)

@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.608"
+APP_VERSION = "0.99.609"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24243,6 +24243,105 @@ def zones_conc_target():
             "live_max": lv[-1] if lv else 0, "live_days": len(lv)}
 
 
+# v0.99.609 — user: "на битке не тейк 20%, а 20% на монете, которая по 15% в день туда-сюда ходит — есть ли
+# механизм адекватного тейка для монет типа битка?". The take measured in the coin's own daily move: k x its
+# daily ATR (in % of the price, at the post). k is chosen on the older 70% of the ladders; it trades only
+# while it beats the one-for-all fixed % take on the newer 30%. The stop is not touched.
+ZONES_TPV_K = (0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0)
+ZONES_TPV_MIN, ZONES_TPV_MAX = 0.5, 40.0      # % — the take is kept within these
+ZONES_TPV_ENABLED = os.environ.get("VP_ZONES_TPV", "1") == "1"
+_zones_daily_cache = {}
+
+
+def zones_coin_datr(sym, t=None):
+    """the coin's daily ATR(14) in % of the price on the last day closed before t (now by default)"""
+    now = time.time()
+    c = _zones_daily_cache.get(sym)
+    if not c or now - c[0] > 6 * 3600:
+        try:
+            cs = get_candles_range(sym, "1d", int(now - 1500 * 86400), int(now)) or []
+        except Exception as e:
+            log_error(f"zones daily {sym}: {e}")
+            cs = []
+        atr = neuro_atr_series(cs, 14) if cs else []
+        c = (now, [(x["time"], a / x["close"] * 100) for x, a in zip(cs, atr) if a and x.get("close")])
+        _zones_daily_cache[sym] = c
+    rows = c[1]
+    t = now if t is None else t
+    k = bisect.bisect_left([r[0] for r in rows], t - 86400 + 1) - 1   # the last day that closed before t
+    return rows[k][1] if 0 <= k < len(rows) else None
+
+
+def zones_tpv_pct(k, datr):
+    return round(min(ZONES_TPV_MAX, max(ZONES_TPV_MIN, k * datr)), 2)
+
+
+def zones_tpv_research(runs_g, rule):
+    """v0.99.609 — every ladder replayed with the take k x its coin's daily ATR at the post, for every k,
+    next to the fixed % take; k chosen on the older 70%, checked on the newer 30%"""
+    runs = sorted(runs_g, key=lambda x: x[2])
+    cut = int(len(runs) * 0.7)
+    atr = [zones_coin_datr(g[0]["symbol"], st_) for g, _c, st_, _e in runs]
+    blk = lambda xs: {"n": len(xs), "avg_r": round(sum(xs) / len(xs), 3) if xs else None,
+                      "wr": round(sum(1 for x in xs if x > 0) / len(xs) * 100, 1) if xs else None}
+
+    def run(tp_of):
+        tr_, te_, tps = [], [], []
+        for i, (g, cs, st_, en_) in enumerate(runs):
+            if atr[i] is None:
+                continue
+            tp = tp_of(i)
+            r = zone_ladder_sim(cs, g, tp, st_, en_, be=rule.get("be"))
+            if r:
+                (tr_ if i < cut else te_).append(r["r"])
+                tps.append(tp)
+        return {"train": blk(tr_), "test": blk(te_), "tp_med": round(statistics.median(tps), 2) if tps else None}
+
+    fixed = run(lambda i: rule["tp"])
+    fixed["tp"] = rule["tp"]
+    rows = []
+    for k in ZONES_TPV_K:
+        x = run(lambda i, k=k: zones_tpv_pct(k, atr[i]))
+        x["k"] = k
+        rows.append(x)
+    cands = [x for x in rows if x["train"]["avg_r"] is not None]
+    best = max(cands, key=lambda x: x["train"]["avg_r"]) if cands else None
+    known = [a for a in atr if a is not None]
+    calm = sorted(a for a in known if a < 4)
+    wild = sorted(a for a in known if a >= 8)
+    ex = None
+    if best:
+        ex = {"calm_atr": round(statistics.median(calm), 2) if calm else None, "wild_atr": round(statistics.median(wild), 2) if wild else None}
+        ex["calm_tp"] = zones_tpv_pct(best["k"], ex["calm_atr"]) if ex["calm_atr"] else None
+        ex["wild_tp"] = zones_tpv_pct(best["k"], ex["wild_atr"]) if ex["wild_atr"] else None
+    return {"fixed": fixed, "rows": rows, "best": best, "n": len(runs), "cut": cut, "with_atr": len(known), "ex": ex}
+
+
+def zones_tpv_rule():
+    """the k of the volatility take for NEW ladders while it beats the fixed take on the newer ladders"""
+    if not ZONES_TPV_ENABLED or ZONES_TP_PCT:
+        return None
+    with _zones_lock:
+        x = (ZONES.get("learned") or {}).get("tpv") or {}
+    b, f = x.get("best"), x.get("fixed")
+    if not b or not f:
+        return None
+    bt, ft = b.get("test") or {}, f.get("test") or {}
+    if (bt.get("n") or 0) < 20 or bt.get("avg_r") is None or ft.get("avg_r") is None or bt["avg_r"] <= ft["avg_r"]:
+        return None
+    return {"k": b["k"]}
+
+
+def zones_take_for(sym, p):
+    """(take %, k or None): k x the coin's daily ATR now when the volatility take is on, else the fixed take"""
+    rv = zones_tpv_rule()
+    if rv:
+        a = zones_coin_datr(sym)
+        if a:
+            return zones_tpv_pct(rv["k"], a), rv["k"]
+    return p["tp"], None
+
+
 ZONES_STOPX_ENABLED = os.environ.get("VP_ZONES_STOPX", "1") == "1"   # v0.99.604
 ZONES_STOPX_MIN_TEST = 20
 
@@ -24765,12 +24864,25 @@ def zones_learn():
         except Exception as e:
             log_error(f"zones stopx research: {e}")
             stopx = None
+    tv_key = hashlib.md5(json.dumps([sx_key, ZONES_TPV_K, ZONES_TPV_MIN, ZONES_TPV_MAX, time.strftime("%Y-%m-%d")]).encode()).hexdigest()
+    with _zones_lock:
+        old_tv = (ZONES.get("learned") or {}).get("tpv")
+    if old_tv and old_tv.get("key") == tv_key:
+        tpv = old_tv
+    else:
+        try:   # v0.99.609
+            zones_act("learn", stage="тейк по волатильности монеты: разбор на истории")
+            tpv = zones_tpv_research(runs_g, rule)
+            tpv["key"] = tv_key
+        except Exception as e:
+            log_error(f"zones tpv research: {e}")
+            tpv = None
     try:   # v0.99.606
         conc = zones_conc_from_runs(per)
     except Exception as e:
         log_error(f"zones conc: {e}")
         conc = None
-    learned = {"at": now, "n": len(rs), "rule": rule, "author_exit": ax_cmp, "stopx": stopx, "conc": conc, "tp_auto": tp_auto, "tp_rows": tp_rows, "be_rows": be_rows,
+    learned = {"at": now, "n": len(rs), "rule": rule, "author_exit": ax_cmp, "stopx": stopx, "conc": conc, "tpv": tpv, "tp_auto": tp_auto, "tp_rows": tp_rows, "be_rows": be_rows,
                "be_auto": rule.get("be"),
                "tp_by": "auto" if auto else round(rf * 100, 2),
                "res": res, "risk_tab": risk_tab, "edge": edge, "diag": diag,
@@ -26661,9 +26773,10 @@ def _zones_ladder_tick(group, now, p, pos_map):
             return True
         with _zones_lock:
             post = next((p_ for p_ in ZONES["posts"] if p_["id"] == lead.get("post_id")), None)
+        tp_now, tp_k = zones_take_for(sym, p)   # v0.99.609
         tr = {"kind": "ladder", "symbol": sym, "direction": "LONG" if s > 0 else "SHORT", "time": int(now),
               "legs": [{"level": v, "lim": x, "fill": None, "t": None} for v, x in zip(pl["levels"], pl["limits"])],
-              "sl": pl["sl"], "tp_pct": lead.get("oc_tp") or p["tp"], "tp": None, "entry": None, "status": "PENDING", "result": None,
+              "sl": pl["sl"], "tp_pct": lead.get("oc_tp") or tp_now, "tp_k": None if lead.get("oc_tp") else tp_k, "tp": None, "entry": None, "status": "PENDING", "result": None,
               "stopx": None if (lead.get("own") or lead.get("oc")) else zones_stopx_rule(),   # v0.99.604
               "be": None if lead.get("oc") else p.get("be"),
               "chk_t": int(max(lead["post_time"], now - 3 * 86400)), "zones": [z["id"] for z in group],
@@ -26679,6 +26792,7 @@ def _zones_ladder_tick(group, now, p, pos_map):
         lim_txt = " / ".join(f"{l['lim']:.6g}" for l in tr["legs"])
         zones_znotify(lead, f"📋 {sym} {'лонг' if s > 0 else 'шорт'}: лимитки {len(tr['legs'])} шт. — {lim_txt}\n"
                             f"стоп {tr['sl']:.6g} ({p['buf']:g}% за дальней линией) · тейк +{tr['tp_pct']:g}% от средней цены входа"
+                            + (f" ({tr['tp_k']:g} дневных хода монеты)" if tr.get("tp_k") else "")
                             + (f" · безубыток после +{tr['be']:g}%" if tr.get("be") else "")
                             + (f"\n🛑 {zones_stopx_txt(tr['stopx'])} ({tr['hard']:.6g}); риск считается до него" if tr.get("stopx") else "")
                             + (f"\n⚠️ {tr['no_auto']} — без автосделки" if tr["no_auto"] else ""))
@@ -29414,6 +29528,7 @@ def api_zones_status():
     return jsonify({"posts": posts, "zones": zones, "learned": learned, "stats": stats, "params": zones_params(),
                     "stopx_live": zones_stopx_rule(), "stopx_txt": zones_stopx_txt(zones_stopx_rule()),   # v0.99.604
                     "conc": zones_conc_target(), "margin_use": ZONES_MARGIN_USE,   # v0.99.606
+                    "tpv_live": zones_tpv_rule(),   # v0.99.609
                     "act": act,
                     "approach": approach, "autotrade_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
                     "pb": zones_pb_stats(), "pb_variant": zones_pb_variant(), "pb_tg": zones_pb_tg(),   # v0.99.523
@@ -34180,6 +34295,22 @@ function zStatusHtml(d) {
   if (o && o.checked) out.push(row('🧹', `проверка «лишних» ордеров на бирже ${ago(o.checked)}${o.n ? ` — снято ${o.n}` : ' — всё чисто'}`));
   return `<div class="zcard"><div class="zh">📟 Состояние</div><div style="font-size:var(--fs-sm);">${out.join('')}</div></div>`;
 }
+// v0.99.609 — the take in the coin's own daily moves vs the one-for-all fixed %
+function zonesTpvCard(x, card, d) {
+  if (!x || !x.fixed) return '';
+  const N = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${(+v).toFixed(2)}</span>`;
+  const R = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  const b = x.best, f = x.fixed, ex = x.ex || {};
+  const rows = [`<tr><td>фиксированный +${f.tp}% для всех</td><td>${N(f.test.avg_r)}</td><td>${f.test.wr ?? '—'}</td><td>${f.tp}%</td></tr>`].concat((x.rows || []).map(r =>
+    `<tr${b && r.k === b.k ? ' style="font-weight:700;"' : ''}><td>${r.k} дневных хода</td><td>${N(r.test.avg_r)}</td><td>${r.test.wr ?? '—'}</td><td>~${r.tp_med ?? '—'}%</td></tr>`)).join('');
+  const live = (d || {}).tpv_live
+    ? `<div class="zbanner pos" style="margin-bottom:8px;">▶ <b>Включено</b> для новых лесенок: тейк = <b>${d.tpv_live.k}</b> × дневной ход монеты${ex.calm_tp ? ` — у спокойных монет (ход ~${ex.calm_atr}%/день) это ~+${ex.calm_tp}%, у резких (~${ex.wild_atr}%/день) ~+${ex.wild_tp}%` : ''}.</div>`
+    : `<div class="zbanner warn" style="margin-bottom:8px;">Сейчас тейк фиксированный +${f.tp}% для всех: тейк по волатильности на новых лесенках его не обыграл${b && b.test && b.test.n < 20 ? ' (или новых лесенок меньше 20)' : ''}.</div>`;
+  return card('🎯 Тейк по волатильности монеты', `${live}
+    <div style="font-size:var(--fs-sm);">Тейк в «дневных ходах» монеты (её средний дневной размах, ATR, на момент поста): у BTC меньше, у резких альтов больше. Лучший на старых ${x.cut} лесенках: <b>${b ? b.k + ' хода' : '—'}</b> — на новых ${x.n - x.cut}: ${R(b && b.test.avg_r)} против ${R(f.test.avg_r)} у фиксированного.</div>
+    <div style="overflow-x:auto;margin-top:8px;"><table style="font-size:var(--fs-xs);white-space:nowrap;width:100%;"><thead><tr style="text-transform:none;"><th style="text-align:left;">тейк</th><th>тест R</th><th>+%</th><th>обычно</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">«тест R» — средний результат на новых лесенках, «+%» — доля в плюс, «обычно» — типичный тейк в %. Тейк держится в пределах 0.5–40%. Стоп не меняется. Пересчёт раз в сутки и при новых закрытых лесенках.</div>`);
+}
 // v0.99.606 — how many ladders are on at once, and the margin one ladder may take
 function zonesConcCard(d, card) {
   const c = d.conc;
@@ -34429,7 +34560,7 @@ async function refreshZones() {
     ${act.length ? zonePostBlocks(act) : '<div class="dim" style="margin-bottom:10px;">нет — новые посты из группы появятся здесь</div>'}
     ${zoneTradesHtml(closedTr)}
     <div class="zsec">Правила и риск</div>
-    ${ruleCard}${zonesStopxCard(lr.stopx, card, d)}${zonesConcCard(d, card)}${diagCard}${riskCard}${apCard}${hypCard}${behCard}
+    ${ruleCard}${zonesTpvCard(lr.tpv, card, d)}${zonesStopxCard(lr.stopx, card, d)}${zonesConcCard(d, card)}${diagCard}${riskCard}${apCard}${hypCard}${behCard}
     <div class="zsec">Источники</div>
     ${zutHtml(ut)}
     <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 10px;">или ${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
