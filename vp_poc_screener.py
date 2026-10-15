@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.612"
+APP_VERSION = "0.99.613"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -27733,6 +27733,12 @@ def _zut_local_only():
     """The account endpoints answer only to this phone itself (127.0.0.1): the
     web server listens on every address, and nobody else on the same Wi-Fi may
     start a login, read the status or change the group."""
+    # v0.99.613 — user: "добавь возможность забирать историю и на другом телефоне": the status and the
+    # history load (start / stop) also answer the home Wi-Fi and Tailscale (the internet is refused
+    # anyway); the login, the group and the logout stay on this phone only
+    if request.path in ("/api/zones/ut/status", "/api/zones/ut/history", "/api/zones/ut/history_stop") \
+            and _req_kind() == "lan":
+        return None
     if request.path.startswith("/api/zones/ut/") and not _is_local_request():
         return jsonify({"ok": False, "error": "только с этого телефона (http://127.0.0.1)"}), 403
 
@@ -28042,7 +28048,7 @@ def api_zut_status():
                     "chat_title": cfg.get("chat_title"), "error": _ZUT["error"], "hist": _ZUT["hist"],
                     "hist_done": cfg.get("hist_done") if (cfg.get("hist_done") or {}).get("chat_id") == cfg.get("chat_id") else None,
                     "live_n": _ZUT["live_n"], "connected": bool(_ZUT["client"] and _ZUT["client"].is_connected()),
-                    "login_step": login.get("step")})
+                    "login_step": login.get("step"), "remote": not _is_local_request()})
 
 
 @app.route("/api/zones/ut/send_code", methods=["POST"])
@@ -34810,7 +34816,7 @@ function zutHtml(u) {
   if (!u.logged_in) return `<div class="zcard" style="font-size:var(--fs-sm);">📡 <b>Автозабор постов из группы</b> через ваш аккаунт Telegram — не нужно пересылать вручную.
     <div class="dim">Нужны api_id и api_hash: my.telegram.org → API development tools (один раз). Сессия хранится только на этом телефоне.</div>
     ${u.error ? `<div class="loss">${u.error}</div>` : ''}
-    <button onclick="zutLogin()" style="${btn}">🔑 Войти</button>${u.login_step === 'code' ? `<button onclick="zutCode()" style="${btn}">ввести код</button>` : ''}${u.login_step === 'password' ? `<button onclick="zutPassword()" style="${btn}">ввести пароль 2FA</button>` : ''}</div>`;
+    ${u.remote ? '<div class="dim">Войти можно только на телефоне с ботом (адрес 127.0.0.1); после входа историю можно забирать и отсюда.</div>' : `<button onclick="zutLogin()" style="${btn}">🔑 Войти</button>`}${u.remote ? '' : u.login_step === 'code' ? `<button onclick="zutCode()" style="${btn}">ввести код</button>` : ''}${!u.remote && u.login_step === 'password' ? `<button onclick="zutPassword()" style="${btn}">ввести пароль 2FA</button>` : ''}</div>`;
   const h = u.hist;
   const hTxt = h ? (h.running ? `📚 загружаю историю ${h.days >= 3650 ? 'за всё время' : 'за ' + h.days + ' дн.'}: ${h.seen}/${h.total == null ? '…' : h.total} картинок, постов с зонами ${h.posts}, зон ${h.zones}${h.eta_min != null ? ` · осталось ~${h.eta_min >= 60 ? Math.floor(h.eta_min / 60) + ' ч ' : ''}${h.eta_min % 60} мин` : ''}${h.wait ? ` · <span class="loss">${h.wait}</span>` : ''} <button onclick="zutHistoryStop()" style="background:var(--neg-bg);border:none;color:var(--neg);padding:3px 8px;border-radius:var(--r-xs);">⏹ остановить</button>`
     : `📚 история ${h.days >= 3650 ? 'за всё время' : 'за ' + h.days + ' дн.'} загружена: постов ${h.posts}, зон ${h.zones}, пропущено ${h.skipped}${h.error ? ' · <span class="loss">' + h.error + '</span>' : ''}`) : '';
@@ -34825,7 +34831,7 @@ function zutHtml(u) {
       if (hd && !hd.complete) return `<div style="margin-top:4px;" class="loss">⚠️ загрузка истории была остановлена (${hd.seen} из ${hd.total}) — нажмите «забрать историю» → «все», уже взятые посты пропустятся быстро</div>`;
       if (hd && !hd.all) return `<div style="margin-top:4px;" class="loss">⚠️ история загружена только за ${hd.days} дн. — для полной нажмите «забрать историю» → «все»</div>`;
       return `<div style="margin-top:4px;" class="dim">ℹ️ отметки о полной загрузке нет (её не было до v0.99.504). Нажмите один раз «забрать историю» → «все»: уже взятые посты бот пропустит быстро, без повторного скачивания, и после этого здесь будет ✅.</div>`; })()}
-    <div><button onclick="zutDialogs()" style="${btn}">${u.chat_id ? 'сменить группу' : '📋 выбрать группу'}</button>${u.chat_id ? `<button onclick="zutHistory()" style="${btn}">📚 забрать историю (обучение)</button>` : ''}<button onclick="zutLogout()" style="${btn}color:var(--neg);">выйти</button></div>
+    <div>${u.remote ? '' : `<button onclick="zutDialogs()" style="${btn}">${u.chat_id ? 'сменить группу' : '📋 выбрать группу'}</button>`}${u.chat_id ? `<button onclick="zutHistory()" style="${btn}">📚 забрать историю (обучение)</button>` : (u.remote ? '<span class="dim">группу выбирают на телефоне с ботом</span>' : '')}${u.remote ? '' : `<button onclick="zutLogout()" style="${btn}color:var(--neg);">выйти</button>`}</div>
     ${u.chat_id && window._zutHistForm && !(h && h.running) ? zutHistFormHtml() : ''}
     ${dl ? `<div style="margin-top:6px;">Выберите группу с постами:<br>${dl}</div>` : ''}</div>`;
 }
