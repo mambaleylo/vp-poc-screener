@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.602"
+APP_VERSION = "0.99.603"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24164,6 +24164,150 @@ def zone_ladder_sim(cs, group, tp_pct, start, end, buf=None, be=None, ax=None):
     return out
 
 
+# v0.99.603 — user: "очень часто цена после стопа идёт куда надо — проверить на закрытых сделках, в каком
+# случае цена не возвращалась и что было перед возвратом (сколько свечей закрылось за стопом, не вернулась
+# ли выше второй точки входа за несколько свечей…), собрать полную статистику; стоп сначала шире (например
+# 6%), а закрывать по подтверждению; если это бьёт по ликвидации — меньше риск". Step one: the research on
+# the history (nothing in the live trading changes yet).
+ZONES_STOPX_CLOSE_H = (0, 1, 4, 8)      # hours of candle closes beyond the stop in a row before closing
+ZONES_STOPX_RET_H = (2, 4, 8)           # hours after the stop's touch to close back past the 2nd entry
+ZONES_STOPX_HARD = (3.0, 6.0)           # the exchange stop this % of the price beyond the planned one
+
+
+def zone_ladder_sim_stopx(cs, group, tp_pct, start, end, buf=None, be=None, kind="base", k_h=0, hard=0.0):
+    """zone_ladder_sim() with a confirmed stop: the hard stop (the exchange's) hard % beyond the planned
+    one; the planned one closes the trade only when confirmed — kind "close": candle closes beyond it
+    for k_h hours in a row (0 = the first close beyond); kind "ret": after touching it, the price
+    didn't close back past the 2nd entry within k_h hours. R against the loss at the HARD stop (the
+    risk is sized for it), and r_sl — against the planned stop, like the plain rules."""
+    pl = zones_ladder_plan(group, buf)
+    if not pl:
+        return None
+    s, sl = pl["s"], pl["sl"]
+    hard_px = sl * (1 - s * hard / 100) if kind != "base" else sl
+    second = pl["limits"][1] if len(pl["limits"]) > 1 else pl["limits"][0]
+    st = {"legs": [{"lim": x, "fill": None, "t": None} for x in pl["limits"]], "result": None}
+    last, beyond_t, touch_t = None, None, None
+    for i, c in enumerate(cs):
+        if c["time"] < start or c["time"] >= end:
+            continue
+        last = c
+        c_end = cs[i + 1]["time"] if i + 1 < len(cs) else c["time"] + 900
+        zones_ladder_step(st, c, s, hard_px, tp_pct, be)
+        if st["result"]:
+            break
+        if kind == "base" or st.get("sl_be") or not any(l["fill"] is not None for l in st["legs"]):
+            continue
+        beyond = (c["close"] < sl) if s > 0 else (c["close"] > sl)
+        if kind == "close":
+            if beyond:
+                beyond_t = beyond_t or c_end
+                if c_end - beyond_t >= k_h * 3600:
+                    st["result"], st["exit"], st["t_out"] = "LOSS", c["close"], c["time"]
+                    break
+            else:
+                beyond_t = None
+        else:
+            if touch_t is None and ((c["low"] <= sl) if s > 0 else (c["high"] >= sl)):
+                touch_t = c["time"]
+            if touch_t is not None:
+                if (c["close"] > second) if s > 0 else (c["close"] < second):
+                    touch_t = None
+                elif c_end - touch_t >= k_h * 3600:
+                    st["result"], st["exit"], st["t_out"] = "LOSS", c["close"], c["time"]
+                    break
+    if not any(l["fill"] is not None for l in st["legs"]):
+        return None
+    if not st["result"]:
+        st["result"], st["exit"], st["t_out"] = "TIME_EXIT", last["close"], last["time"]
+    out = zones_ladder_pnl(st, s, hard_px, st["exit"])
+    out["r_sl"] = zones_ladder_pnl(st, s, sl, st["exit"])["r"]
+    out["risk_x"] = (sum(s * (l["lim"] - hard_px) for l in st["legs"]) / (sum(s * (l["lim"] - sl) for l in st["legs"]) or 1e-12))
+    out.update({"result": st["result"], "exit": st["exit"], "sl": sl, "hard": hard_px, "second": second, "s": s,
+                "t_out": st["t_out"], "tp_px": (out["avg"] or 0) * (1 + s * tp_pct / 100) if out.get("avg") else None})
+    return out
+
+
+def zones_after_stop(cs, r, end):
+    """what the price did after a plain stop: back to the take / to the average entry / a close back
+    past the 2nd entry (hours after the stop), how far beyond the stop it went before coming back to
+    the average entry (% of the stop), and how many of the first 4 hours' candle closes were beyond"""
+    s, sl, t0 = r["s"], r["sl"], r["t_out"]
+    avg, tp, second = r["avg"], r["tp_px"], r["second"]
+    out = {"tp_h": None, "avg_h": None, "second_h": None, "os": 0.0, "beyond4": None}
+    n4 = b4 = 0
+    for c in cs:
+        if c["time"] < t0 or c["time"] >= end:
+            continue
+        h = (c["time"] - t0) / 3600
+        if out["avg_h"] is None:
+            out["os"] = max(out["os"], ((sl - c["low"]) if s > 0 else (c["high"] - sl)) / sl * 100)
+        if c["time"] > t0 and h <= 4:
+            n4 += 1
+            b4 += (c["close"] < sl) if s > 0 else (c["close"] > sl)
+        if out["second_h"] is None and c["time"] > t0 and ((c["close"] > second) if s > 0 else (c["close"] < second)):
+            out["second_h"] = round(h, 1)
+        if out["avg_h"] is None and c["time"] > t0 and ((c["high"] >= avg) if s > 0 else (c["low"] <= avg)):
+            out["avg_h"] = round(h, 1)
+        if out["tp_h"] is None and c["time"] > t0 and tp and ((c["high"] >= tp) if s > 0 else (c["low"] <= tp)):
+            out["tp_h"] = round(h, 1)
+            break
+    out["beyond4"] = round(b4 / n4, 2) if n4 else None
+    out["os"] = round(out["os"], 2)
+    return out
+
+
+def zones_stopx_research(runs_g, rule):
+    """v0.99.603 — (1) the plain stops on the history: how often the price came back to the take / the
+    average entry afterwards, and what differed before a return vs no return; (2) the confirmed-stop
+    variants replayed, chosen on the older 70% of the ladders, checked on the newer 30%."""
+    tp, buf, be = rule["tp"], rule.get("buf"), rule.get("be")
+    runs = sorted(runs_g, key=lambda x: x[2])
+    cut = int(len(runs) * 0.7)
+    med = lambda xs: (round(statistics.median(xs), 2) if xs else None)
+    # (1) after the plain stop
+    aft = []
+    for g, cs, st_, en_ in runs:
+        r = zone_ladder_sim_stopx(cs, g, tp, st_, en_, buf, be)
+        if r and r["result"] == "LOSS" and r["avg"]:
+            aft.append(zones_after_stop(cs, r, en_))
+    back_tp = [a for a in aft if a["tp_h"] is not None]
+    no_back = [a for a in aft if a["avg_h"] is None]
+    after = {"n": len(aft),
+             "tp_pct": round(len(back_tp) / len(aft) * 100, 1) if aft else None,
+             "avg_pct": round(sum(1 for a in aft if a["avg_h"] is not None) / len(aft) * 100, 1) if aft else None,
+             "second_pct": round(sum(1 for a in aft if a["second_h"] is not None) / len(aft) * 100, 1) if aft else None,
+             "tp_hours": med([a["tp_h"] for a in back_tp]),
+             "os_back": med([a["os"] for a in aft if a["avg_h"] is not None]),
+             "os_back_p80": (sorted(a["os"] for a in aft if a["avg_h"] is not None)[int(0.8 * sum(1 for a in aft if a["avg_h"] is not None))]
+                             if any(a["avg_h"] is not None for a in aft) else None),
+             "os_noback": med([a["os"] for a in no_back]),
+             "beyond4_back": med([a["beyond4"] for a in aft if a["avg_h"] is not None and a["beyond4"] is not None]),
+             "beyond4_noback": med([a["beyond4"] for a in no_back if a["beyond4"] is not None]),
+             "second_h_back": med([a["second_h"] for a in aft if a["avg_h"] is not None and a["second_h"] is not None])}
+    # (2) the variants
+    variants = [("base", 0, 0.0)] + [("close", k, h) for k in ZONES_STOPX_CLOSE_H for h in ZONES_STOPX_HARD] \
+        + [("ret", w, h) for w in ZONES_STOPX_RET_H for h in ZONES_STOPX_HARD]
+    rows = []
+    for kind, k, h in variants:
+        tr_, te_, rx = [], [], []
+        for i, (g, cs, st_, en_) in enumerate(runs):
+            r = zone_ladder_sim_stopx(cs, g, tp, st_, en_, buf, be, kind, k, h)
+            if not r:
+                continue
+            (tr_ if i < cut else te_).append(r)
+            rx.append(r["risk_x"])
+        blk = lambda xs: {"n": len(xs), "avg_r": round(sum(x["r"] for x in xs) / len(xs), 3) if xs else None,
+                          "wr": round(sum(1 for x in xs if x["r"] > 0) / len(xs) * 100, 1) if xs else None,
+                          "loss_pct": round(sum(1 for x in xs if x["result"] == "LOSS") / len(xs) * 100, 1) if xs else None}
+        rows.append({"kind": kind, "k_h": k, "hard": h, "train": blk(tr_), "test": blk(te_),
+                     "risk_x": round(statistics.median(rx), 2) if rx else None})
+    base = rows[0]
+    cands = [x for x in rows[1:] if x["train"]["avg_r"] is not None]
+    best = max(cands, key=lambda x: x["train"]["avg_r"]) if cands else None
+    return {"after": after, "rows": rows, "base": base, "best": best, "n": len(runs), "cut": cut, "tp": tp, "be": be}
+
+
 def zone_path_stats(cs, z, start, end):
     """How the price behaved at the zone: reached the 1st line? how deep it went
     beyond it before turning, how far it ran in the zone's direction after."""
@@ -24475,7 +24619,13 @@ def zones_learn():
         ax_cmp = {"n": ax_n, "posts": sum(1 for v in ax_of.values() if v), "avg_r": avg(rs), "n_trades": len(rs),
                   "avg_r_without": avg(xs_no), "n_without": len(xs_no),
                   "g": growth(rs, rf), "g_without": growth(xs_no, rf)}
-    learned = {"at": now, "n": len(rs), "rule": rule, "author_exit": ax_cmp, "tp_auto": tp_auto, "tp_rows": tp_rows, "be_rows": be_rows,
+    try:   # v0.99.603
+        zones_act("learn", stage="разбор стопов: что было после стопа и стоп с подтверждением")
+        stopx = zones_stopx_research(runs_g, rule)
+    except Exception as e:
+        log_error(f"zones stopx research: {e}")
+        stopx = None
+    learned = {"at": now, "n": len(rs), "rule": rule, "author_exit": ax_cmp, "stopx": stopx, "tp_auto": tp_auto, "tp_rows": tp_rows, "be_rows": be_rows,
                "be_auto": rule.get("be"),
                "tp_by": "auto" if auto else round(rf * 100, 2),
                "res": res, "risk_tab": risk_tab, "edge": edge, "diag": diag,
@@ -33834,6 +33984,34 @@ function zStatusHtml(d) {
   if (o && o.checked) out.push(row('🧹', `проверка «лишних» ордеров на бирже ${ago(o.checked)}${o.n ? ` — снято ${o.n}` : ' — всё чисто'}`));
   return `<div class="zcard"><div class="zh">📟 Состояние</div><div style="font-size:var(--fs-sm);">${out.join('')}</div></div>`;
 }
+// v0.99.603 — the stops on the history: what the price did after them, and the confirmed-stop variants
+function zonesStopxCard(x, card) {
+  if (!x || !x.after) return '';
+  const a = x.after, f = v => v == null ? '—' : v;
+  const R = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  const N = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${(+v).toFixed(2)}</span>`;
+  const rule = r => r.kind === 'base' ? 'обычный стоп' : (r.kind === 'close'
+    ? (r.k_h ? `закрытия за стопом ${r.k_h} ч` : '1-е закрытие за стопом')
+    : `не вернулась за 2-ю точку за ${r.k_h} ч`);
+  const name = r => rule(r) + (r.kind === 'base' ? '' : `, стоп на бирже +${r.hard}%`);
+  const rows = (x.rows || []).map(r => `<tr${x.best && r.kind === x.best.kind && r.k_h === x.best.k_h && r.hard === x.best.hard ? ' style="font-weight:700;"' : ''}>
+      <td style="white-space:normal;">${rule(r)}${r.kind === 'base' ? '' : ` <span class="dim">· биржа +${r.hard}%</span>`}</td><td title="обучение ${r.train.avg_r}">${N(r.test.avg_r)}</td><td>${f(r.test.wr)}</td><td>×${f(r.risk_x)}</td></tr>`).join('');
+  const b = x.best, base = x.base;
+  const verdict = !b ? '' : (b.test.avg_r != null && base.test.avg_r != null && b.test.avg_r > base.test.avg_r
+    ? `<div class="zbanner pos">На новых ${b.test.n} лесенках (их выбор не видел) лучше обычного стопа: <b>${name(b)}</b> — ${R(b.test.avg_r)} против ${R(base.test.avg_r)} на сделку. Риск на сделку для этого нужен меньше в ~${b.risk_x} раза (убыток считается до стопа на бирже).</div>`
+    : `<div class="zbanner warn">Лучший на обучении вариант (<b>${name(b)}</b>) на новых лесенках не лучше обычного стопа: ${R(b.test.avg_r)} против ${R(base.test.avg_r)}. Пока менять стоп не на что.</div>`);
+  return card('🛑 Стопы на истории — что было после и стоп с подтверждением', `
+    <div style="font-size:var(--fs-sm);">Выбито стопом по нынешним правилам: <b>${a.n}</b> лесенок. После стопа цена всё-таки дошла до тейка в <b>${f(a.tp_pct)}%</b> случаев (обычно через ~${f(a.tp_hours)} ч), вернулась к средней цене входа — в ${f(a.avg_pct)}%, закрылась обратно за 2-й точкой входа — в ${f(a.second_pct)}%.</div>
+    <div class="zkv" style="margin-top:6px;font-size:var(--fs-sm);">
+      <div>вынос за стоп, вернулись</div><div>~${f(a.os_back)}% (80% — до ${f(a.os_back_p80)}%)</div>
+      <div>вынос за стоп, не вернулись</div><div>~${f(a.os_noback)}%</div>
+      <div>закрытий за стопом в первые 4 ч</div><div>${a.beyond4_back == null ? '—' : Math.round(a.beyond4_back * 100) + '%'} / ${a.beyond4_noback == null ? '—' : Math.round(a.beyond4_noback * 100) + '%'} <span class="dim">(вернулись / нет)</span></div>
+      <div>обратно за 2-й точкой</div><div>через ~${f(a.second_h_back)} ч <span class="dim">(у вернувшихся)</span></div>
+    </div>
+    <div style="overflow-x:auto;margin-top:8px;"><table style="font-size:var(--fs-xs);white-space:nowrap;width:100%;"><thead><tr style="text-transform:none;"><th style="text-align:left;">закрывать, когда</th><th>тест R</th><th>+%</th><th>риск</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${verdict}
+    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">R — к убытку при стопе на бирже (на него и считается риск), «биржа» — стоп на бирже дальше обычного, «тест R» — на новых лесенках, «+%» — доля сделок в плюс на тесте, «риск ×» — во сколько раз этот убыток больше обычного стопа: настолько же меньше надо ставить % риска. Выбор — на старых ${x.cut} лесенках, проверка — на новых ${x.n - x.cut}. Только разбор: торговля пока не меняется.</div>`);
+}
 async function refreshZones() {
   const panel = document.getElementById('zonesPanel');
   if (!panel || Date.now() - (window._zUp || 0) < 120000) return;   // a file dialog is open: don't rebuild the panel under it
@@ -34039,7 +34217,7 @@ async function refreshZones() {
     ${act.length ? zonePostBlocks(act) : '<div class="dim" style="margin-bottom:10px;">нет — новые посты из группы появятся здесь</div>'}
     ${zoneTradesHtml(closedTr)}
     <div class="zsec">Правила и риск</div>
-    ${ruleCard}${diagCard}${riskCard}${apCard}${hypCard}${behCard}
+    ${ruleCard}${zonesStopxCard(lr.stopx, card)}${diagCard}${riskCard}${apCard}${hypCard}${behCard}
     <div class="zsec">Источники</div>
     ${zutHtml(ut)}
     <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 10px;">или ${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>

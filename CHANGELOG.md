@@ -19684,3 +19684,20 @@ v0.99.602 - Zones monitor after a restart (user's /ping: at 15:49 "молчит 
          20 s per pass (checked-longest-ago first, the rest next pass — their
          candles since the last check are all read then); the stamp is when the
          pass ENDED; a long pass shows "круг проверки идёт уже N мин, сейчас: …".
+v0.99.603 - Zones: research of the stops on the history, step one of a confirmed stop
+         (user: "the price often goes the right way after the stop — check on the
+         closed trades when it didn't come back and what happened before a return
+         — closes beyond, no return past the 2nd entry within a few candles —
+         full statistics; then a wider stop, ~6%, closed only on confirmation,
+         with a lower risk if needed"). In every learning pass: (1) for the
+         ladders the current rules stopped out — how often the price still reached
+         the take / the average entry / closed back past the 2nd entry afterwards
+         (and how fast), the move beyond the stop of those that came back vs not,
+         the share of candle closes beyond the stop in the first 4 h; (2) the
+         confirmed-stop variants replayed — close on the 1st candle close beyond
+         the stop or after 1 / 4 / 8 h of closes beyond, or when the price didn't
+         close back past the 2nd entry within 2 / 4 / 8 h; the exchange stop 3% or
+         6% beyond the planned one; R against the loss at the exchange stop (the
+         risk is sized for it) and how much lower the risk % must be. Chosen on
+         the older 70% of the ladders, checked on the newer 30%. Shown in the
+         "🛑 Стопы на истории" card; the live trading doesn't change yet.
