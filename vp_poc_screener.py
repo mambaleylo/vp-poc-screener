@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.610"
+APP_VERSION = "0.99.611"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24247,8 +24247,13 @@ def zones_conc_target():
 # механизм адекватного тейка для монет типа битка?". The take measured in the coin's own daily move: k x its
 # daily ATR (in % of the price, at the post). k is chosen on the older 70% of the ladders; it trades only
 # while it beats the one-for-all fixed % take on the newer 30%. The stop is not touched.
-ZONES_TPV_K = (0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0)
-ZONES_TPV_MIN, ZONES_TPV_MAX = 0.5, 40.0      # % — the take is kept within these
+ZONES_TPV_K = (0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 16.0)
+ZONES_TPV_MIN, ZONES_TPV_MAX = 0.5, 90.0      # % — the take is kept within these
+# v0.99.611 — user ("да" to: the biggest take won — maybe none at all, or a trailing stop?): the research
+# also replays "no take" (+90%: the stop or the 14 days end it) and a trailing stop that follows the best
+# price at N daily moves once the trade is N daily moves in profit (research only for now)
+ZONES_TPV_NONE = 90.0
+ZONES_TRAIL_K = (1.0, 2.0, 3.0, 4.0)
 ZONES_TPV_ENABLED = os.environ.get("VP_ZONES_TPV", "1") == "1"
 _zones_daily_cache = {}
 
@@ -24276,26 +24281,76 @@ def zones_tpv_pct(k, datr):
     return round(min(ZONES_TPV_MAX, max(ZONES_TPV_MIN, k * datr)), 2)
 
 
+def zone_ladder_sim_trail(cs, group, start, end, be, trail_pct):
+    """zone_ladder_sim() without a take, with a trailing stop: once the price is trail_pct % (of the
+    average entry) in profit, the stop follows the best price at that distance; checked against the
+    best price of the EARLIER candles (no look-ahead inside a candle)"""
+    pl = zones_ladder_plan(group)
+    if not pl:
+        return None
+    s, sl = pl["s"], pl["sl"]
+    st = {"legs": [{"lim": x, "fill": None, "t": None} for x in pl["limits"]], "result": None}
+    last, best = None, None
+    for c in cs:
+        if c["time"] < start or c["time"] >= end:
+            continue
+        last = c
+        zones_ladder_step(st, c, s, sl, 1e6, be)
+        if st["result"]:
+            break
+        fills = [l["fill"] for l in st["legs"] if l["fill"] is not None]
+        if not fills:
+            continue
+        avg = sum(fills) / len(fills)
+        dist = avg * trail_pct / 100
+        if best is not None and s * (best - avg) >= dist:
+            trail = best - s * dist
+            if (c["low"] <= trail) if s > 0 else (c["high"] >= trail):
+                gap = (c["open"] <= trail) if s > 0 else (c["open"] >= trail)
+                st["result"], st["exit"], st["t_out"] = "TRAIL", (c["open"] if gap else trail), c["time"]
+                break
+        hv = c["high"] if s > 0 else c["low"]
+        best = hv if best is None else (max(best, hv) if s > 0 else min(best, hv))
+    if not any(l["fill"] is not None for l in st["legs"]):
+        return None
+    if not st["result"]:
+        st["result"], st["exit"], st["t_out"] = "TIME_EXIT", last["close"], last["time"]
+    out = zones_ladder_pnl(st, s, sl, st["exit"])
+    out.update({"result": st["result"], "exit": st["exit"], "t_out": st["t_out"],
+                "t_in": min(l["t"] for l in st["legs"] if l["fill"] is not None)})
+    return out
+
+
 def zones_tpv_research(runs_g, rule):
     """v0.99.609 — every ladder replayed with the take k x its coin's daily ATR at the post, for every k,
     next to the fixed % take; k chosen on the older 70%, checked on the newer 30%"""
     runs = sorted(runs_g, key=lambda x: x[2])
     cut = int(len(runs) * 0.7)
     atr = [zones_coin_datr(g[0]["symbol"], st_) for g, _c, st_, _e in runs]
-    blk = lambda xs: {"n": len(xs), "avg_r": round(sum(xs) / len(xs), 3) if xs else None,
-                      "wr": round(sum(1 for x in xs if x > 0) / len(xs) * 100, 1) if xs else None}
+    # v0.99.611 — user: "без тейка 14 дней — это очень много, не хватит денег на новые сделки": a trade
+    # holds its margin while it is open, so the variants are compared by R per day held (the margin's
+    # time), not R per trade; xs = [(R, days)]
+    def blk(xs):
+        if not xs:
+            return {"n": 0, "avg_r": None, "wr": None, "days": None, "r_day": None}
+        dsum = sum(d for _r, d in xs)
+        return {"n": len(xs), "avg_r": round(sum(r for r, _d in xs) / len(xs), 3),
+                "wr": round(sum(1 for r, _d in xs if r > 0) / len(xs) * 100, 1),
+                "days": round(dsum / len(xs), 1), "r_day": round(sum(r for r, _d in xs) / dsum, 4) if dsum else None}
 
-    def run(tp_of):
+    def run(tp_of, trail=None):
         tr_, te_, tps = [], [], []
         for i, (g, cs, st_, en_) in enumerate(runs):
             if atr[i] is None:
                 continue
             tp = tp_of(i)
-            r = zone_ladder_sim(cs, g, tp, st_, en_, be=rule.get("be"))
+            r = (zone_ladder_sim_trail(cs, g, st_, en_, rule.get("be"), trail * atr[i]) if trail
+                 else zone_ladder_sim(cs, g, tp, st_, en_, be=rule.get("be")))
             if r:
-                (tr_ if i < cut else te_).append(r["r"])
+                days = max(1 / 24, ((r.get("t_out") or 0) - (r.get("t_in") or 0)) / 86400)
+                (tr_ if i < cut else te_).append((r["r"], days))
                 tps.append(tp)
-        return {"train": blk(tr_), "test": blk(te_), "tp_med": round(statistics.median(tps), 2) if tps else None}
+        return {"train": blk(tr_), "test": blk(te_), "tp_med": round(statistics.median([t for t in tps if t is not None]), 2) if any(t is not None for t in tps) else None}
 
     fixed = run(lambda i: rule["tp"])
     fixed["tp"] = rule["tp"]
@@ -24304,17 +24359,30 @@ def zones_tpv_research(runs_g, rule):
         x = run(lambda i, k=k: zones_tpv_pct(k, atr[i]))
         x["k"] = k
         rows.append(x)
-    cands = [x for x in rows if x["train"]["avg_r"] is not None]
-    best = max(cands, key=lambda x: x["train"]["avg_r"]) if cands else None
+    x = run(lambda i: ZONES_TPV_NONE)   # v0.99.611 — no take: the stop or the 14 days
+    x["k"] = "none"
+    rows.append(x)
+    trails = []
+    for tk in ZONES_TRAIL_K:
+        x = run(lambda i: None, trail=tk)
+        x["trail"] = tk
+        trails.append(x)
+    cands = [x for x in rows if x["train"]["r_day"] is not None]
+    best = max(cands, key=lambda x: x["train"]["r_day"]) if cands else None   # v0.99.611 — per day held
     known = [a for a in atr if a is not None]
     calm = sorted(a for a in known if a < 4)
     wild = sorted(a for a in known if a >= 8)
     ex = None
     if best:
         ex = {"calm_atr": round(statistics.median(calm), 2) if calm else None, "wild_atr": round(statistics.median(wild), 2) if wild else None}
-        ex["calm_tp"] = zones_tpv_pct(best["k"], ex["calm_atr"]) if ex["calm_atr"] else None
-        ex["wild_tp"] = zones_tpv_pct(best["k"], ex["wild_atr"]) if ex["wild_atr"] else None
-    return {"fixed": fixed, "rows": rows, "best": best, "n": len(runs), "cut": cut, "with_atr": len(known), "ex": ex}
+        if best["k"] != "none":
+            ex["calm_tp"] = zones_tpv_pct(best["k"], ex["calm_atr"]) if ex["calm_atr"] else None
+            ex["wild_tp"] = zones_tpv_pct(best["k"], ex["wild_atr"]) if ex["wild_atr"] else None
+    if best and best["k"] == "none":
+        ex = {"calm_atr": ex and ex.get("calm_atr"), "wild_atr": ex and ex.get("wild_atr"), "calm_tp": ZONES_TPV_NONE, "wild_tp": ZONES_TPV_NONE}
+    tb = max((x for x in trails if x["train"]["r_day"] is not None), key=lambda x: x["train"]["r_day"], default=None)
+    return {"fixed": fixed, "rows": rows, "best": best, "trails": trails, "trail_best": tb,
+            "n": len(runs), "cut": cut, "with_atr": len(known), "ex": ex}
 
 
 def zones_tpv_rule():
@@ -24327,7 +24395,8 @@ def zones_tpv_rule():
     if not b or not f:
         return None
     bt, ft = b.get("test") or {}, f.get("test") or {}
-    if (bt.get("n") or 0) < 20 or bt.get("avg_r") is None or ft.get("avg_r") is None or bt["avg_r"] <= ft["avg_r"]:
+    if (bt.get("n") or 0) < 20 or bt.get("r_day") is None or ft.get("r_day") is None or bt["r_day"] <= ft["r_day"] \
+            or (bt.get("avg_r") or 0) <= 0:
         return None
     return {"k": b["k"]}
 
@@ -24335,6 +24404,8 @@ def zones_tpv_rule():
 def zones_take_for(sym, p):
     """(take %, k or None): k x the coin's daily ATR now when the volatility take is on, else the fixed take"""
     rv = zones_tpv_rule()
+    if rv and rv["k"] == "none":
+        return ZONES_TPV_NONE, "none"
     if rv:
         a = zones_coin_datr(sym)
         if a:
@@ -24864,7 +24935,8 @@ def zones_learn():
         except Exception as e:
             log_error(f"zones stopx research: {e}")
             stopx = None
-    tv_key = hashlib.md5(json.dumps([sx_key, ZONES_TPV_K, ZONES_TPV_MIN, ZONES_TPV_MAX, time.strftime("%Y-%m-%d")]).encode()).hexdigest()
+    tv_key = hashlib.md5(json.dumps([sx_key, ZONES_TPV_K, ZONES_TPV_MIN, ZONES_TPV_MAX, ZONES_TPV_NONE, ZONES_TRAIL_K,
+                                     time.strftime("%Y-%m-%d")]).encode()).hexdigest()
     with _zones_lock:
         old_tv = (ZONES.get("learned") or {}).get("tpv")
     if old_tv and old_tv.get("key") == tv_key:
@@ -26792,7 +26864,8 @@ def _zones_ladder_tick(group, now, p, pos_map):
         lim_txt = " / ".join(f"{l['lim']:.6g}" for l in tr["legs"])
         zones_znotify(lead, f"📋 {sym} {'лонг' if s > 0 else 'шорт'}: лимитки {len(tr['legs'])} шт. — {lim_txt}\n"
                             f"стоп {tr['sl']:.6g} ({p['buf']:g}% за дальней линией) · тейк +{tr['tp_pct']:g}% от средней цены входа"
-                            + (f" ({tr['tp_k']:g} дневных хода монеты)" if tr.get("tp_k") else "")
+                            + ((" (по сути без тейка: выход по стопу или через 14 дн.)" if tr.get("tp_k") == "none"
+                                else f" ({tr['tp_k']:g} дневных хода монеты)") if tr.get("tp_k") else "")
                             + (f" · безубыток после +{tr['be']:g}%" if tr.get("be") else "")
                             + (f"\n🛑 {zones_stopx_txt(tr['stopx'])} ({tr['hard']:.6g}); риск считается до него" if tr.get("stopx") else "")
                             + (f"\n⚠️ {tr['no_auto']} — без автосделки" if tr["no_auto"] else ""))
@@ -34306,15 +34379,24 @@ function zonesTpvCard(x, card, d) {
   const N = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${(+v).toFixed(2)}</span>`;
   const R = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
   const b = x.best, f = x.fixed, ex = x.ex || {};
-  const rows = [`<tr><td>фиксированный +${f.tp}% для всех</td><td>${N(f.test.avg_r)}</td><td>${f.test.wr ?? '—'}</td><td>${f.tp}%</td></tr>`].concat((x.rows || []).map(r =>
-    `<tr${b && r.k === b.k ? ' style="font-weight:700;"' : ''}><td>${r.k} дневных хода</td><td>${N(r.test.avg_r)}</td><td>${r.test.wr ?? '—'}</td><td>~${r.tp_med ?? '—'}%</td></tr>`)).join('');
+  const kName = k => k === 'none' ? 'без тейка (стоп или 14 дн.)' : `${k} дневных хода`;
+  const D = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${(+v).toFixed(3)}</span>`;
+  const rows = [`<tr><td style="white-space:normal;">фиксированный +${f.tp}% для всех</td><td>${N(f.test.avg_r)}</td><td>${D(f.test.r_day)}</td><td>${f.test.days ?? '—'}</td></tr>`].concat((x.rows || []).map(r =>
+    `<tr${b && r.k === b.k ? ' style="font-weight:700;"' : ''}><td style="white-space:normal;">${kName(r.k)}${r.k === 'none' ? '' : ` <span class="dim">~${r.tp_med ?? '—'}%</span>`}</td><td>${N(r.test.avg_r)}</td><td>${D(r.test.r_day)}</td><td>${r.test.days ?? '—'}</td></tr>`)).join('');
+  const tb = x.trail_best;
+  const trows = (x.trails || []).map(r => `<tr${tb && r.trail === tb.trail ? ' style="font-weight:700;"' : ''}><td style="white-space:normal;">в ${r.trail} дн. ходе от цены</td><td>${N(r.test.avg_r)}</td><td>${D(r.test.r_day)}</td><td>${r.test.days ?? '—'}</td></tr>`).join('');
+  const tWin = tb && tb.test && b && b.test && tb.test.r_day != null && b.test.r_day != null && tb.test.r_day > b.test.r_day;
+  const trailNote = tb && tb.test && tb.test.r_day != null ? `<div class="zbanner ${tWin ? 'pos' : 'warn'}" style="margin-top:8px;">Подтягивающийся стоп (без тейка): лучший на старых — <b>${tb.trail} дн. хода</b>, на новых ${D(tb.test.r_day)} R/день против ${D(b && b.test.r_day)} у выбранного тейка. ${tWin ? 'Он лучше — в торговле его пока нет: скажи, и сделаю.' : 'Не лучше тейка — оставляем тейк.'}</div>` : '';
   const live = (d || {}).tpv_live
-    ? `<div class="zbanner pos" style="margin-bottom:8px;">▶ <b>Включено</b> для новых лесенок: тейк = <b>${d.tpv_live.k}</b> × дневной ход монеты${ex.calm_tp ? ` — у спокойных монет (ход ~${ex.calm_atr}%/день) это ~+${ex.calm_tp}%, у резких (~${ex.wild_atr}%/день) ~+${ex.wild_tp}%` : ''}.</div>`
+    ? (d.tpv_live.k === 'none'
+      ? `<div class="zbanner pos" style="margin-bottom:8px;">▶ <b>Включено</b> для новых лесенок: <b>без тейка</b> — сделка закрывается стопом, безубытком или через 14 дней (на бирже тейк стоит на +${x.none || 90}%).</div>`
+      : `<div class="zbanner pos" style="margin-bottom:8px;">▶ <b>Включено</b> для новых лесенок: тейк = <b>${d.tpv_live.k}</b> × дневной ход монеты${ex.calm_tp ? ` — у спокойных монет (ход ~${ex.calm_atr}%/день) это ~+${ex.calm_tp}%, у резких (~${ex.wild_atr}%/день) ~+${ex.wild_tp}%` : ''}.</div>`)
     : `<div class="zbanner warn" style="margin-bottom:8px;">Сейчас тейк фиксированный +${f.tp}% для всех: тейк по волатильности на новых лесенках его не обыграл${b && b.test && b.test.n < 20 ? ' (или новых лесенок меньше 20)' : ''}.</div>`;
   return card('🎯 Тейк по волатильности монеты', `${live}
-    <div style="font-size:var(--fs-sm);">Тейк в «дневных ходах» монеты (её средний дневной размах, ATR, на момент поста): у BTC меньше, у резких альтов больше. Лучший на старых ${x.cut} лесенках: <b>${b ? b.k + ' хода' : '—'}</b> — на новых ${x.n - x.cut}: ${R(b && b.test.avg_r)} против ${R(f.test.avg_r)} у фиксированного.</div>
-    <div style="overflow-x:auto;margin-top:8px;"><table style="font-size:var(--fs-xs);white-space:nowrap;width:100%;"><thead><tr style="text-transform:none;"><th style="text-align:left;">тейк</th><th>тест R</th><th>+%</th><th>обычно</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">«тест R» — средний результат на новых лесенках, «+%» — доля в плюс, «обычно» — типичный тейк в %. Тейк держится в пределах 0.5–40%. Стоп не меняется. Пересчёт раз в сутки и при новых закрытых лесенках.</div>`);
+    <div style="font-size:var(--fs-sm);">Тейк в «дневных ходах» монеты (её средний дневной размах, ATR, на момент поста): у BTC меньше, у резких альтов больше. Сравнение — по прибыли <b>в день</b>, пока сделка держит залог: долгая сделка занимает деньги, нужные на новые. Лучший на старых ${x.cut} лесенках: <b>${b ? kName(b.k) : '—'}</b> — на новых ${x.n - x.cut}: ${D(b && b.test.r_day)} R/день (${R(b && b.test.avg_r)} за ~${b && b.test.days} дн.) против ${D(f.test.r_day)} R/день у фиксированного (${R(f.test.avg_r)} за ~${f.test.days} дн.).</div>
+    <div style="overflow-x:auto;margin-top:8px;"><table style="font-size:var(--fs-xs);white-space:nowrap;width:100%;"><thead><tr style="text-transform:none;"><th style="text-align:left;">тейк</th><th>R/сделку</th><th>R/день</th><th>дней</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${trows ? `<div style="overflow-x:auto;margin-top:8px;"><table style="font-size:var(--fs-xs);white-space:nowrap;width:100%;"><thead><tr style="text-transform:none;"><th style="text-align:left;">стоп за ценой</th><th>R/сделку</th><th>R/день</th><th>дней</th></tr></thead><tbody>${trows}</tbody></table></div>` : ''}${trailNote}
+    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Всё — на новых лесенках: «R/сделку» — средний результат, «R/день» — он же на день в сделке, «дней» — сколько обычно держится сделка; серым — типичный тейк в %. Тейк держится в пределах 0.5–90%. Подтягивающийся стоп включается, когда сделка в плюсе на его расстояние, и дальше идёт за лучшей ценой. Стоп не меняется. Пересчёт раз в сутки и при новых закрытых лесенках.</div>`);
 }
 // v0.99.606 — how many ladders are on at once, and the margin one ladder may take
 function zonesConcCard(d, card) {

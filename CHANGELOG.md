@@ -19755,3 +19755,14 @@ v0.99.609 - Zones: the take in the coin's own daily moves (user: "on BTC a 20% t
 v0.99.610 - Zones: the "🎯 Тейк по волатильности монеты" card is shown before the first count
          too (user: "не вижу карточку") — "считается при ближайшем обучении", with the
          learning's current stage while it runs; a failed count shows its error.
+v0.99.611 - Zones take research extended and compared per day (user: "да" to trying bigger
+         takes / no take / a trailing stop, then "без тейка 14 дней — это очень много,
+         не хватит денег на новые сделки"). New in the replay: takes of 10 / 12 / 16
+         daily moves (cap 90%), "no take" (+90%: the stop, breakeven or the 14 days
+         end the trade) and a trailing stop 1–4 daily moves behind the best price
+         (switched on once the trade is that far in profit; research only). Every
+         variant is now judged by R per day held — a trade holds its margin while
+         open, so a slow winner blocks new ladders — and shows R per trade, R per
+         day and the typical days held. The live take switches only when its R per
+         day on the newer ladders beats the fixed take's (and its R per trade is
+         positive).
