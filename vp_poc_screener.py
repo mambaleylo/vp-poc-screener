@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.611"
+APP_VERSION = "0.99.612"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24332,11 +24332,16 @@ def zones_tpv_research(runs_g, rule):
     # time), not R per trade; xs = [(R, days)]
     def blk(xs):
         if not xs:
-            return {"n": 0, "avg_r": None, "wr": None, "days": None, "r_day": None}
+            return {"n": 0, "avg_r": None, "wr": None, "days": None, "r_day": None, "avg_r_x3": None, "r_day_x3": None}
         dsum = sum(d for _r, d in xs)
+        # v0.99.612 — robustness: the same without the 3 best trades (a few outliers must not decide it)
+        rest = sorted(xs, key=lambda x: x[0])[:-3]
+        dr = sum(d for _r, d in rest)
         return {"n": len(xs), "avg_r": round(sum(r for r, _d in xs) / len(xs), 3),
                 "wr": round(sum(1 for r, _d in xs if r > 0) / len(xs) * 100, 1),
-                "days": round(dsum / len(xs), 1), "r_day": round(sum(r for r, _d in xs) / dsum, 4) if dsum else None}
+                "days": round(dsum / len(xs), 1), "r_day": round(sum(r for r, _d in xs) / dsum, 4) if dsum else None,
+                "avg_r_x3": round(sum(r for r, _d in rest) / len(rest), 3) if rest else None,
+                "r_day_x3": round(sum(r for r, _d in rest) / dr, 4) if dr else None}
 
     def run(tp_of, trail=None):
         tr_, te_, tps = [], [], []
@@ -24397,6 +24402,9 @@ def zones_tpv_rule():
     bt, ft = b.get("test") or {}, f.get("test") or {}
     if (bt.get("n") or 0) < 20 or bt.get("r_day") is None or ft.get("r_day") is None or bt["r_day"] <= ft["r_day"] \
             or (bt.get("avg_r") or 0) <= 0:
+        return None
+    # v0.99.612 — and still better without the 3 best trades of each
+    if "r_day_x3" in bt and (bt["r_day_x3"] is None or ft.get("r_day_x3") is None or bt["r_day_x3"] <= ft["r_day_x3"]):
         return None
     return {"k": b["k"]}
 
@@ -24935,7 +24943,7 @@ def zones_learn():
         except Exception as e:
             log_error(f"zones stopx research: {e}")
             stopx = None
-    tv_key = hashlib.md5(json.dumps([sx_key, ZONES_TPV_K, ZONES_TPV_MIN, ZONES_TPV_MAX, ZONES_TPV_NONE, ZONES_TRAIL_K,
+    tv_key = hashlib.md5(json.dumps([sx_key, ZONES_TPV_K, ZONES_TPV_MIN, ZONES_TPV_MAX, ZONES_TPV_NONE, ZONES_TRAIL_K, "x3",
                                      time.strftime("%Y-%m-%d")]).encode()).hexdigest()
     with _zones_lock:
         old_tv = (ZONES.get("learned") or {}).get("tpv")
@@ -34381,22 +34389,22 @@ function zonesTpvCard(x, card, d) {
   const b = x.best, f = x.fixed, ex = x.ex || {};
   const kName = k => k === 'none' ? 'без тейка (стоп или 14 дн.)' : `${k} дневных хода`;
   const D = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${(+v).toFixed(3)}</span>`;
-  const rows = [`<tr><td style="white-space:normal;">фиксированный +${f.tp}% для всех</td><td>${N(f.test.avg_r)}</td><td>${D(f.test.r_day)}</td><td>${f.test.days ?? '—'}</td></tr>`].concat((x.rows || []).map(r =>
-    `<tr${b && r.k === b.k ? ' style="font-weight:700;"' : ''}><td style="white-space:normal;">${kName(r.k)}${r.k === 'none' ? '' : ` <span class="dim">~${r.tp_med ?? '—'}%</span>`}</td><td>${N(r.test.avg_r)}</td><td>${D(r.test.r_day)}</td><td>${r.test.days ?? '—'}</td></tr>`)).join('');
+  const rows = [`<tr><td style="white-space:normal;">фиксированный +${f.tp}% для всех</td><td>${N(f.test.avg_r)}</td><td>${D(f.test.r_day)}</td><td>${D(f.test.r_day_x3)}</td><td>${f.test.days ?? '—'}</td></tr>`].concat((x.rows || []).map(r =>
+    `<tr${b && r.k === b.k ? ' style="font-weight:700;"' : ''}><td style="white-space:normal;">${kName(r.k)}${r.k === 'none' ? '' : ` <span class="dim">~${r.tp_med ?? '—'}%</span>`}</td><td>${N(r.test.avg_r)}</td><td>${D(r.test.r_day)}</td><td>${D(r.test.r_day_x3)}</td><td>${r.test.days ?? '—'}</td></tr>`)).join('');
   const tb = x.trail_best;
-  const trows = (x.trails || []).map(r => `<tr${tb && r.trail === tb.trail ? ' style="font-weight:700;"' : ''}><td style="white-space:normal;">в ${r.trail} дн. ходе от цены</td><td>${N(r.test.avg_r)}</td><td>${D(r.test.r_day)}</td><td>${r.test.days ?? '—'}</td></tr>`).join('');
+  const trows = (x.trails || []).map(r => `<tr${tb && r.trail === tb.trail ? ' style="font-weight:700;"' : ''}><td style="white-space:normal;">в ${r.trail} дн. ходе от цены</td><td>${N(r.test.avg_r)}</td><td>${D(r.test.r_day)}</td><td>${D(r.test.r_day_x3)}</td><td>${r.test.days ?? '—'}</td></tr>`).join('');
   const tWin = tb && tb.test && b && b.test && tb.test.r_day != null && b.test.r_day != null && tb.test.r_day > b.test.r_day;
   const trailNote = tb && tb.test && tb.test.r_day != null ? `<div class="zbanner ${tWin ? 'pos' : 'warn'}" style="margin-top:8px;">Подтягивающийся стоп (без тейка): лучший на старых — <b>${tb.trail} дн. хода</b>, на новых ${D(tb.test.r_day)} R/день против ${D(b && b.test.r_day)} у выбранного тейка. ${tWin ? 'Он лучше — в торговле его пока нет: скажи, и сделаю.' : 'Не лучше тейка — оставляем тейк.'}</div>` : '';
   const live = (d || {}).tpv_live
     ? (d.tpv_live.k === 'none'
       ? `<div class="zbanner pos" style="margin-bottom:8px;">▶ <b>Включено</b> для новых лесенок: <b>без тейка</b> — сделка закрывается стопом, безубытком или через 14 дней (на бирже тейк стоит на +${x.none || 90}%).</div>`
       : `<div class="zbanner pos" style="margin-bottom:8px;">▶ <b>Включено</b> для новых лесенок: тейк = <b>${d.tpv_live.k}</b> × дневной ход монеты${ex.calm_tp ? ` — у спокойных монет (ход ~${ex.calm_atr}%/день) это ~+${ex.calm_tp}%, у резких (~${ex.wild_atr}%/день) ~+${ex.wild_tp}%` : ''}.</div>`)
-    : `<div class="zbanner warn" style="margin-bottom:8px;">Сейчас тейк фиксированный +${f.tp}% для всех: тейк по волатильности на новых лесенках его не обыграл${b && b.test && b.test.n < 20 ? ' (или новых лесенок меньше 20)' : ''}.</div>`;
+    : `<div class="zbanner warn" style="margin-bottom:8px;">Сейчас тейк фиксированный +${f.tp}% для всех: тейк по волатильности на новых лесенках его не обыграл${b && b.test && b.test.n < 20 ? ' (или новых лесенок меньше 20)' : ''}${b && b.test && f.test && b.test.r_day > f.test.r_day && b.test.r_day_x3 != null && f.test.r_day_x3 != null && b.test.r_day_x3 <= f.test.r_day_x3 ? ` — выигрыш держится на 3 лучших сделках: без них ${D(b.test.r_day_x3)} R/день против ${D(f.test.r_day_x3)} у фиксированного` : ''}.</div>`;
   return card('🎯 Тейк по волатильности монеты', `${live}
-    <div style="font-size:var(--fs-sm);">Тейк в «дневных ходах» монеты (её средний дневной размах, ATR, на момент поста): у BTC меньше, у резких альтов больше. Сравнение — по прибыли <b>в день</b>, пока сделка держит залог: долгая сделка занимает деньги, нужные на новые. Лучший на старых ${x.cut} лесенках: <b>${b ? kName(b.k) : '—'}</b> — на новых ${x.n - x.cut}: ${D(b && b.test.r_day)} R/день (${R(b && b.test.avg_r)} за ~${b && b.test.days} дн.) против ${D(f.test.r_day)} R/день у фиксированного (${R(f.test.avg_r)} за ~${f.test.days} дн.).</div>
-    <div style="overflow-x:auto;margin-top:8px;"><table style="font-size:var(--fs-xs);white-space:nowrap;width:100%;"><thead><tr style="text-transform:none;"><th style="text-align:left;">тейк</th><th>R/сделку</th><th>R/день</th><th>дней</th></tr></thead><tbody>${rows}</tbody></table></div>
-    ${trows ? `<div style="overflow-x:auto;margin-top:8px;"><table style="font-size:var(--fs-xs);white-space:nowrap;width:100%;"><thead><tr style="text-transform:none;"><th style="text-align:left;">стоп за ценой</th><th>R/сделку</th><th>R/день</th><th>дней</th></tr></thead><tbody>${trows}</tbody></table></div>` : ''}${trailNote}
-    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Всё — на новых лесенках: «R/сделку» — средний результат, «R/день» — он же на день в сделке, «дней» — сколько обычно держится сделка; серым — типичный тейк в %. Тейк держится в пределах 0.5–90%. Подтягивающийся стоп включается, когда сделка в плюсе на его расстояние, и дальше идёт за лучшей ценой. Стоп не меняется. Пересчёт раз в сутки и при новых закрытых лесенках.</div>`);
+    <div style="font-size:var(--fs-sm);">Тейк в «дневных ходах» монеты (её средний дневной размах, ATR, на момент поста): у BTC меньше, у резких альтов больше. Сравнение — по прибыли <b>в день</b>, пока сделка держит залог: долгая сделка занимает деньги, нужные на новые. Лучший на старых ${x.cut} лесенках: <b>${b ? kName(b.k) : '—'}</b> — на новых ${x.n - x.cut}: ${D(b && b.test.r_day)} R/день (${R(b && b.test.avg_r)} за ~${b && b.test.days} дн.) против ${D(f.test.r_day)} R/день у фиксированного (${R(f.test.avg_r)} за ~${f.test.days} дн.). Без 3 лучших сделок каждого: ${D(b && b.test.r_day_x3)} против ${D(f.test.r_day_x3)} R/день.</div>
+    <div style="overflow-x:auto;margin-top:8px;"><table style="font-size:var(--fs-xs);white-space:nowrap;width:100%;"><thead><tr style="text-transform:none;"><th style="text-align:left;">тейк</th><th>R/сделку</th><th>R/день</th><th>без 3</th><th>дней</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${trows ? `<div style="overflow-x:auto;margin-top:8px;"><table style="font-size:var(--fs-xs);white-space:nowrap;width:100%;"><thead><tr style="text-transform:none;"><th style="text-align:left;">стоп за ценой</th><th>R/сделку</th><th>R/день</th><th>без 3</th><th>дней</th></tr></thead><tbody>${trows}</tbody></table></div>` : ''}${trailNote}
+    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Всё — на новых лесенках: «R/сделку» — средний результат, «R/день» — он же на день в сделке, «без 3» — R/день без 3 самых удачных сделок (проверка, что выигрыш не держится на паре выбросов; включается, только если выбранный тейк лучше и так), «дней» — сколько обычно держится сделка; серым — типичный тейк в %. Тейк держится в пределах 0.5–90%. Подтягивающийся стоп включается, когда сделка в плюсе на его расстояние, и дальше идёт за лучшей ценой. Стоп не меняется. Пересчёт раз в сутки и при новых закрытых лесенках.</div>`);
 }
 // v0.99.606 — how many ladders are on at once, and the margin one ladder may take
 function zonesConcCard(d, card) {

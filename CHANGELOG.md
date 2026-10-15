@@ -19766,3 +19766,7 @@ v0.99.611 - Zones take research extended and compared per day (user: "да" to t
          day and the typical days held. The live take switches only when its R per
          day on the newer ladders beats the fixed take's (and its R per trade is
          positive).
+v0.99.612 - Zones take research: robustness check. Every variant is also scored without its 3 best
+         trades (R per trade and R per day); the volatility take goes live only if it still beats the
+         fixed take without them, so a few outliers in a small test cannot switch it. New column
+         "без 3" in the card, and the banner says when a win rests on the 3 best trades.
