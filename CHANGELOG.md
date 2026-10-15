@@ -19713,3 +19713,9 @@ v0.99.604 - Zones: the confirmed stop is live (user: "да"). New ladders from t
          emergency stop. Ladders opened before keep their plain stop; our finders'
          ladders are not affected. The ladder's message and the "🛑" card say what
          is switched on.
+v0.99.605 - Zones: the stop research (15 variants replayed over every finished ladder) is
+         recomputed only when the set of finished ladders, the take / buffer /
+         breakeven rules or the variant list changed — after loading the channel's
+         whole history it would otherwise be the heaviest part of every 30-minute
+         learning pass. The confirmed stop's choice is unchanged: the top-1 on the
+         older 70%, used only while it beats the plain stop on the newer 30%.

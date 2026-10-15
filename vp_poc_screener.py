@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.604"
+APP_VERSION = "0.99.605"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24679,12 +24679,23 @@ def zones_learn():
         ax_cmp = {"n": ax_n, "posts": sum(1 for v in ax_of.values() if v), "avg_r": avg(rs), "n_trades": len(rs),
                   "avg_r_without": avg(xs_no), "n_without": len(xs_no),
                   "g": growth(rs, rf), "g_without": growth(xs_no, rf)}
-    try:   # v0.99.603
-        zones_act("learn", stage="разбор стопов: что было после стопа и стоп с подтверждением")
-        stopx = zones_stopx_research(runs_g, rule)
-    except Exception as e:
-        log_error(f"zones stopx research: {e}")
-        stopx = None
+    # v0.99.605 — the stop research is recomputed only when the finished ladders or the rules
+    # changed (after a full-history load it is the heaviest part of a learning pass)
+    sx_key = hashlib.md5(json.dumps([sorted(str(z["id"]) for g, _c, _s, _e in runs_g for z in g),
+                                     rule.get("tp"), rule.get("buf"), rule.get("be"),
+                                     ZONES_STOPX_CLOSE_H, ZONES_STOPX_RET_H, ZONES_STOPX_HARD]).encode()).hexdigest()
+    with _zones_lock:
+        old_sx = (ZONES.get("learned") or {}).get("stopx")
+    if old_sx and old_sx.get("key") == sx_key:
+        stopx = old_sx
+    else:
+        try:   # v0.99.603
+            zones_act("learn", stage="разбор стопов: что было после стопа и стоп с подтверждением")
+            stopx = zones_stopx_research(runs_g, rule)
+            stopx["key"] = sx_key
+        except Exception as e:
+            log_error(f"zones stopx research: {e}")
+            stopx = None
     learned = {"at": now, "n": len(rs), "rule": rule, "author_exit": ax_cmp, "stopx": stopx, "tp_auto": tp_auto, "tp_rows": tp_rows, "be_rows": be_rows,
                "be_auto": rule.get("be"),
                "tp_by": "auto" if auto else round(rf * 100, 2),
