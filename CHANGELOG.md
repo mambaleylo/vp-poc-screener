@@ -19752,3 +19752,6 @@ v0.99.609 - Zones: the take in the coin's own daily moves (user: "on BTC a 20% t
          table and what it means for calm vs wild coins. The stop is not touched.
          Recomputed once a day and when new ladders close. (v0.99.608's
          latest-commit download is included.)
+v0.99.610 - Zones: the "🎯 Тейк по волатильности монеты" card is shown before the first count
+         too (user: "не вижу карточку") — "считается при ближайшем обучении", with the
+         learning's current stage while it runs; a failed count shows its error.

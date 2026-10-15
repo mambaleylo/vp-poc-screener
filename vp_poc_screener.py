@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.609"
+APP_VERSION = "0.99.610"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24876,7 +24876,7 @@ def zones_learn():
             tpv["key"] = tv_key
         except Exception as e:
             log_error(f"zones tpv research: {e}")
-            tpv = None
+            tpv = {"error": str(e)[:200]}   # v0.99.610 — the card says why
     try:   # v0.99.606
         conc = zones_conc_from_runs(per)
     except Exception as e:
@@ -34297,7 +34297,12 @@ function zStatusHtml(d) {
 }
 // v0.99.609 — the take in the coin's own daily moves vs the one-for-all fixed %
 function zonesTpvCard(x, card, d) {
-  if (!x || !x.fixed) return '';
+  if (!x || !x.fixed) {   // v0.99.610 — visible before the first count too
+    const lv = ((d || {}).act || {}).learn || {};
+    return card('🎯 Тейк по волатильности монеты', `<div style="font-size:var(--fs-sm);">${x && x.error
+      ? `<span class="loss">разбор не посчитался: ${x.error}</span> — повторю при следующем обучении`
+      : `считается при ближайшем обучении зон${lv.running ? ` — идёт сейчас: ${lv.stage || ''}` : ' (оно запускается само примерно раз в 30 минут)'}. В первый раз бот подкачивает дневные свечи по всем монетам из истории — это дольше обычного.`}</div>`);
+  }
   const N = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${(+v).toFixed(2)}</span>`;
   const R = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
   const b = x.best, f = x.fixed, ex = x.ex || {};
