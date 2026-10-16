@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.613"
+APP_VERSION = "0.99.614"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24255,6 +24255,12 @@ ZONES_TPV_MIN, ZONES_TPV_MAX = 0.5, 90.0      # % — the take is kept within th
 ZONES_TPV_NONE = 90.0
 ZONES_TRAIL_K = (1.0, 2.0, 3.0, 4.0)
 ZONES_TPV_ENABLED = os.environ.get("VP_ZONES_TPV", "1") == "1"
+# v0.99.614 — user: "на биткоине смысла нету ставить тейк 20%, вряд ли дойдёт": one k for all was chosen
+# mostly on the altcoins (most posts). The research is also split into calm coins (daily move < 4%: BTC,
+# ETH and the like) and the rest; a group gets its own k only from its own newer ladders (at least
+# ZONES_TPV_GROUP_MIN, and still better without its 3 best trades), otherwise the common rule
+ZONES_TPV_CALM = 4.0
+ZONES_TPV_GROUP_MIN = 12
 _zones_daily_cache = {}
 
 
@@ -24343,8 +24349,10 @@ def zones_tpv_research(runs_g, rule):
                 "avg_r_x3": round(sum(r for r, _d in rest) / len(rest), 3) if rest else None,
                 "r_day_x3": round(sum(r for r, _d in rest) / dr, 4) if dr else None}
 
+    grp = ["calm" if a is not None and a < ZONES_TPV_CALM else "wild" for a in atr]   # v0.99.614
+
     def run(tp_of, trail=None):
-        tr_, te_, tps = [], [], []
+        pts = []   # (i, R, days, tp)
         for i, (g, cs, st_, en_) in enumerate(runs):
             if atr[i] is None:
                 continue
@@ -24353,9 +24361,16 @@ def zones_tpv_research(runs_g, rule):
                  else zone_ladder_sim(cs, g, tp, st_, en_, be=rule.get("be")))
             if r:
                 days = max(1 / 24, ((r.get("t_out") or 0) - (r.get("t_in") or 0)) / 86400)
-                (tr_ if i < cut else te_).append((r["r"], days))
-                tps.append(tp)
-        return {"train": blk(tr_), "test": blk(te_), "tp_med": round(statistics.median([t for t in tps if t is not None]), 2) if any(t is not None for t in tps) else None}
+                pts.append((i, r["r"], days, tp))
+
+        def agg(only=None):
+            q = [x for x in pts if only is None or grp[x[0]] == only]
+            tps = [x[3] for x in q if x[3] is not None]
+            return {"train": blk([(r, d) for i, r, d, _t in q if i < cut]), "test": blk([(r, d) for i, r, d, _t in q if i >= cut]),
+                    "tp_med": round(statistics.median(tps), 2) if tps else None}
+        out = agg()
+        out["g"] = {gn: agg(gn) for gn in ("calm", "wild")}   # v0.99.614 — the same replay per coin group
+        return out
 
     fixed = run(lambda i: rule["tp"])
     fixed["tp"] = rule["tp"]
@@ -24386,12 +24401,33 @@ def zones_tpv_research(runs_g, rule):
     if best and best["k"] == "none":
         ex = {"calm_atr": ex and ex.get("calm_atr"), "wild_atr": ex and ex.get("wild_atr"), "calm_tp": ZONES_TPV_NONE, "wild_tp": ZONES_TPV_NONE}
     tb = max((x for x in trails if x["train"]["r_day"] is not None), key=lambda x: x["train"]["r_day"], default=None)
+    groups = {}   # v0.99.614 — per coin group: its own best k on its older ladders
+    for gn in ("calm", "wild"):
+        ga = [a for a, g_ in zip(atr, grp) if a is not None and g_ == gn]
+        gc = [x for x in rows if x["g"][gn]["train"]["r_day"] is not None]
+        gb = max(gc, key=lambda x: x["g"][gn]["train"]["r_day"]) if gc else None
+        groups[gn] = {"best_k": gb["k"] if gb else None, "atr_med": round(statistics.median(ga), 2) if ga else None,
+                      "n_train": fixed["g"][gn]["train"]["n"], "n_test": fixed["g"][gn]["test"]["n"]}
     return {"fixed": fixed, "rows": rows, "best": best, "trails": trails, "trail_best": tb,
-            "n": len(runs), "cut": cut, "with_atr": len(known), "ex": ex}
+            "n": len(runs), "cut": cut, "with_atr": len(known), "ex": ex, "groups": groups, "calm_lim": ZONES_TPV_CALM}
+
+
+def _zones_tpv_beats(bt, ft, n_min):
+    """the variant's newer ladders (bt) beat the fixed take's (ft): per day held, in profit per trade,
+    and still without the 3 best trades of each (v0.99.612)"""
+    bt, ft = bt or {}, ft or {}
+    if (bt.get("n") or 0) < n_min or bt.get("r_day") is None or ft.get("r_day") is None or bt["r_day"] <= ft["r_day"] \
+            or (bt.get("avg_r") or 0) <= 0:
+        return False
+    if "r_day_x3" in bt and (bt["r_day_x3"] is None or ft.get("r_day_x3") is None or bt["r_day_x3"] <= ft["r_day_x3"]):
+        return False
+    return True
 
 
 def zones_tpv_rule():
-    """the k of the volatility take for NEW ladders while it beats the fixed take on the newer ladders"""
+    """the k of the volatility take for NEW ladders while it beats the fixed take on the newer ladders;
+    v0.99.614 — per coin group: {"k": common k or None, "groups": {"calm": k or None, "wild": ...},
+    "src": {group: "own" / "common" / "fixed"}}"""
     if not ZONES_TPV_ENABLED or ZONES_TP_PCT:
         return None
     with _zones_lock:
@@ -24399,25 +24435,39 @@ def zones_tpv_rule():
     b, f = x.get("best"), x.get("fixed")
     if not b or not f:
         return None
-    bt, ft = b.get("test") or {}, f.get("test") or {}
-    if (bt.get("n") or 0) < 20 or bt.get("r_day") is None or ft.get("r_day") is None or bt["r_day"] <= ft["r_day"] \
-            or (bt.get("avg_r") or 0) <= 0:
+    common = b["k"] if _zones_tpv_beats(b.get("test"), f.get("test"), 20) else None
+    gk, src = {}, {}
+    for gn, gi in (x.get("groups") or {}).items():
+        ff = ((f.get("g") or {}).get(gn) or {}).get("test") or {}
+        if (ff.get("n") or 0) < ZONES_TPV_GROUP_MIN:   # too few newer ladders of its own: the common rule
+            gk[gn], src[gn] = common, ("common" if common is not None else "fixed")
+            continue
+        own = next((r for r in x.get("rows") or [] if r.get("k") == gi.get("best_k")), None)
+        com = next((r for r in x.get("rows") or [] if common is not None and r.get("k") == common), None)
+        if own and _zones_tpv_beats(own["g"][gn]["test"], ff, ZONES_TPV_GROUP_MIN):
+            gk[gn], src[gn] = own["k"], "own"
+        elif com and _zones_tpv_beats(com["g"][gn]["test"], ff, ZONES_TPV_GROUP_MIN):
+            gk[gn], src[gn] = common, "common"
+        else:   # the group's own newer ladders say: the fixed take is better for it
+            gk[gn], src[gn] = None, "fixed"
+    if common is None and not any(v is not None for v in gk.values()):
         return None
-    # v0.99.612 — and still better without the 3 best trades of each
-    if "r_day_x3" in bt and (bt["r_day_x3"] is None or ft.get("r_day_x3") is None or bt["r_day_x3"] <= ft["r_day_x3"]):
-        return None
-    return {"k": b["k"]}
+    return {"k": common, "groups": gk, "src": src, "calm_lim": x.get("calm_lim") or ZONES_TPV_CALM}
 
 
 def zones_take_for(sym, p):
     """(take %, k or None): k x the coin's daily ATR now when the volatility take is on, else the fixed take"""
     rv = zones_tpv_rule()
-    if rv and rv["k"] == "none":
+    if not rv:
+        return p["tp"], None
+    a = zones_coin_datr(sym)
+    k = rv["k"]
+    if rv.get("groups") and a:   # v0.99.614 — the k of the coin's group
+        k = rv["groups"].get("calm" if a < rv["calm_lim"] else "wild", k)
+    if k == "none":
         return ZONES_TPV_NONE, "none"
-    if rv:
-        a = zones_coin_datr(sym)
-        if a:
-            return zones_tpv_pct(rv["k"], a), rv["k"]
+    if k is not None and a:
+        return zones_tpv_pct(k, a), k
     return p["tp"], None
 
 
@@ -24943,7 +24993,7 @@ def zones_learn():
         except Exception as e:
             log_error(f"zones stopx research: {e}")
             stopx = None
-    tv_key = hashlib.md5(json.dumps([sx_key, ZONES_TPV_K, ZONES_TPV_MIN, ZONES_TPV_MAX, ZONES_TPV_NONE, ZONES_TRAIL_K, "x3",
+    tv_key = hashlib.md5(json.dumps([sx_key, ZONES_TPV_K, ZONES_TPV_MIN, ZONES_TPV_MAX, ZONES_TPV_NONE, ZONES_TRAIL_K, "x3", "g4",
                                      time.strftime("%Y-%m-%d")]).encode()).hexdigest()
     with _zones_lock:
         old_tv = (ZONES.get("learned") or {}).get("tpv")
@@ -32051,6 +32101,31 @@ INDEX_HTML = """<!doctype html>
   .ztbl tr.zbest td { background:var(--pos-bg); }
   .ztbl tr.zcur td { font-weight:700; }
   .zbtn { margin-top:10px; background:var(--ctl); border:none; color:var(--tx); padding:6px 12px; border-radius:var(--r-xs); }
+  /* v0.99.614 — the zones page: sections as sub-tabs, bars instead of number tables */
+  .zseg { display:flex; gap:3px; padding:3px; margin:2px 0 10px; background:var(--inset); border:1px solid var(--line); border-radius:999px; }
+  .zseg button { flex:1; min-width:0; height:32px; border:none; border-radius:999px; background:transparent; color:var(--tx-2); font-size:var(--fs-sm); font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:0 6px; }
+  .zseg button.on { background:var(--ctl); color:var(--tx); box-shadow:0 1px 4px rgba(0,0,0,.25); }
+  .zseg button .zc { font-size:var(--fs-xs); color:var(--tx-3); font-weight:500; margin-left:3px; }
+  .zpane { display:none; }
+  .zpane.on { display:block; }
+  .zbars { margin-top:6px; }
+  .zbr { display:grid; grid-template-columns:minmax(0,48%) 1fr 50px; gap:8px; align-items:center; padding:2px 0; font-size:var(--fs-sm); }
+  .zbr .zbl { min-width:0; line-height:1.25; }
+  .zbr .zbl .dim { font-size:var(--fs-xs); font-weight:400; }
+  .zbr .zbl .zmk { font-size:var(--fs-xs); color:var(--pos); font-weight:700; white-space:nowrap; }
+  .zbr .zbl .zmk.dimk { color:var(--tx-2); }
+  .zbr.hi .zbl { font-weight:700; }
+  .zbr .zbt { position:relative; height:10px; }
+  .zbr .zbt b { position:absolute; top:0; bottom:0; border-radius:0 4px 4px 0; }
+  .zbr .zbt b.l { border-radius:4px 0 0 4px; }
+  .zbr .zbt b.p { background:var(--pos); opacity:.55; }
+  .zbr .zbt b.n { background:var(--neg); opacity:.55; }
+  .zbr.hi .zbt b { opacity:1; }
+  .zbr .zbt .z0 { position:absolute; top:-3px; bottom:-3px; width:1px; background:var(--line-2); }
+  .zbr .zbv { text-align:right; font-variant-numeric:tabular-nums; font-size:var(--fs-xs); }
+  .ztiles.z3 { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .zstrip { display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:8px; font-size:var(--fs-sm); color:var(--tx-2); }
+  .zstrip b { color:var(--tx); }
   .loadbar { display:inline-block; width:34px; height:4px; border-radius:2px; background:var(--line-2); overflow:hidden; vertical-align:middle; }
   .loadbar > i { display:block; height:100%; background:var(--acc); }
   #overview, #autotradeBanner, #healthBanner { font-size:var(--fs-xs); }
@@ -34383,6 +34458,23 @@ function zStatusHtml(d) {
   return `<div class="zcard"><div class="zh">📟 Состояние</div><div style="font-size:var(--fs-sm);">${out.join('')}</div></div>`;
 }
 // v0.99.609 — the take in the coin's own daily moves vs the one-for-all fixed %
+// v0.99.614 — the zones page redesign: horizontal bars instead of number tables (the tables stay under
+// «подробнее»). items: [{label, sub, v, hi, mark}]; bars grow from zero, minus to the left
+function zBars(items, fmt) {
+  const xs = (items || []).filter(it => it && it.v != null);
+  if (!xs.length) return '<div class="dim" style="font-size:var(--fs-sm);">данных пока нет</div>';
+  const pos = Math.max(0, ...xs.map(it => +it.v)), neg = Math.max(0, ...xs.map(it => -it.v));
+  const span = (pos + neg) || 1, zero = neg / span * 100;
+  return `<div class="zbars">${(items || []).map(it => {
+    if (!it) return '';
+    const v = it.v == null ? null : +it.v;
+    const w = v == null ? 0 : Math.abs(v) / span * 100, left = v == null ? zero : (v >= 0 ? zero : zero - w);
+    return `<div class="zbr${it.hi ? ' hi' : ''}" title="${String(it.label).replace(/<[^>]+>/g, '')}: ${v == null ? '—' : fmt(v).replace(/<[^>]+>/g, '')}">
+      <div class="zbl">${it.label}${it.sub ? ` <span class="dim">${it.sub}</span>` : ''}${it.mark ? ` <span class="zmk ${it.markCls || ''}">◂ ${it.mark}</span>` : ''}</div>
+      <div class="zbt">${neg ? `<i class="z0" style="left:${zero}%;"></i>` : ''}${v == null ? '' : `<b class="${v >= 0 ? 'p' : 'n'}${v >= 0 ? '' : ' l'}" style="left:${left}%;width:${Math.max(w, 1.5)}%;"></b>`}</div>
+      <div class="zbv">${v == null ? '—' : fmt(v)}</div></div>`;
+  }).join('')}</div>`;
+}
 function zonesTpvCard(x, card, d) {
   if (!x || !x.fixed) {   // v0.99.610 — visible before the first count too
     const lv = ((d || {}).act || {}).learn || {};
@@ -34391,26 +34483,50 @@ function zonesTpvCard(x, card, d) {
       : `считается при ближайшем обучении зон${lv.running ? ` — идёт сейчас: ${lv.stage || ''}` : ' (оно запускается само примерно раз в 30 минут)'}. В первый раз бот подкачивает дневные свечи по всем монетам из истории — это дольше обычного.`}</div>`);
   }
   const N = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${(+v).toFixed(2)}</span>`;
-  const R = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
-  const b = x.best, f = x.fixed, ex = x.ex || {};
-  const kName = k => k === 'none' ? 'без тейка (стоп или 14 дн.)' : `${k} дневных хода`;
   const D = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${(+v).toFixed(3)}</span>`;
-  const rows = [`<tr><td style="white-space:normal;">фиксированный +${f.tp}% для всех</td><td>${N(f.test.avg_r)}</td><td>${D(f.test.r_day)}</td><td>${D(f.test.r_day_x3)}</td><td>${f.test.days ?? '—'}</td></tr>`].concat((x.rows || []).map(r =>
+  const b = x.best, f = x.fixed, gs = x.groups || null, live = (d || {}).tpv_live || null, lim = x.calm_lim || 4;
+  const kName = k => k === 'none' ? 'без тейка' : `${k} хода`;
+  const tpOf = (k, a) => k === 'none' ? 90 : Math.min(90, Math.max(0.5, Math.round(k * a * 100) / 100));
+  const pick = (gn, k) => gn ? ((x.rows || []).find(r => r.k === k) || {}).g?.[gn] : ((x.rows || []).find(r => r.k === k));
+  // the take each coin group trades now
+  const tileOf = (gn, title) => {
+    const g = gn ? gs[gn] : null;
+    const k = live ? (gn && live.groups && gn in live.groups ? live.groups[gn] : live.k) : null;
+    const src = !live ? 'fixed' : (gn && live.src && live.src[gn]) || (k != null ? 'common' : 'fixed');
+    const ff = gn ? f.g[gn] : f, cur = k != null ? pick(gn, k) : null, a = g ? g.atr_med : null;
+    const val = k == null ? `+${f.tp}%` : (k === 'none' ? 'без тейка' : (a ? `~+${tpOf(k, a)}%` : `${k} × ход`));
+    const why = k == null ? (src === 'fixed' && gn && (ff.test.n || 0) >= 12 ? 'фиксированный: дальний тейк этим монетам не помог' : 'фиксированный для всех')
+      : `${k === 'none' ? 'стоп, безубыток или 14 дн.' : k + ' × дневной ход'} · ${src === 'own' ? 'своё правило группы' : 'общее правило'}`;
+    const cmp = cur && cur.test && cur.test.n ? `<div class="zn">на ${cur.test.n} новых: ${D(cur.test.r_day)} против ${D(ff.test.r_day)} R/день у +${f.tp}%</div>` : '';
+    return `<div class="ztile"><div class="zl">${title}</div><div class="zv">${val}</div><div class="zn">${why}</div>${cmp}</div>`;
+  };
+  const tiles = gs
+    ? `<div class="ztiles">${tileOf('calm', `спокойные · ход &lt;${lim}%/день${gs.calm.atr_med ? ` (~${gs.calm.atr_med}%)` : ''}`)}${tileOf('wild', `резкие · ход ≥${lim}%/день${gs.wild.atr_med ? ` (~${gs.wild.atr_med}%)` : ''}`)}</div>`
+    : `<div class="ztiles">${tileOf(null, 'все монеты')}</div>`;
+  const status = live ? '<span class="pill pos">включено</span>' : '<span class="pill">фиксированный +' + f.tp + '%</span>';
+  // R per day on the newer ladders, one bar per take
+  const barsOf = gn => {
+    const ff = gn ? f.g[gn] : f, ck = live ? (gn && live.groups && gn in live.groups ? live.groups[gn] : live.k) : null;
+    return zBars([{label: `фикс. +${f.tp}%`, v: ff.test.r_day, hi: ck == null, mark: ck == null && live ? 'сейчас' : null}]
+      .concat((x.rows || []).map(r => ({label: kName(r.k), sub: r.k === 'none' ? '' : `~${(gn ? r.g[gn].tp_med : r.tp_med) ?? '—'}%`,
+        v: (gn ? r.g[gn] : r).test.r_day, hi: ck === r.k, mark: ck === r.k ? 'сейчас' : null}))), v => D(v));
+  };
+  const gBlock = (gn, t) => `<div class="zsub"><b>${t}</b> — новых лесенок ${gs[gn].n_test}${gs[gn].n_test < 12 ? ' (меньше 12 — своё правило не включается, берётся общее)' : ''}:</div>${barsOf(gn)}`;
+  const rows = [`<tr><td style="white-space:normal;">фикс. +${f.tp}%</td><td>${N(f.test.avg_r)}</td><td>${D(f.test.r_day)}</td><td>${D(f.test.r_day_x3)}</td><td>${f.test.days ?? '—'}</td></tr>`].concat((x.rows || []).map(r =>
     `<tr${b && r.k === b.k ? ' style="font-weight:700;"' : ''}><td style="white-space:normal;">${kName(r.k)}${r.k === 'none' ? '' : ` <span class="dim">~${r.tp_med ?? '—'}%</span>`}</td><td>${N(r.test.avg_r)}</td><td>${D(r.test.r_day)}</td><td>${D(r.test.r_day_x3)}</td><td>${r.test.days ?? '—'}</td></tr>`)).join('');
   const tb = x.trail_best;
-  const trows = (x.trails || []).map(r => `<tr${tb && r.trail === tb.trail ? ' style="font-weight:700;"' : ''}><td style="white-space:normal;">в ${r.trail} дн. ходе от цены</td><td>${N(r.test.avg_r)}</td><td>${D(r.test.r_day)}</td><td>${D(r.test.r_day_x3)}</td><td>${r.test.days ?? '—'}</td></tr>`).join('');
   const tWin = tb && tb.test && b && b.test && tb.test.r_day != null && b.test.r_day != null && tb.test.r_day > b.test.r_day;
-  const trailNote = tb && tb.test && tb.test.r_day != null ? `<div class="zbanner ${tWin ? 'pos' : 'warn'}" style="margin-top:8px;">Подтягивающийся стоп (без тейка): лучший на старых — <b>${tb.trail} дн. хода</b>, на новых ${D(tb.test.r_day)} R/день против ${D(b && b.test.r_day)} у выбранного тейка. ${tWin ? 'Он лучше — в торговле его пока нет: скажи, и сделаю.' : 'Не лучше тейка — оставляем тейк.'}</div>` : '';
-  const live = (d || {}).tpv_live
-    ? (d.tpv_live.k === 'none'
-      ? `<div class="zbanner pos" style="margin-bottom:8px;">▶ <b>Включено</b> для новых лесенок: <b>без тейка</b> — сделка закрывается стопом, безубытком или через 14 дней (на бирже тейк стоит на +${x.none || 90}%).</div>`
-      : `<div class="zbanner pos" style="margin-bottom:8px;">▶ <b>Включено</b> для новых лесенок: тейк = <b>${d.tpv_live.k}</b> × дневной ход монеты${ex.calm_tp ? ` — у спокойных монет (ход ~${ex.calm_atr}%/день) это ~+${ex.calm_tp}%, у резких (~${ex.wild_atr}%/день) ~+${ex.wild_tp}%` : ''}.</div>`)
-    : `<div class="zbanner warn" style="margin-bottom:8px;">Сейчас тейк фиксированный +${f.tp}% для всех: тейк по волатильности на новых лесенках его не обыграл${b && b.test && b.test.n < 20 ? ' (или новых лесенок меньше 20)' : ''}${b && b.test && f.test && b.test.r_day > f.test.r_day && b.test.r_day_x3 != null && f.test.r_day_x3 != null && b.test.r_day_x3 <= f.test.r_day_x3 ? ` — выигрыш держится на 3 лучших сделках: без них ${D(b.test.r_day_x3)} R/день против ${D(f.test.r_day_x3)} у фиксированного` : ''}.</div>`;
-  return card('🎯 Тейк по волатильности монеты', `${live}
-    <div style="font-size:var(--fs-sm);">Тейк в «дневных ходах» монеты (её средний дневной размах, ATR, на момент поста): у BTC меньше, у резких альтов больше. Сравнение — по прибыли <b>в день</b>, пока сделка держит залог: долгая сделка занимает деньги, нужные на новые. Лучший на старых ${x.cut} лесенках: <b>${b ? kName(b.k) : '—'}</b> — на новых ${x.n - x.cut}: ${D(b && b.test.r_day)} R/день (${R(b && b.test.avg_r)} за ~${b && b.test.days} дн.) против ${D(f.test.r_day)} R/день у фиксированного (${R(f.test.avg_r)} за ~${f.test.days} дн.). Без 3 лучших сделок каждого: ${D(b && b.test.r_day_x3)} против ${D(f.test.r_day_x3)} R/день.</div>
-    <div style="overflow-x:auto;margin-top:8px;"><table style="font-size:var(--fs-xs);white-space:nowrap;width:100%;"><thead><tr style="text-transform:none;"><th style="text-align:left;">тейк</th><th>R/сделку</th><th>R/день</th><th>без 3</th><th>дней</th></tr></thead><tbody>${rows}</tbody></table></div>
-    ${trows ? `<div style="overflow-x:auto;margin-top:8px;"><table style="font-size:var(--fs-xs);white-space:nowrap;width:100%;"><thead><tr style="text-transform:none;"><th style="text-align:left;">стоп за ценой</th><th>R/сделку</th><th>R/день</th><th>без 3</th><th>дней</th></tr></thead><tbody>${trows}</tbody></table></div>` : ''}${trailNote}
-    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Всё — на новых лесенках: «R/сделку» — средний результат, «R/день» — он же на день в сделке, «без 3» — R/день без 3 самых удачных сделок (проверка, что выигрыш не держится на паре выбросов; включается, только если выбранный тейк лучше и так), «дней» — сколько обычно держится сделка; серым — типичный тейк в %. Тейк держится в пределах 0.5–90%. Подтягивающийся стоп включается, когда сделка в плюсе на его расстояние, и дальше идёт за лучшей ценой. Стоп не меняется. Пересчёт раз в сутки и при новых закрытых лесенках.</div>`);
+  const trail = (x.trails || []).length ? `<div class="zsub"><b>Подтягивающийся стоп вместо тейка</b> (включается, когда сделка в плюсе на N дневных ходов, и идёт за лучшей ценой) — ${tWin ? '<span class="win">лучше тейка</span>: в торговле его пока нет, скажи — сделаю' : 'не лучше тейка'}:</div>${zBars(x.trails.map(r => ({label: `в ${r.trail} дн. ходе`, v: r.test.r_day, hi: tb && r.trail === tb.trail})), v => D(v))}` : '';
+  return card(`🎯 Тейк по волатильности ${status}`, `${tiles}
+    <div class="zsub">Прибыль <b>в день</b>, пока сделка держит залог, на новых лесенках (выбор — на старых ${x.cut}, проверка — на новых ${x.n - x.cut}):</div>
+    ${gs ? gBlock('calm', 'Спокойные монеты') + gBlock('wild', 'Резкие монеты') : barsOf(null)}
+    <details><summary>подробнее: все монеты вместе, таблица, подтягивающийся стоп</summary>
+      ${gs ? `<div class="zsub"><b>Все монеты вместе</b> (общее правило${live && live.k != null ? ` — ${kName(live.k)}` : ' — не включено'}):</div>${zBars([{label: `фикс. +${f.tp}%`, v: f.test.r_day}].concat((x.rows || []).map(r => ({label: kName(r.k), sub: r.k === 'none' ? '' : `~${r.tp_med ?? '—'}%`, v: r.test.r_day, hi: live && live.k === r.k}))), v => D(v))}` : ''}
+      <div class="zsub"><b>Все монеты, цифрами</b> («без 3» — R/день без 3 самых удачных сделок):</div>
+      <div class="zwrap"><table class="ztbl"><thead><tr><th>тейк</th><th>R/сделку</th><th>R/день</th><th>без 3</th><th>дней</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${trail}
+      <div class="zsub">Тейк меряется в «дневных ходах» монеты (её средний дневной размах, ATR, на момент поста) и держится в пределах 0.5–90%. Включается, только если на новых лесенках он лучше фиксированного и в день, и без 3 лучших сделок. У каждой группы монет своё правило, если у неё хватает своих новых лесенок (от 12), иначе — общее. Стоп не меняется. Пересчёт раз в сутки и при новых закрытых лесенках.</div>
+    </details>`);
 }
 // v0.99.606 — how many ladders are on at once, and the margin one ladder may take
 function zonesConcCard(d, card) {
@@ -34444,7 +34560,14 @@ function zonesStopxCard(x, card, d) {
   const verdict = !b ? '' : (b.test.avg_r != null && base.test.avg_r != null && b.test.avg_r > base.test.avg_r
     ? `<div class="zbanner pos">На новых ${b.test.n} лесенках (их выбор не видел) лучше обычного стопа: <b>${name(b)}</b> — ${R(b.test.avg_r)} против ${R(base.test.avg_r)} на сделку. Риск на сделку для этого нужен меньше в ~${b.risk_x} раза (убыток считается до стопа на бирже).</div>`
     : `<div class="zbanner warn">Лучший на обучении вариант (<b>${name(b)}</b>) на новых лесенках не лучше обычного стопа: ${R(b.test.avg_r)} против ${R(base.test.avg_r)}. Пока менять стоп не на что.</div>`);
-  return card('🛑 Стопы на истории — что было после и стоп с подтверждением', `${live}
+  return card('🛑 Стоп с подтверждением', `${live}${verdict}
+    <div class="zsub">Результат на сделку на новых ${x.n - x.cut} лесенках (выбор — на старых ${x.cut}):</div>
+    ${(() => { const isB = r => x.best && r.kind === x.best.kind && r.k_h === x.best.k_h && r.hard === x.best.hard;
+      const it = r => ({label: rule(r), sub: r.kind === 'base' ? '' : `биржа +${r.hard}%, риск ×${f(r.risk_x)}`, v: r.test.avg_r, hi: isB(r), mark: isB(r) ? 'лучший на старых' : (r.kind === 'base' ? 'обычный' : null), markCls: isB(r) ? '' : 'dimk'});
+      const all = x.rows || [], top = all.filter(r => r.kind !== 'base' && !isB(r)).sort((p_, q) => (q.test.avg_r ?? -99) - (p_.test.avg_r ?? -99)).slice(0, 4);
+      const vis = all.filter(r => r.kind === 'base' || isB(r) || top.includes(r));
+      return zBars(vis.map(it), N) + (all.length > vis.length ? `<details><summary>все ${all.length} вариантов</summary>${zBars(all.map(it), N)}</details>` : ''); })()}
+    <details><summary>подробнее: что было после стопов, таблица</summary>
     <div style="font-size:var(--fs-sm);">Выбито стопом по нынешним правилам: <b>${a.n}</b> лесенок. После стопа цена всё-таки дошла до тейка в <b>${f(a.tp_pct)}%</b> случаев (обычно через ~${f(a.tp_hours)} ч), вернулась к средней цене входа — в ${f(a.avg_pct)}%, закрылась обратно за 2-й точкой входа — в ${f(a.second_pct)}%.</div>
     <div class="zkv" style="margin-top:6px;font-size:var(--fs-sm);">
       <div>вынос за стоп, вернулись</div><div>~${f(a.os_back)}% (80% — до ${f(a.os_back_p80)}%)</div>
@@ -34453,8 +34576,7 @@ function zonesStopxCard(x, card, d) {
       <div>обратно за 2-й точкой</div><div>через ~${f(a.second_h_back)} ч <span class="dim">(у вернувшихся)</span></div>
     </div>
     <div style="overflow-x:auto;margin-top:8px;"><table style="font-size:var(--fs-xs);white-space:nowrap;width:100%;"><thead><tr style="text-transform:none;"><th style="text-align:left;">закрывать, когда</th><th>тест R</th><th>+%</th><th>риск</th></tr></thead><tbody>${rows}</tbody></table></div>
-    ${verdict}
-    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">R — к убытку при стопе на бирже (на него и считается риск), «биржа» — стоп на бирже дальше обычного, «тест R» — на новых лесенках, «+%» — доля сделок в плюс на тесте, «риск ×» — во сколько раз этот убыток больше обычного стопа: настолько же меньше надо ставить % риска. Выбор — на старых ${x.cut} лесенках, проверка — на новых ${x.n - x.cut}. Пересчитывается при каждом обучении: перестанет выигрывать — бот сам вернётся к обычному стопу.</div>`);
+    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">R — к убытку при стопе на бирже (на него и считается риск), «биржа» — стоп на бирже дальше обычного, «тест R» — на новых лесенках, «+%» — доля сделок в плюс на тесте, «риск ×» — во сколько раз этот убыток больше обычного стопа: настолько же меньше надо ставить % риска. Выбор — на старых ${x.cut} лесенках, проверка — на новых ${x.n - x.cut}. Пересчитывается при каждом обучении: перестанет выигрывать — бот сам вернётся к обычному стопу.</div></details>`);
 }
 async function refreshZones() {
   const panel = document.getElementById('zonesPanel');
@@ -34492,19 +34614,29 @@ async function refreshZones() {
   const summary = card('🎯 Зоны — итог', `<div class="ztiles">
       ${tile('Автоторговля', d.autotrade ? '<span class="win">вкл</span>' : '<span class="dim">выкл</span>', d.autotrade ? '' : 'Настройки → Автоторговля → Зоны')}
       ${tile('Риск на сделку', riskNow == null ? '—' : `<span data-count="${riskNow}" data-suf="%">${riskNow}%</span>`, riskSrc)}
-      ${tile('Правила', 'лимитки по методичке', `стоп ${p.buf}% за зоной · тейк +${p.tp}% от средней${d.tp_user ? ' (свой)' : ''}`)}
+      ${tile('Правила', 'лимитки по методичке', `стоп ${p.buf}% за зоной · тейк ${d.tpv_live ? 'по дневному ходу монеты' : '+' + p.tp + '% от средней' + (d.tp_user ? ' (свой)' : '')} — вкладка «Правила»`)}
       ${tile('Результат правил', rs.n ? `<span class="${rs.avg_r > 0 ? 'win' : (rs.avg_r < 0 ? 'loss' : '')}" data-count="${rs.avg_r}" data-suf="R" data-sign="1">${fxSgR(rs.avg_r)}</span><span class="zn"> / сделку</span>` : '—', rs.n ? `${rs.n} сделок · WR ${rs.wr}%${rs.per_week != null ? ` · ~${rs.per_week} в неделю` : ''}` : '')}
     </div>${banner}`);
-  // --- 2. how the stop / take are set
+  // --- 2. how the bot trades now (v0.99.614 — tiles first, the numbers under «подробнее»)
   let ruleCard = '';
   if (rs.n || lr.tp_auto) {
-    ruleCard = card('📐 Стоп и тейк', `<div class="zkv">
-      <div>вход</div><div><b>лимитки на все линии</b> зон поста одного направления, на ${p.off ?? 0.2}% раньше линии, объём поровну</div>
-      <div>стоп</div><div><b>${p.buf}%</b> за самой дальней линией — один на всю позицию</div>
-      <div>тейк</div><div><b>+${p.tp}%</b> от средней цены входа ${d.tp_user ? '(свой, из настроек)' : (lr.tp_auto ? '— подобран по <b>лучшему росту счёта</b> на истории лесенок' : '(по умолчанию — мало сделок для подбора)')}</div>
-      <div>пост автора с результатом</div><div>не закрывает сделку <span class="dim">(выключено — сделка идёт до тейка, стопа, безубытка или срока)</span></div>
-      <div>безубыток</div><div>${p.be ? `после <b>+${p.be}%</b> от средней цены — стоп на среднюю +0.15% (комиссии), неналитые лимитки снимаются` : 'не ставится — по истории без него лучше'} <span class="dim">(подобран вместе с тейком)</span></div>
-      </div>
+    const tv = lr.tpv || {}, tl = d.tpv_live, tgr = tv.groups;
+    const tpOf = (k, a) => k === 'none' ? 90 : Math.min(90, Math.max(0.5, Math.round(k * a * 10) / 10));
+    const gTp = gn => { const k = tl && tl.groups && gn in tl.groups ? tl.groups[gn] : (tl ? tl.k : null);
+      return k == null ? `+${p.tp}%` : (k === 'none' ? 'нет' : (tgr && tgr[gn] && tgr[gn].atr_med ? `~+${tpOf(k, tgr[gn].atr_med)}%` : k + '×ход')); };
+    const takeV = tl && tgr ? `${gTp('calm')}<span class="zn" style="display:inline;"> спок.</span> · ${gTp('wild')}<span class="zn" style="display:inline;"> резк.</span>`
+      : (tl ? (tl.k === 'none' ? 'без тейка' : `${tl.k} × ход`) : `+${p.tp}%`);
+    const c = d.conc, slot = c ? Math.round((d.margin_use || 0.9) * 100 / c.n * 10) / 10 : null;
+    ruleCard = card('📐 Как торгует бот', `<div class="ztiles">
+      ${tile('Вход', 'лимитки', `на все линии зон поста, на ${p.off ?? 0.2}% раньше линии, объём поровну`)}
+      ${tile('Стоп', `${p.buf}%`, d.stopx_live ? `за дальней линией · с подтверждением: ${d.stopx_txt}` : 'за самой дальней линией, один на позицию')}
+      ${tile('Тейк', takeV, tl ? 'по дневному ходу монеты, от средней цены входа' : `от средней цены входа${d.tp_user ? ' (свой)' : (lr.tp_auto ? ' · подобран по истории' : '')}`)}
+      ${tile('Безубыток', p.be ? `+${p.be}%` : 'нет', p.be ? 'стоп на среднюю +0.15%, неналитые лимитки снимаются' : 'по истории без него лучше')}
+      ${tile('Риск', riskNow == null ? '—' : riskNow + '%', riskSrc)}
+      ${tile('Залог лесенки', slot ? `до ~${slot}%` : '—', c ? `баланса · рассчитан на ${c.n} лесенок разом` : '')}
+    </div>
+    ${rs.n ? `<div class="zstrip"><span>сделок <b>${rs.n}</b></span><span>WR <b>${rs.wr}%</b></span><span>средний <b>${sgR(rs.avg_r)}</b></span><span>серия стопов <b>${rs.max_ls}</b></span>${rs.per_week != null ? `<span>в неделю <b>~${rs.per_week}</b></span>` : ''}</div>` : ''}
+    <details><summary>подробнее: итоги, тейк и безубыток по вариантам, залог</summary>
       ${rs.n ? `<div class="zkv" style="margin-top:8px;">
       <div>сделок по истории</div><div><b>${rs.n}</b> (постов ${rs.groups ?? '—'}): тейков ${rs.wins}, стопов ${rs.stops}${rs.bes ? `, в безубыток ${rs.bes}` : ''}${rs.axs ? `, по посту автора ${rs.axs}` : ''}${rs.n - rs.wins - rs.stops - (rs.bes || 0) - (rs.axs || 0) ? `, по времени ${rs.n - rs.wins - rs.stops - (rs.bes || 0) - (rs.axs || 0)}` : ''}</div>
       ${rs.per_week != null ? `<div>сделок в неделю</div><div><b>~${rs.per_week}</b> в среднем с ${new Date(rs.since * 1000).toLocaleDateString('ru-RU')} · последние 8 недель: ${rs.per_week_recent}</div>` : ''}
@@ -34514,16 +34646,14 @@ async function refreshZones() {
       ${rs.fill_share != null ? `<div>налилось лимиток</div><div>${rs.fill_share}% от выставленных</div>` : ''}
       ${rs.after_med != null ? `<div>после тейка</div><div>цена шла ещё +${rs.after_med}% (медиана), +5% и больше — в ${rs.after_5}%</div>` : ''}
       </div>` : ''}
-      ${(lr.be_rows || []).length > 1 ? `<details><summary>все варианты безубытка</summary><div class="zsub">при тейке +${p.tp}%; каждый вариант прогнан лесенками по всей истории</div>
-        <div class="zwrap"><table class="ztbl"><thead><tr><th>Безубыток</th><th>сделок</th><th>WR</th><th>в бу</th><th>средний</th><th>счёт за сделку</th></tr></thead><tbody>
-        ${lr.be_rows.map(r => `<tr class="${r.be === p.be ? 'zbest' : ''}"><td>${r.be ? 'после +' + r.be + '%' : 'нет'}${r.be === p.be ? ' ✓' : ''}</td><td>${r.n}</td><td>${r.wr == null ? '—' : r.wr + '%'}</td><td>${r.be_n || 0}</td><td>${sgR(r.avg_r)}</td><td>${sgP(r.g)}</td></tr>`).join('')}
-        </tbody></table></div></details>` : ''}
-      ${(lr.tp_rows || []).length > 1 ? `<details><summary>все варианты тейка</summary><div class="zsub">каждый тейк прогнан лесенками по всей истории; «счёт за сделку» — ${lr.tp_by === 'auto' ? 'при лучшем для этого тейка риске' : 'при риске ' + lr.tp_by + '%'}</div>
-        <div class="zwrap"><table class="ztbl"><thead><tr><th>Тейк</th><th>сделок</th><th>WR</th><th>средний</th><th>счёт за сделку</th></tr></thead><tbody>
-        ${lr.tp_rows.map(r => `<tr class="${r.tp === p.tp ? 'zbest' : ''}"><td>+${r.tp}%${r.tp === p.tp ? ' ✓' : ''}</td><td>${r.n}</td><td>${r.wr == null ? '—' : r.wr + '%'}</td><td>${sgR(r.avg_r)}</td><td>${sgP(r.g)}${r.g_at === 'best' ? `<div class="dim">при ${r.best_risk}%</div>` : (r.g_at != null ? `<div class="dim">при ${r.g_at}%${lr.tp_by === 'auto' ? ' — роста нет ни при каком' : ''}</div>` : '')}</td></tr>`).join('')}
-        </tbody></table></div></details>` : ''}
+      ${(lr.tp_rows || []).length > 1 ? `<div class="zsub"><b>Фиксированный тейк</b> — рост счёта за сделку ${lr.tp_by === 'auto' ? 'при лучшем для каждого риске' : 'при риске ' + lr.tp_by + '%'}:</div>
+        ${zBars(lr.tp_rows.map(r => ({label: '+' + r.tp + '%', sub: `${r.n} сд. · WR ${r.wr == null ? '—' : r.wr + '%'} · ${sgR(r.avg_r)}`, v: r.g, hi: r.tp === p.tp, mark: r.tp === p.tp ? 'сейчас' : null})), sgP)}` : ''}
+      ${(lr.be_rows || []).length > 1 ? `<div class="zsub"><b>Безубыток</b> при тейке +${p.tp}% — рост счёта за сделку:</div>
+        ${zBars(lr.be_rows.map(r => ({label: r.be ? 'после +' + r.be + '%' : 'нет', sub: `${r.n} сд. · WR ${r.wr == null ? '—' : r.wr + '%'} · в бу ${r.be_n || 0}`, v: r.g, hi: r.be === p.be, mark: r.be === p.be ? 'сейчас' : null})), sgP)}` : ''}
+      ${zonesConcCard(d, (t, body) => `<div class="zsub"><b>${t}</b></div>${body}`)}
       <div class="zsub">Как в инструкции автора канала: зоны одного поста — одна позиция; R считается от убытка всей лесенки на стопе, поэтому стоп при частично налитой лесенке — меньше 1R. Посты «только при доп. аргументах» / «по факту» — без автосделки.</div>
-      <button onclick="zonesRelearn()" class="zbtn">↻ пересчитать</button>`);
+    </details>
+    <button onclick="zonesRelearn()" class="zbtn">↻ пересчитать</button>`);
   }
   // --- 2c. why the result is what it is (v0.99.496)
   let diagCard = '';
@@ -34553,20 +34683,20 @@ async function refreshZones() {
       ${worst ? `<div class="zsub">10 худших постов (нажмите — график):</div><div class="zwrap"><table class="ztbl"><thead><tr><th>Пост</th><th>итог</th><th>налилось</th><th>цена до зоны</th></tr></thead><tbody>${worst}</tbody></table></div>` : ''}
       <div class="zsub">«Цена до зоны» — насколько цена в момент поста была выше лонговой (ниже шортовой) первой лимитки; минус — уже внутри или за зоной.</div></details>`;
   }
-  // --- 3. risk table
+  // --- 3. risk (v0.99.614 — bars)
   let riskCard = '';
   if (rt) {
     const nowPc = rt.now != null ? rt.now : riskNow;   // v0.99.530 — exact rows for the risk in use and the best one
     const cur = rt.rows.reduce((a, r) => Math.abs(r.risk - nowPc) < Math.abs(a.risk - nowPc) ? r : a, rt.rows[0]);
     const top = rt.best != null ? (rt.rows.find(r => Math.abs(r.risk - rt.best) < 1e-6) || rt.rows.reduce((a, x) => x.all > a.all ? x : a)) : rt.rows.reduce((a, x) => x.all > a.all ? x : a);
-    const rows = rt.rows.map(r => `<tr class="${rt.best && r === top ? 'zbest' : ''} ${r === cur ? 'zcur' : ''}"><td>${r.risk}%${r === cur ? ' <span class="dim">← сейчас</span>' : ''}${rt.best && r === top ? ' <span class="dim">· лучший</span>' : ''}</td><td>${sgP(r.all)}</td></tr>`).join('');
-    riskCard = card('💰 Какой риск лучше', `<div class="zsub" style="margin-top:0;">Рост счёта <b>за одну сделку</b> при разном риске, по всем ${rs.n} сделкам истории</div>
-      <div class="zwrap"><table class="ztbl"><thead><tr><th>Риск</th><th>счёт за сделку</th></tr></thead><tbody>${rows}</tbody></table></div>
+    riskCard = card('💰 Какой риск лучше', `<div class="zbanner ${rt.best ? 'pos' : 'warn'}" style="margin-top:0;">${rt.best ? `🎯 Лучший риск — <b>~${rt.best}%</b> на сделку; выше этого риск только вредит.` : '<b>Ни один процент не растит счёт</b> — у правил нет перевеса.'} Сейчас — <b>${nowPc ?? '—'}%</b>.</div>
+      <div class="zsub">Рост счёта за одну сделку при разном риске, по всем ${rs.n} сделкам истории:</div>
+      ${zBars(rt.rows.map(r => ({label: r.risk + '%', v: r.all, hi: rt.best && r === top, mark: r === cur ? 'сейчас' : (rt.best && r === top ? 'лучший' : null), markCls: r === cur ? 'pos' : ''})), sgP)}
+      <details><summary>подробнее: в месяц и оговорки</summary>
       ${rs.month_pct != null ? `<div class="zsub">При ~${rs.per_week} сделках в неделю по истории: при риске ${rs.month_risk}% — <b>${rs.month_pct > 0 ? '+' : ''}${rs.month_pct}% в месяц</b>${rs.month_pct_2 != null ? `, при риске 2% — <b>${rs.month_pct_2 > 0 ? '+' : ''}${rs.month_pct_2}%</b>` : ''}.
         ${rs.avg_lo != null ? `Средний результат по истории ${sgR(rs.avg_r)}, но с учётом разброса реальный может быть от ${sgR(rs.avg_lo)} до ${sgR(rs.avg_hi)} на сделку.` : ''}
         ${rs.month_pct > 100 ? '<br>⚠️ Такие цифры нереальны: расчёт считает сделки по очереди, а на деле их открыто по 5–15 одновременно, и общий обвал рынка выбивает их разом. Большой риск оправдан, только если перевес точно такой, как в истории — если он вдвое меньше, счёт при этом риске не растёт. Ставьте 1–2%, пока живые сделки не подтвердят историю.' : 'Живая торговля обычно хуже истории — закладывайте около половины.'}</div>` : ''}
-      <div class="zsub">${rt.best ? `🎯 лучший — <b>~${rt.best}%</b> (выше этого риск только вредит).` : '<b>Ни один процент не растит счёт</b> — у правил нет перевеса.'}
-      ${autoOn ? 'Авто-риск включён: берётся лучший процент (не больше 50%).' : 'Включите «Авто-риск» в настройках, чтобы процент выбирался сам.'}</div>`);
+      <div class="zsub">${autoOn ? 'Авто-риск включён: берётся лучший процент (не больше 50%).' : 'Включите «Авто-риск» в настройках, чтобы процент выбирался сам.'}</div></details>`);
   }
   // --- 4. move toward the zone
   let apCard = '';
@@ -34653,25 +34783,41 @@ async function refreshZones() {
     + (skipPosts.length ? `<details style="margin-bottom:6px;"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">⏭ пропущено, не по шаблону — ${skipPosts.length}</summary>${skipPosts.slice(0, 40).map(postRow).join('')}</details>` : '');
   clearTimeout(window._zLearnT);   // while the history is being recounted: refresh every 3 s
   if (((d.act || {}).learn || {}).running || ((d.act || {}).recheck || {}).running || ((d.act || {}).oc || {}).running) window._zLearnT = setTimeout(refreshZones, 3000);
+  // v0.99.614 — user: "переоформить, чтобы не набор текста и таблиц": four sub-tabs instead of one long page
+  let sub = window._zSub;
+  if (!sub) { try { sub = localStorage.getItem('zSub'); } catch (e) {} }
+  if (!['now', 'rules', 'anal', 'src'].includes(sub)) sub = 'now';
+  window._zSub = sub;
+  const segs = [['now', 'Сейчас', act.length || ''], ['rules', 'Правила', ''], ['anal', 'Анализ', ''], ['src', 'Источники', badPosts.length ? '⚠️' + badPosts.length : '']];
+  const pane = (k, html) => `<div class="zpane${k === sub ? ' on' : ''}" data-zp="${k}">${html}</div>`;
   setPanelHtml(panel, `<div class="fx-zpanel ${fxNew('zones:panel')}">${warn}
-    ${zStatusHtml(d)}
-    ${summary}
-    <div class="zsec">Зоны автора — активные (${act.length})</div>
-    <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 8px;">${d.autotrade ? 'по этим постам бот ставит лимитки на бирже, когда цена подходит' : 'автоторговля выкл — только отслеживаю'}</div>
-    ${act.length ? zonePostBlocks(act) : '<div class="dim" style="margin-bottom:10px;">нет — новые посты из группы появятся здесь</div>'}
-    ${zoneTradesHtml(closedTr)}
-    <div class="zsec">Правила и риск</div>
-    ${ruleCard}${zonesTpvCard(lr.tpv, card, d)}${zonesStopxCard(lr.stopx, card, d)}${zonesConcCard(d, card)}${diagCard}${riskCard}${apCard}${hypCard}${behCard}
-    <div class="zsec">Источники</div>
-    ${zutHtml(ut)}
-    <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 10px;">или ${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
-    <div class="zsec">🔎 Наши зоны — ${d.autotrade_own ? 'наш поиск торгует, поиск по результату — наблюдение' : 'только наблюдение, на биржу не идут'}</div>
-    ${ownHtml(d, ownZ)}
-    ${ocHtml(d, ocZ)}
-    ${bad ? `<div style="margin-bottom:8px;">${bad}</div>` : ''}
-    ${trn.length ? `<details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">📚 обучение (${trn.length}, ждут итога: ${trn.filter(z => z.status === 'train').length})</summary>${zonePostBlocks(trn)}</details>` : ''}
-    <details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">архив (${arch.length})</summary>${zonePostBlocks(arch)}</details></div>`);
+    <div class="zseg">${segs.map(([k, t, c]) => `<button class="${k === sub ? 'on' : ''}" data-zs="${k}" onclick="zonesSub('${k}')">${t}${c !== '' ? `<span class="zc">${c}</span>` : ''}</button>`).join('')}</div>
+    ${pane('now', `${zStatusHtml(d)}
+      ${summary}
+      <div class="zsec">Активные зоны автора (${act.length})</div>
+      <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 8px;">${d.autotrade ? 'по этим постам бот ставит лимитки на бирже, когда цена подходит' : 'автоторговля выкл — только отслеживаю'}</div>
+      ${act.length ? zonePostBlocks(act) : '<div class="dim" style="margin-bottom:10px;">нет — новые посты из группы появятся здесь</div>'}
+      ${zoneTradesHtml(closedTr)}`)}
+    ${pane('rules', `<div class="dim" style="font-size:var(--fs-sm);margin:0 0 8px;">Что бот ставит на бирже и почему — всё подобрано на истории постов: выбор на старых, проверка на новых.</div>
+      ${ruleCard}${zonesTpvCard(lr.tpv, card, d)}${zonesStopxCard(lr.stopx, card, d)}${riskCard}`)}
+    ${pane('anal', `<div class="dim" style="font-size:var(--fs-sm);margin:0 0 8px;">Справка: откуда такие итоги и что ещё проверялось. На торговлю напрямую не влияет.</div>
+      ${(diagCard + apCard + hypCard + behCard) || '<div class="dim">пока пусто — появится после обучения на истории постов</div>'}`)}
+    ${pane('src', `${zutHtml(ut)}
+      <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 10px;">или ${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
+      ${bad ? `<div style="margin-bottom:8px;">${bad}</div>` : ''}
+      <div class="zsec">🔎 Наши зоны — ${d.autotrade_own ? 'наш поиск торгует, поиск по результату — наблюдение' : 'только наблюдение, на биржу не идут'}</div>
+      ${ownHtml(d, ownZ)}
+      ${ocHtml(d, ocZ)}
+      ${trn.length ? `<details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">📚 обучение (${trn.length}, ждут итога: ${trn.filter(z => z.status === 'train').length})</summary>${zonePostBlocks(trn)}</details>` : ''}
+      <details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">архив (${arch.length})</summary>${zonePostBlocks(arch)}</details>`)}
+    </div>`);
   fxCountUp(panel);
+}
+function zonesSub(k) {   // v0.99.614 — switch the sub-tab without a reload
+  window._zSub = k;
+  try { localStorage.setItem('zSub', k); } catch (e) {}
+  document.querySelectorAll('#zonesPanel .zseg button').forEach(b => b.classList.toggle('on', b.dataset.zs === k));
+  document.querySelectorAll('#zonesPanel .zpane').forEach(x => x.classList.toggle('on', x.dataset.zp === k));
 }
 async function zonesPost(url, body) {
   try {

@@ -19774,3 +19774,13 @@ v0.99.613 - Zones: the channel history load works from another phone too. The st
          history start/stop endpoints now answer the home Wi-Fi and Tailscale (the internet is
          still refused); there the card shows the history button and progress, while the login,
          the group choice and the logout stay on the bot's own phone (127.0.0.1) only.
+v0.99.614 - Zones: the volatility take is also researched per coin group: calm coins (daily move
+         under 4%: BTC, ETH and the like) and the rest. A group gets its own take multiple only
+         from its own newer ladders (at least 12, beating the fixed take per day and without its
+         3 best trades); with too few it uses the common rule, and when its own ladders show the
+         fixed take is better for it, it keeps the fixed take. The user had asked whether a 20%
+         take even makes sense on BTC. The Zones tab is redesigned per the user's request: four
+         sub-tabs (Сейчас / Правила / Анализ / Источники, remembered per device), a tile overview
+         of how the bot trades now, and horizontal bars instead of number tables for the take,
+         the confirmed stop, the risk, the fixed take and the breakeven variants; the tables and
+         explanations moved under «подробнее».
