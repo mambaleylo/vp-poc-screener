@@ -19821,3 +19821,22 @@ v0.99.618 - EMA tab: «EMA — касания» replaces the W/M touch alerts. T
          keeps the virtual record on the 1h candles exactly as the research (checked: 47/48 levels and
          75/75 trades equal). The tab redesigned: the yearly check, the armed levels as chips, the trades as
          tiles; no long lists. The research scripts are in tools/ema_model.
+v0.99.619 - Neuro rebuilt (the user: "добавить ещё как можно больше параметров", more trades) and the coin
+         auto-selection (the user: "механизм авто выбора что торговать а что нет", "только с нормальной
+         доходностью монеты"). Neuro v3: one model for all coins instead of the per-coin condition mining —
+         89 features of the closed 1h bar (EMAs, MACD, Supertrend, Ichimoku, ADX, RSI, Stochastic, CCI,
+         returns, volatility, candles, volume, OBV, range position, 4h / daily / weekly charts, hour and
+         weekday, BTC and ETH, funding), LightGBM per side, research on 6 years of Binance 1h history of 127
+         coins. 24 stop / take / hold rules in walk-forward; chosen: entry at the hour's open, stop 1 ATR(1h),
+         take 2R, out after 12 h, top 0.3% per side, at most 12 per side — 2022 +0.55R, 2023 +0.49R, 2024
+         +0.28R, 2025–26 (unseen) +0.10R, 4.5/wk. Every hour the bot scores the 120 liquid coins with the same
+         feature code (checked: 60/60 rows equal on live-sized history), signals in Telegram, trades with the
+         Neuro switch (risk: the Neuro field, 0.5% when empty) and keeps the virtual record on the 1h candles
+         exactly as the research. The old mining / live loops no longer run; the tab is new: the yearly
+         check, the last hour (the coins nearest the bar), the trades as tiles. Coin selection by past
+         results was tested for Neuro and does not help (too few trades per coin), so it trades every coin.
+         For «EMA — касания» it helps: a coin trades for real (and sends Telegram) only when the model's
+         trades on it averaged ≥ +0.1R over ≥ 10 trades (research out-of-sample years + the bot's own);
+         walk-forward 2025–26 +0.29R with drawdown 12R vs +0.15R / 52R for all coins; 79 of 127 coins pass,
+         the rest stay virtual and join when their record is good. The EMA watchdog no longer reports a hang
+         while the hourly levels are counted (it beats per coin; limit 60 min). Scripts: tools/neuro_model.

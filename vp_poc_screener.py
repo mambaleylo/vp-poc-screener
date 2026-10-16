@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.618"
+APP_VERSION = "0.99.619"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7520,9 +7520,9 @@ LOOP_MAX_GAP_SEC = {
     "scan_loop": 30 * 60,
     "snr_live_loop": 60 * 60,
     "prv_live_loop": 60 * 60,
-    "emx_loop": 15 * 60,   # v0.99.618 — «EMA — касания» (the W/M loops no longer run)
+    "emx_loop": 60 * 60,   # v0.99.618 — «EMA — касания» (the W/M loops no longer run); v0.99.619 — 15 -> 60 min, the hourly levels of 120 coins take longer on the phone (it beats per coin too)
     "battery_watch_loop": 30 * 60,   # v0.99.582
-    "neuro_live_loop": 60 * 60,
+    "nx_loop": 60 * 60,   # v0.99.619 — Neuro v3 (the old live / mining loops no longer run)
     "reconcile_loop": 30 * 60,
     # backtest loops (v0.99.325): they now beat every minute while queued
     # for a slot or idle between cycles, so the gap only has to cover real
@@ -7531,16 +7531,14 @@ LOOP_MAX_GAP_SEC = {
     # ceilings 300s / 720s), so an hour of silence there is a real stall.
     "snr_backtest_loop": 60 * 60,
     "prv_backtest_loop": 60 * 60,
-    "neuro_mining_loop": 60 * 60,
 }
 LOOP_LABELS = {
     "scan_loop": "Volume скан", "msnr_live_loop": "MSNR живой скан",
     "lsw_live_loop": "Sweep живой скан", "snr_live_loop": "S/R живой скан",
-    "prv_live_loop": "Peak Reversal живой скан", "neuro_live_loop": "Neuro живой скан",
+    "prv_live_loop": "Peak Reversal живой скан", "nx_loop": "Нейро",
     "reconcile_loop": "сверка позиций (автоторговля)",
     "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
     "snr_backtest_loop": "S/R бэктест", "prv_backtest_loop": "Peak Reversal бэктест",
-    "neuro_mining_loop": "Neuro майнинг",
     "emx_loop": "EMA — касания",   # v0.99.618
     "battery_watch_loop": "батарея телефона",   # v0.99.582
 }
@@ -29933,7 +29931,7 @@ def zm_stats():
 # the price is watched every 30 s; the virtual record follows the 1h candles exactly as the research did.
 EMX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_ema_model.json")
 EMX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_ema_model.json"
-EMX_MODEL_VER = 1
+EMX_MODEL_VER = 2   # v0.99.619 — 2: + the per-coin tallies of the coin auto-selection
 EMX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_emx_state.json")
 EMX_TFS = ("4h", "1d", "1w", "1M")
 EMX_EMAS = {"4h": (20, 50, 100, 200), "1d": (7, 14, 21, 28, 50, 100, 200), "1w": (7, 14, 21, 28, 50, 100, 200),
@@ -30248,9 +30246,15 @@ def emx_arm():
     bt = {"cs": bh1, "t": [c["time"] for c in bh1], "S": emx_series(bh1, bh4, bd1)}
     armed, coins = [], 0
     for sym in _own_top_syms(EMX_TOP):
+        heartbeat("emx_loop")   # v0.99.619 — alive while the hourly levels are counted
         try:
             h1, h4, d1 = _emx_coin(sym, now)
-            armed += emx_levels(sym, h1, h4, d1, t_hour, m, bt)
+            lv_ = emx_levels(sym, h1, h4, d1, t_hour, m, bt)
+            if lv_:
+                ok_ = emx_coin_ok(sym)
+                for a in lv_:
+                    a["sel"] = ok_
+            armed += lv_
             coins += 1
         except Exception as e:
             log_error(f"ema levels {sym}: {e}")
@@ -30259,6 +30263,29 @@ def emx_arm():
         _EMX["armed"], _EMX["armed_at"] = armed, t_hour
         _EMX["scan"] = {"t": int(now), "coins": coins, "armed": len(armed)}
     emx_save()
+
+
+def emx_coin_tally(sym):
+    """(trades, sum R) of the coin: the research's out-of-sample trades + the bot's own closed ones"""
+    m = _EMX.get("model") or {}
+    b = sym.replace("_USDT", "")
+    b = b[4:] if b.startswith("1000") else b
+    n, sm = (m.get("coins") or {}).get(b) or (0, 0.0)
+    with _emx_lock:
+        own = [t["r"] for t in _EMX["trades"] if t["symbol"] == sym and t["status"] == "CLOSED" and t.get("r") is not None]
+    return n + len(own), sm + sum(own)
+
+
+def emx_coin_ok(sym):
+    """v0.99.619 — the coin auto-selection: real trades and Telegram only for coins whose trades were good
+    (≥ 10 trades, ≥ +0.1R on average, the research's out-of-sample years + live); the rest stay virtual.
+    Walk-forward: 2024 +0.35R vs +0.34R all coins, 2025–26 +0.29R (dd 12R) vs +0.15R (dd 52R)."""
+    m = _EMX.get("model") or {}
+    if not m.get("coins"):
+        return True
+    rule = m.get("coin_rule") or {}
+    n, sm = emx_coin_tally(sym)
+    return n >= int(rule.get("min_n", 10)) and sm / n >= float(rule.get("min_avg", 0.1))
 
 
 def _emx_can_open(sym, side):
@@ -30279,8 +30306,8 @@ def emx_fire(a, t_touch, live_px=None):
     tr = {"id": f"emx_{a['symbol']}_{a['tf']}_{a['n']}_{a['hour']}", "symbol": a["symbol"], "tf": a["tf"], "n": a["n"], "side": a["side"],
           "direction": direction, "entry": a["lv"], "sl": a["sl"], "tp": a["tp"], "score": a["score"], "t_in": int(t_touch),
           "hour": a["hour"], "until": int(a["hour"] + m.get("rule", {}).get("hold_h", 24) * 3600), "status": "OPEN", "result": None,
-          "r": None, "exit": None, "t_out": None, "real": False, "live_px": live_px}
-    if AUTOTRADE_ENABLED_EMW and live_px:
+          "r": None, "exit": None, "t_out": None, "real": False, "live_px": live_px, "sel": emx_coin_ok(a["symbol"])}
+    if AUTOTRADE_ENABLED_EMW and live_px and tr["sel"]:
         try:
             risk = MODULE_RISK_PCT.get("emw") or EMX_RISK_DEFAULT
             res = execute_autotrade("emw", a["symbol"], direction, live_px, a["sl"], a["tp"], extra={"ema": f"{a['tf']} {a['n']}"},
@@ -30294,7 +30321,7 @@ def emx_fire(a, t_touch, live_px=None):
             return
         _EMX["trades"].append(tr)
     emx_save()
-    if TELEGRAM_ALERTS_EMW:
+    if TELEGRAM_ALERTS_EMW and tr["sel"]:
         pct = lambda p: (p - a["lv"]) / a["lv"] * 100
         send_telegram(f"{'🟢' if a['side'] > 0 else '🔴'} {a['symbol'].replace('_USDT', '')} {direction} · EMA {a['n']} ({EMX_TF_NAME[a['tf']]}) — касание\n"
                       f"вход {a['lv']:.6g} · стоп {a['sl']:.6g} ({pct(a['sl']):+.1f}%) · тейк {a['tp']:.6g} ({pct(a['tp']):+.1f}%) · держать до 24 ч\n"
@@ -30367,8 +30394,9 @@ def emx_settle(now=None):
             with _emx_lock:
                 t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + 3600), "r": round(r, 3)})
             changed = True
-            notify_trade_result("emw", t["symbol"], t["direction"], fill, ex, kind, round(r, 3), real=bool(t.get("real")),
-                                note=f"EMA {t['n']} ({EMX_TF_NAME[t['tf']]})")
+            if t.get("sel", True):
+                notify_trade_result("emw", t["symbol"], t["direction"], fill, ex, kind, round(r, 3), real=bool(t.get("real")),
+                                    note=f"EMA {t['n']} ({EMX_TF_NAME[t['tf']]})")
         except Exception as e:
             log_error(f"ema trade {t.get('symbol')}: {e}")
     if changed:
@@ -30404,18 +30432,24 @@ def emx_stats():
         trades = list(_EMX["trades"])
         armed = list(_EMX["armed"])
         scan, err = _EMX.get("scan"), _EMX.get("err")
-    fin = [t for t in trades if t["status"] == "CLOSED" and t.get("r") is not None]
+    fin_all = [t for t in trades if t["status"] == "CLOSED" and t.get("r") is not None]
+    fin = [t for t in fin_all if t.get("sel", True)]   # v0.99.619 — the selected coins' trades; the rest apart
     rs = [t["r"] for t in fin]
+    rs_all = [t["r"] for t in fin_all]
     t0 = min((t["t_in"] for t in trades), default=None)
     weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
+    cr = m.get("coin_rule") or {}
+    sel_n = sum(1 for b, (n, sm) in (m.get("coins") or {}).items() if n >= cr.get("min_n", 10) and sm / n >= cr.get("min_avg", 0.1))
     return {"on": EMW_ENABLED, "auto": AUTOTRADE_ENABLED_EMW, "tg": TELEGRAM_ALERTS_EMW,
+            "sel": {"coins": sel_n, "of": len(m.get("coins") or {}), "rule": cr, "research": m.get("coin_research"),
+                    "n_all": len(rs_all), "avg_all": round(sum(rs_all) / len(rs_all), 3) if rs_all else None},
             "risk": MODULE_RISK_PCT.get("emw") or EMX_RISK_DEFAULT,
             "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap")} if m else None,
             "err": err, "scan": scan, "armed": armed[:40], "armed_n": len(armed),
             "open": [t for t in trades if t["status"] == "OPEN"][-30:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
-            "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "n", "t_in", "r", "result", "real")} for t in sorted(fin, key=lambda t: -t["t_in"])[:30]]}
+            "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "n", "t_in", "r", "result", "real", "sel")} for t in sorted(fin_all, key=lambda t: -t["t_in"])[:30]]}
 
 
 @app.route("/api/emx/status")
@@ -30424,6 +30458,690 @@ def api_emx_status():
         return jsonify(emx_stats())
     except Exception as e:
         log_error(f"emx status: {e}")
+        return jsonify({"err": f"статистика не посчиталась: {e}"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v0.99.619 — Neuro v3: one model for all coins instead of the per-coin condition mining. Research on
+# Binance 1h history of 127 coins 2020–2026 (tools/neuro_model): 89 features of the closed 1h bar (EMAs,
+# MACD, Supertrend, Ichimoku, ADX, RSI, Stochastic, CCI, returns, volatility, candles, volume, OBV, range
+# position, 4h / daily / weekly charts, hour and weekday, BTC and ETH, funding), LightGBM per side, trained
+# on the years before and judged on a year it never saw. Rule chosen across the walk-forward: entry at the
+# next hour's open, stop 1 ATR(1h), take 2R, out after 12 h, the best ~0.3% of bars per side, at most 12 at
+# once per side. The phone: at each hour's start the liquid coins' just-closed bar is scored by the same
+# feature code (tools/neuro_model/nx_feat.py), a signal is an entry at market; the virtual record follows
+# the 1h candles exactly as the research labels (stop first, then the take, the 12th close).
+NX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_neuro_model.json")
+NX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_neuro_model.json"
+NX_MODEL_VER = 1
+NX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_nx_state.json")
+NX_TOP = int(os.environ.get("VP_NX_TOP", "120"))
+NX_RISK_DEFAULT = 0.5      # % when Neuro's own risk field is empty — many trades at once
+NX_FEE, NX_FUND = 0.001, 0.0003
+_NX = {"model": None, "err": None, "trades": [], "loaded": False, "scan": None, "last": []}
+_nx_lock = threading.Lock()
+_nx_fund_cache = {}
+
+
+def _nx_ema(v, n):
+    out, k, e = [None] * len(v), 2 / (n + 1), None
+    for i, x in enumerate(v):
+        e = x if e is None else e + k * (x - e)
+        out[i] = e if i >= n - 1 else None
+    return out
+
+
+def _nx_sma(v, n):
+    out, s = [None] * len(v), 0.0
+    for i, x in enumerate(v):
+        s += x
+        if i >= n:
+            s -= v[i - n]
+        if i >= n - 1:
+            out[i] = s / n
+    return out
+
+
+def _nx_rsi(c, n=14):
+    out = [None] * len(c)
+    g = l = 0.0
+    for i in range(1, len(c)):
+        d = c[i] - c[i - 1]
+        up, dn = max(d, 0.0), max(-d, 0.0)
+        if i <= n:
+            g += up / n
+            l += dn / n
+            if i == n:
+                out[i] = 100.0 if l == 0 else 100 - 100 / (1 + g / l)
+        else:
+            g = (g * (n - 1) + up) / n
+            l = (l * (n - 1) + dn) / n
+            out[i] = 100.0 if l == 0 else 100 - 100 / (1 + g / l)
+    return out
+
+
+def _nx_tr(h, l, c):
+    return [h[0] - l[0]] + [max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1])) for i in range(1, len(c))]
+
+
+def _nx_wilder(v, n):
+    out, s = [None] * len(v), None
+    for i, x in enumerate(v):
+        if i < n - 1:
+            continue
+        if s is None:
+            s = sum(v[i - n + 1:i + 1]) / n
+        else:
+            s = (s * (n - 1) + x) / n
+        out[i] = s
+    return out
+
+
+def _nx_hh(v, n):
+    """rolling max over the last n (incl. i)"""
+    out, dq = [None] * len(v), deque()
+    for i, x in enumerate(v):
+        while dq and v[dq[-1]] <= x:
+            dq.pop()
+        dq.append(i)
+        if dq[0] <= i - n:
+            dq.popleft()
+        out[i] = v[dq[0]]
+    return out
+
+
+def _nx_ll(v, n):
+    return [-x for x in _nx_hh([-y for y in v], n)]
+
+
+def _nx_std(v, n):
+    out, s, s2 = [None] * len(v), 0.0, 0.0
+    for i, x in enumerate(v):
+        s += x
+        s2 += x * x
+        if i >= n:
+            s -= v[i - n]
+            s2 -= v[i - n] ** 2
+        if i >= n - 1:
+            out[i] = math.sqrt(max(0.0, s2 / n - (s / n) ** 2))
+    return out
+
+
+def _nx_tf_ind(bars):
+    """a higher chart's indicators per closed bar"""
+    C = [b["close"] for b in bars]
+    H = [b["high"] for b in bars]
+    L = [b["low"] for b in bars]
+    atr = _nx_wilder(_nx_tr(H, L, C), 14) if bars else []
+    e12, e26 = _nx_ema(C, 12), _nx_ema(C, 26)
+    macd = [a - b if a is not None and b is not None else None for a, b in zip(e12, e26)]
+    sig = _nx_ema([m if m is not None else 0.0 for m in macd], 9)
+    ll14, hh14 = _nx_ll(L, 14), _nx_hh(H, 14)
+    return {"t_end": None, "C": C, "atr": atr, "rsi": _nx_rsi(C, 14), "e20": _nx_ema(C, 20), "e50": _nx_ema(C, 50), "e200": _nx_ema(C, 200),
+            "macd": macd, "sig": sig, "ll14": ll14, "hh14": hh14, "hh30": _nx_hh(H, 30), "ll30": _nx_ll(L, 30),
+            "hh365": _nx_hh(H, 365), "ll365": _nx_ll(L, 365)}
+
+
+def _nx_cl(x, a=-50.0, b=50.0):
+    return a if x < a else (b if x > b else x)
+
+
+def nx_series(h1, h4, d1, w1, btc, eth, funding, start=0):
+    """h1/h4/d1/w1: closed candles (dicts) oldest first; btc, eth: their closed 1h candles; funding: [(t, rate)].
+    Rows from index `start` (the earlier bars still warm the indicators up)."""
+    n = len(h1)
+    T = [b["time"] for b in h1]
+    O = [b["open"] for b in h1]
+    H = [b["high"] for b in h1]
+    L = [b["low"] for b in h1]
+    C = [b["close"] for b in h1]
+    V = [b.get("volume") or 0.0 for b in h1]
+    tr = _nx_tr(H, L, C)
+    atr = _nx_wilder(tr, 14)
+    atr100 = _nx_sma(tr, 100)
+    em = {k: _nx_ema(C, k) for k in (9, 20, 50, 100, 200)}
+    e12, e26 = _nx_ema(C, 12), _nx_ema(C, 26)
+    macd = [a - b if a is not None and b is not None else 0.0 for a, b in zip(e12, e26)]
+    msig = _nx_ema(macd, 9)
+    rsi14, rsi7 = _nx_rsi(C, 14), _nx_rsi(C, 7)
+    hh14, ll14 = _nx_hh(H, 14), _nx_ll(L, 14)
+    hh24, ll24 = _nx_hh(H, 24), _nx_ll(L, 24)
+    hh168, ll168 = _nx_hh(H, 168), _nx_ll(L, 168)
+    hh720, ll720 = _nx_hh(H, 720), _nx_ll(L, 720)
+    sma20, sd20 = _nx_sma(C, 20), _nx_std(C, 20)
+    tp = [(h + l + c) / 3 for h, l, c in zip(H, L, C)]
+    tp_sma, tp_sd = _nx_sma(tp, 20), None
+    md = [None] * n
+    for i in range(19, n):
+        m_ = tp_sma[i]
+        md[i] = sum(abs(x - m_) for x in tp[i - 19:i + 1]) / 20
+    pv = [p * v for p, v in zip(tp, V)]
+    s_pv, s_v = _nx_sma(pv, 20), _nx_sma(V, 20)
+    # ADX
+    pdm = [0.0] + [max(H[i] - H[i - 1], 0.0) if H[i] - H[i - 1] > L[i - 1] - L[i] else 0.0 for i in range(1, n)]
+    ndm = [0.0] + [max(L[i - 1] - L[i], 0.0) if L[i - 1] - L[i] > H[i] - H[i - 1] else 0.0 for i in range(1, n)]
+    trw, pw, nw = _nx_wilder(tr, 14), _nx_wilder(pdm, 14), _nx_wilder(ndm, 14)
+    pdi = [100 * p / t if p is not None and t else None for p, t in zip(pw, trw)]
+    ndi = [100 * p / t if p is not None and t else None for p, t in zip(nw, trw)]
+    dx = [100 * abs(a - b) / (a + b) if a is not None and b is not None and (a + b) > 0 else 0.0 for a, b in zip(pdi, ndi)]
+    adx = _nx_wilder(dx, 14)
+    # supertrend (10, 3)
+    st_dir, st_line = [0] * n, [None] * n
+    at10 = _nx_wilder(tr, 10)
+    fu = fl = None
+    d_ = 1
+    for i in range(n):
+        if at10[i] is None:
+            continue
+        mid = (H[i] + L[i]) / 2
+        bu, bl = mid + 3 * at10[i], mid - 3 * at10[i]
+        fu = bu if fu is None or bu < fu or C[i - 1] > fu else fu
+        fl = bl if fl is None or bl > fl or C[i - 1] < fl else fl
+        if d_ > 0 and C[i] < fl:
+            d_ = -1
+        elif d_ < 0 and C[i] > fu:
+            d_ = 1
+        st_dir[i], st_line[i] = d_, (fl if d_ > 0 else fu)
+    # ichimoku
+    tenkan = [(a + b) / 2 for a, b in zip(_nx_hh(H, 9), _nx_ll(L, 9))]
+    kijun = [(a + b) / 2 for a, b in zip(_nx_hh(H, 26), _nx_ll(L, 26))]
+    sb = [(a + b) / 2 for a, b in zip(_nx_hh(H, 52), _nx_ll(L, 52))]
+    # OBV
+    obv = [0.0] * n
+    for i in range(1, n):
+        obv[i] = obv[i - 1] + (V[i] if C[i] > C[i - 1] else (-V[i] if C[i] < C[i - 1] else 0.0))
+    lv = [math.log(v + 1e-9) for v in V]
+    lv_m, lv_s = _nx_sma(lv, 168), _nx_std(lv, 168)
+    lr = [0.0] + [math.log(C[i] / C[i - 1]) if C[i - 1] > 0 else 0.0 for i in range(1, n)]
+    rv24, rv168 = _nx_std(lr, 24), _nx_std(lr, 168)
+    # chop
+    s_tr14 = _nx_sma(tr, 14)
+    # higher charts
+    def tf_index(bars, sec):
+        ends = [b["time"] + sec for b in bars]
+        return [bisect.bisect_right(ends, T[i] + 3600) - 1 for i in range(n)]
+    i4, idd = tf_index(h4, 4 * 3600), tf_index(d1, 86400)
+    I4, ID = _nx_tf_ind(h4), _nx_tf_ind(d1)
+    wend = []
+    for b in w1:
+        y = b["time"]
+        wend.append(y + 7 * 86400)
+    iw = [bisect.bisect_right(wend, T[i] + 3600) - 1 for i in range(n)]
+    wC = [b["close"] for b in w1]
+    we21 = _nx_ema(wC, 21)
+    # BTC / ETH by time
+    bT = [b["time"] for b in btc]
+    bC = [b["close"] for b in btc]
+    b_rsi = _nx_rsi(bC, 14)
+    b_e50 = _nx_ema(bC, 50)
+    b_tr = _nx_tr([b["high"] for b in btc], [b["low"] for b in btc], bC)
+    b_atr = _nx_wilder(b_tr, 14)
+    eT = [b["time"] for b in eth]
+    eC = [b["close"] for b in eth]
+    fT = [t for t, _ in funding]
+    fR = [r for _, r in funding]
+    def ret(arr, j, k):
+        return (arr[j] / arr[j - k] - 1) * 100 if j - k >= 0 and arr[j - k] > 0 else 0.0
+    rows = []
+    for i in range(start, n):
+        a = atr[i]
+        c = C[i]
+        if a is None or a <= 0 or c <= 0 or em[200][i] is None:
+            rows.append(None)
+            continue
+        f = []
+        # trend / EMAs
+        for k in (9, 20, 50, 100, 200):
+            f.append(_nx_cl((c - em[k][i]) / a))
+        for k in (20, 50, 200):
+            f.append(_nx_cl((em[k][i] - em[k][i - 5]) / a) if em[k][i - 5] is not None else 0.0)
+        f.append(float((em[20][i] > em[50][i]) + (em[50][i] > em[100][i]) + (em[100][i] > em[200][i])))
+        f.append(_nx_cl(macd[i] / a))
+        f.append(_nx_cl((macd[i] - msig[i]) / a))
+        f.append(_nx_cl(((macd[i] - msig[i]) - (macd[i - 3] - msig[i - 3])) / a))
+        f.append(float(st_dir[i]))
+        f.append(_nx_cl((c - st_line[i]) / a) if st_line[i] is not None else 0.0)
+        top, bot = max(sb[i - 26] if i >= 26 else sb[i], (tenkan[i - 26] + kijun[i - 26]) / 2 if i >= 26 else kijun[i]), \
+            min(sb[i - 26] if i >= 26 else sb[i], (tenkan[i - 26] + kijun[i - 26]) / 2 if i >= 26 else kijun[i])
+        f.append(_nx_cl((c - top) / a) if c > top else (_nx_cl((c - bot) / a) if c < bot else 0.0))
+        f.append(_nx_cl((tenkan[i] - kijun[i]) / a))
+        vw = s_pv[i] / s_v[i] if s_v[i] else c
+        f.append(_nx_cl((c - vw) / a))
+        f.append(adx[i] or 0.0)
+        f.append((pdi[i] or 0.0) - (ndi[i] or 0.0))
+        # oscillators
+        f.append(rsi14[i] or 50.0)
+        f.append(rsi7[i] or 50.0)
+        f.append((rsi14[i] or 50.0) - (rsi14[i - 3] or 50.0))
+        rng = hh14[i] - ll14[i]
+        sk = (c - ll14[i]) / rng * 100 if rng > 0 else 50.0
+        f.append(sk)
+        f.append(-100 + sk)   # williams %R
+        f.append(_nx_cl((tp[i] - tp_sma[i]) / (0.015 * md[i]), -500, 500) if md[i] else 0.0)
+        for k in (1, 3, 6, 12, 24, 72, 168):
+            f.append(_nx_cl(ret(C, i, k), -80, 300))
+        # divergence: a new 14-bar extreme without the RSI's
+        div = 0.0
+        if i >= 15 and rsi14[i - 14] is not None:
+            if H[i] >= hh14[i] and rsi14[i] < max(r for r in rsi14[i - 14:i] if r is not None):
+                div = -1.0
+            elif L[i] <= ll14[i] and rsi14[i] > min(r for r in rsi14[i - 14:i] if r is not None):
+                div = 1.0
+        f.append(div)
+        # volatility
+        f.append(a / c * 100)
+        f.append(a / atr100[i] if atr100[i] else 1.0)
+        bw = 4 * sd20[i] / sma20[i] * 100 if sma20[i] else 0.0
+        f.append(bw)
+        f.append((c - (sma20[i] - 2 * sd20[i])) / (4 * sd20[i]) if sd20[i] else 0.5)
+        rr14 = hh14[i] - ll14[i]
+        f.append(100 * math.log10(sum(tr[i - 13:i + 1]) / rr14) / math.log10(14) if rr14 > 0 else 50.0)
+        f.append((hh24[i] - ll24[i]) / a)
+        f.append((hh168[i] - ll168[i]) / a)
+        f.append(rv24[i] / rv168[i] if rv168[i] else 1.0)
+        # candles
+        rgn = H[i] - L[i]
+        f.append((c - O[i]) / rgn if rgn > 0 else 0.0)
+        f.append((H[i] - max(O[i], c)) / rgn if rgn > 0 else 0.0)
+        f.append((min(O[i], c) - L[i]) / rgn if rgn > 0 else 0.0)
+        f.append(_nx_cl((c - O[i - 2]) / a))
+        f.append(_nx_cl((O[i] - C[i - 1]) / a))
+        stk = 0
+        for k in range(i, max(i - 20, 0), -1):
+            if C[k] > C[k - 1]:
+                if stk < 0:
+                    break
+                stk += 1
+            elif C[k] < C[k - 1]:
+                if stk > 0:
+                    break
+                stk -= 1
+            else:
+                break
+        f.append(float(stk))
+        f.append(1.0 if H[i] <= H[i - 1] and L[i] >= L[i - 1] else 0.0)
+        f.append(1.0 if c > O[i] and O[i] <= C[i - 1] and c >= O[i - 1] and C[i - 1] < O[i - 1] else
+                 (-1.0 if c < O[i] and O[i] >= C[i - 1] and c <= O[i - 1] and C[i - 1] > O[i - 1] else 0.0))
+        # volume
+        f.append(_nx_cl((lv[i] - lv_m[i]) / lv_s[i], -10, 10) if lv_s[i] else 0.0)
+        f.append(_nx_cl(math.log((sum(V[i - 23:i + 1]) + 1e-9) / (sum(V[i - 167:i + 1]) / 7 + 1e-9)), -10, 10) if i >= 167 else 0.0)
+        vm = s_v[i] or 1e-9
+        f.append(_nx_cl((obv[i] - obv[i - 24]) / (vm * 24), -5, 5) if i >= 24 else 0.0)
+        up = sum(V[k] for k in range(i - 23, i + 1) if C[k] > O[k])
+        f.append(up / (sum(V[i - 23:i + 1]) + 1e-9))
+        # position
+        for hh, ll in ((hh24, ll24), (hh168, ll168), (hh720, ll720)):
+            r_ = hh[i] - ll[i]
+            f.append((c - ll[i]) / r_ if r_ > 0 else 0.5)
+        f.append(_nx_cl((hh720[i] - c) / a, 0, 500))
+        f.append(_nx_cl((c - ll720[i]) / a, 0, 500))
+        mag = 10 ** math.floor(math.log10(c))
+        f.append(min(abs(c / mag - round(c / mag)), abs(c / mag * 2 - round(c / mag * 2)) / 2) * mag / a)
+        # 4h
+        k4 = i4[i]
+        if k4 >= 0 and I4["atr"][k4]:
+            a4 = I4["atr"][k4]
+            f += [I4["rsi"][k4] or 50.0, _nx_cl((c - (I4["e20"][k4] or c)) / a4), _nx_cl((c - (I4["e50"][k4] or c)) / a4),
+                  _nx_cl(((I4["macd"][k4] or 0) - (I4["sig"][k4] or 0)) / a4),
+                  ((c - I4["ll14"][k4]) / (I4["hh14"][k4] - I4["ll14"][k4]) * 100 if I4["hh14"][k4] > I4["ll14"][k4] else 50.0)]
+        else:
+            f += [50.0, 0.0, 0.0, 0.0, 50.0]
+        # daily
+        kd = idd[i]
+        if kd >= 0 and ID["atr"][kd]:
+            ad = ID["atr"][kd]
+            f += [ID["rsi"][kd] or 50.0, _nx_cl((c - (ID["e20"][kd] or c)) / ad), _nx_cl((c - (ID["e50"][kd] or c)) / ad),
+                  _nx_cl((c - (ID["e200"][kd] or c)) / ad), ad / c * 100,
+                  ((c - ID["ll30"][kd]) / (ID["hh30"][kd] - ID["ll30"][kd]) if ID["hh30"][kd] > ID["ll30"][kd] else 0.5),
+                  ((c - ID["ll365"][kd]) / (ID["hh365"][kd] - ID["ll365"][kd]) if ID["hh365"][kd] > ID["ll365"][kd] else 0.5)]
+            ds = 0
+            dC = ID["C"]
+            for k in range(kd, max(kd - 10, 0), -1):
+                if dC[k] > dC[k - 1]:
+                    if ds < 0:
+                        break
+                    ds += 1
+                elif dC[k] < dC[k - 1]:
+                    if ds > 0:
+                        break
+                    ds -= 1
+                else:
+                    break
+            f.append(float(ds))
+        else:
+            f += [50.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0]
+        kw = iw[i]
+        f.append(_nx_cl((c / we21[kw] - 1) * 100, -90, 500) if kw >= 0 and we21[kw] else 0.0)
+        # time
+        tt = T[i] + 3600
+        hr = (tt // 3600) % 24
+        dw = (tt // 86400 + 3) % 7
+        f += [float(hr), float(dw), float(dw >= 5)]
+        # BTC / ETH
+        bj = bisect.bisect_right(bT, T[i]) - 1
+        if bj >= 168:
+            f += [ret(bC, bj, 1), ret(bC, bj, 4), ret(bC, bj, 24), ret(bC, bj, 168), b_rsi[bj] or 50.0,
+                  _nx_cl((bC[bj] - (b_e50[bj] or bC[bj])) / (b_atr[bj] or 1)), (b_atr[bj] or 0) / bC[bj] * 100]
+            f.append(_nx_cl(ret(C, i, 24) - ret(bC, bj, 24), -80, 300))
+            f.append(_nx_cl(ret(C, i, 168) - ret(bC, bj, 168), -80, 300))
+        else:
+            f += [0.0, 0.0, 0.0, 0.0, 50.0, 0.0, 0.0, 0.0, 0.0]
+        ej = bisect.bisect_right(eT, T[i]) - 1
+        f.append(ret(eC, ej, 24) if ej >= 24 else 0.0)
+        # funding (known: the rates settled up to the bar's close)
+        fj = bisect.bisect_right(fT, T[i] + 3600) - 1
+        if fj >= 0:
+            f.append(fR[fj] * 100)
+            f.append(sum(fR[max(0, fj - 2):fj + 1]) / len(fR[max(0, fj - 2):fj + 1]) * 100)
+            w = fR[max(0, fj - 89):fj + 1]
+            mu = sum(w) / len(w)
+            sd = math.sqrt(sum((x - mu) ** 2 for x in w) / len(w)) if len(w) > 2 else 0.0
+            f.append(_nx_cl((fR[fj] - mu) / sd, -10, 10) if sd > 0 else 0.0)
+        else:
+            f += [0.0, 0.0, 0.0]
+        rows.append([round(float(x), 5) for x in f])
+    return rows
+
+
+NX_NAMES = (["d_e9", "d_e20", "d_e50", "d_e100", "d_e200", "sl_e20", "sl_e50", "sl_e200", "e_stack", "macd", "macd_h", "macd_h_ch",
+          "st_dir", "st_dist", "ichi", "tk_kj", "vwap", "adx", "di",
+          "rsi14", "rsi7", "rsi_ch", "stoch", "will", "cci"] + [f"roc{k}" for k in (1, 3, 6, 12, 24, 72, 168)] +
+         ["div", "atr_pct", "atr_ratio", "bb_w", "bb_b", "chop", "rng24", "rng168", "rv_ratio",
+          "body", "uwick", "lwick", "mv3", "gap", "streak", "inside", "engulf",
+          "vol_z", "vol24", "obv24", "upvol",
+          "pos24", "pos168", "pos720", "from_hi", "from_lo", "round",
+          "h4_rsi", "h4_e20", "h4_e50", "h4_macd", "h4_stoch",
+          "d_rsi", "dd_e20", "dd_e50", "dd_e200", "d_atr", "d_pos30", "d_pos365", "d_streak", "w_e21",
+          "hour", "dow", "weekend",
+          "b_r1", "b_r4", "b_r24", "b_r168", "b_rsi", "b_e50", "b_atr", "rs24", "rs168", "e_r24",
+          "fund", "fund3", "fund_z"])
+
+
+def nx_model():
+    with _nx_lock:
+        m = _NX["model"]
+    if m and m.get("ver") == NX_MODEL_VER:
+        return m
+    m = None
+    try:
+        if os.path.exists(NX_MODEL_FILE):
+            with open(NX_MODEL_FILE) as f:
+                m = json.load(f)
+            if m.get("ver") != NX_MODEL_VER or m.get("feats") != NX_NAMES:
+                m = None
+    except Exception as e:
+        log_error(f"neuro model read: {e}")
+        m = None
+    if not m:
+        try:
+            r = requests.get(NX_MODEL_URL.format(ref="main"), params={"nocache": int(time.time())}, timeout=120)
+            r.raise_for_status()
+            m = r.json()
+            if m.get("ver") != NX_MODEL_VER or not m.get("models"):
+                raise RuntimeError(f"версия модели {m.get('ver')} вместо {NX_MODEL_VER}")
+            if m.get("feats") != NX_NAMES:
+                raise RuntimeError("признаки модели не совпадают с кодом бота — нужно обновить бота")
+            tmp = NX_MODEL_FILE + ".new"
+            with open(tmp, "w") as f:
+                json.dump(m, f, separators=(",", ":"))
+            os.replace(tmp, NX_MODEL_FILE)
+        except Exception as e:
+            with _nx_lock:
+                _NX["err"] = f"модель не скачалась: {e}"
+            log_error(f"neuro model download: {e}")
+            return None
+    with _nx_lock:
+        _NX.update({"model": m, "err": None})
+    return m
+
+
+def nx_load():
+    try:
+        if os.path.exists(NX_STATE_FILE):
+            with open(NX_STATE_FILE) as f:
+                d = json.load(f)
+            with _nx_lock:
+                _NX["trades"] = d.get("trades") or []
+                _NX["scan"] = d.get("scan")
+                _NX["last"] = d.get("last") or []
+    except Exception as e:
+        log_error(f"neuro state load: {e}")
+    _NX["loaded"] = True
+
+
+def nx_save():
+    try:
+        with _nx_lock:
+            data = json.dumps({"trades": _NX["trades"][-800:], "scan": _NX["scan"], "last": _NX["last"]})
+        tmp = NX_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(data)
+        os.replace(tmp, NX_STATE_FILE)
+    except Exception as e:
+        log_error(f"neuro state save: {e}")
+
+
+def _nx_funding(sym, now):
+    """the coin's settled funding rates [(t, rate)], newest ~100, cached for 4 h"""
+    c = _nx_fund_cache.get(sym)
+    if c and now - c[0] < 4 * 3600:
+        return c[1]
+    out = []
+    try:
+        r = requests.get(f"{GATE_BASE}/futures/usdt/funding_rate", params={"contract": sym, "limit": 100}, timeout=HTTP_TIMEOUT)
+        if r.status_code == 200:
+            for row in r.json():
+                try:
+                    out.append((int(row.get("t", row.get("time", 0))), float(row.get("r", row.get("rate", 0)))))
+                except (TypeError, ValueError):
+                    pass
+    except Exception as e:
+        log_error(f"neuro funding {sym}: {e}")
+    out.sort()
+    _nx_fund_cache[sym] = (now, out)
+    return out
+
+
+def nx_score(m, row):
+    """(long score, short score) of one feature row"""
+    return {s: sum(zm_tree_pred(t_, row) for t_ in m["models"][str(s)]) / len(m["models"][str(s)]) for s in (1, -1)}
+
+
+def nx_coin_row(sym, now, ref):
+    """the feature row of the coin's last closed 1h bar (None when too short / not tradeable)"""
+    h1 = _zm_closed(sym, "1h", 3600, 1000, now)
+    if len(h1) < 400 or h1[-1]["time"] + 3600 < int(now // 3600 * 3600):
+        return None, None
+    h4 = _zm_closed(sym, "4h", 4 * 3600, 1000, now)
+    d1 = _zm_closed(sym, "1d", 86400, 3000, now)
+    rows = nx_series(h1, h4, d1, emw_bars(d1, "1w"), ref["btc"], ref["eth"], _nx_funding(sym, now), start=len(h1) - 1)
+    return rows[-1], h1
+
+
+def _nx_open_count():
+    with _nx_lock:
+        opn = [t for t in _NX["trades"] if t["status"] == "OPEN"]
+    return opn
+
+
+def nx_scan_once():
+    """at an hour's start: the just-closed bar of every liquid coin scored; above the bar — an entry"""
+    m = nx_model()
+    if not m:
+        return
+    now = time.time()
+    t_hour = int(now // 3600 * 3600)
+    ref = {"btc": _zm_closed("BTC_USDT", "1h", 3600, 1000, now), "eth": _zm_closed("ETH_USDT", "1h", 3600, 1000, now)}
+    i_atr = NX_NAMES.index("atr_pct")
+    cands, coins, best = [], 0, []
+    for sym in _own_top_syms(NX_TOP):
+        heartbeat("nx_loop")
+        try:
+            row, h1 = nx_coin_row(sym, now, ref)
+            if not row:
+                continue
+            coins += 1
+            if row[i_atr] < 0.1:
+                continue
+            sc = nx_score(m, row)
+            for s in (1, -1):
+                best.append((sc[s] / (m["thr"][str(s)] or 1e-9), sym, s, round(sc[s], 3)))
+                if sc[s] >= m["thr"][str(s)]:
+                    atr = row[i_atr] / 100 * h1[-1]["close"]
+                    cands.append({"symbol": sym, "side": s, "score": round(sc[s], 3), "atr": atr, "px": h1[-1]["close"]})
+        except Exception as e:
+            log_error(f"neuro scan {sym}: {e}")
+    best.sort(reverse=True)
+    opened = 0
+    cap = int(m.get("side_cap") or 12)
+    live = {}
+    if cands:
+        for t in get_tickers() or []:
+            try:
+                live[t["contract"]] = float(t.get("last") or 0) or None
+            except (TypeError, ValueError):
+                pass
+    for c in sorted(cands, key=lambda c: -c["score"]):
+        opn = _nx_open_count()
+        if any(t["symbol"] == c["symbol"] and t["side"] == c["side"] for t in opn):
+            continue
+        if sum(1 for t in opn if t["side"] == c["side"]) >= cap:
+            continue
+        nx_open(m, c, t_hour, live.get(c["symbol"]))
+        opened += 1
+    with _nx_lock:
+        _NX["scan"] = {"t": int(now), "hour": t_hour, "coins": coins, "signals": len(cands), "opened": opened}
+        _NX["last"] = [{"symbol": b[1], "side": b[2], "score": b[3], "pct": round(100 * b[0])} for b in best[:8]]
+    nx_save()
+
+
+def nx_open(m, c, t_hour, live_px=None):
+    """a signal: the virtual trade (entry = this hour's open, filled in by the settle) and the real order"""
+    rule = m["rule"]
+    s, sym = c["side"], c["symbol"]
+    direction = "LONG" if s > 0 else "SHORT"
+    risk = rule["stop_atr"] * c["atr"]
+    px = live_px or c["px"]
+    sl, tp = px - s * risk, px + s * rule["take_r"] * risk
+    tr = {"id": f"nx_{sym}_{s}_{t_hour}", "symbol": sym, "side": s, "direction": direction, "hour": t_hour, "score": c["score"],
+          "risk": risk, "entry": None, "sl": sl, "tp": tp, "px": px, "until": t_hour + int(rule["hold_h"]) * 3600,
+          "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False}
+    if AUTOTRADE_ENABLED_NEURO and live_px:
+        try:
+            res = execute_autotrade("neuro", sym, direction, live_px, sl, tp, extra={"neuro": f"v3 {c['score']}"},
+                                    risk_pct_override=MODULE_RISK_PCT.get("neuro") or NX_RISK_DEFAULT)
+            tr["real"] = (res or {}).get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+            tr["autotrade"] = {"status": (res or {}).get("status"), "detail": str((res or {}).get("detail") or "")[:200]}
+        except Exception as e:
+            log_error(f"neuro autotrade {sym}: {e}")
+    with _nx_lock:
+        if any(t["id"] == tr["id"] for t in _NX["trades"]):
+            return
+        _NX["trades"].append(tr)
+    if TELEGRAM_ALERTS_NEURO:
+        pct = lambda p: (p - px) / px * 100
+        send_telegram(f"{'🟢' if s > 0 else '🔴'} {sym.replace('_USDT', '')} {direction} · 🧠 Нейро\n"
+                      f"вход по рынку ~{px:.6g} · стоп {sl:.6g} ({pct(sl):+.1f}%) · тейк {tp:.6g} ({pct(tp):+.1f}%) · держать до {int(rule['hold_h'])} ч\n"
+                      f"оценка модели {c['score']} · " + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"), category="neuro")
+
+
+def nx_settle(now=None):
+    """the open trades walked on the closed 1h candles exactly as the research labels: entry at the signal
+    hour's open, stop first, then the take, out at the close of the 12th hour; fees and funding"""
+    now = now or time.time()
+    m = _NX.get("model") or {}
+    hold = int((m.get("rule") or {}).get("hold_h") or 12)
+    take_r = float((m.get("rule") or {}).get("take_r") or 2.0)
+    changed = False
+    for t in _nx_open_count():
+        try:
+            cs = [c for c in (get_candles_range(t["symbol"], "1h", t["hour"], int(now)) or []) if c["time"] + 3600 <= now and c["time"] >= t["hour"]]
+            if not cs or cs[0]["time"] != t["hour"]:
+                if now > t["until"] + 6 * 3600:
+                    with _nx_lock:
+                        t.update({"status": "CLOSED", "result": "NO_DATA", "r": None, "t_out": int(now)})
+                    changed = True
+                continue
+            s, risk = t["side"], t["risk"]
+            if t.get("entry") is None:
+                e = cs[0]["open"]
+                with _nx_lock:
+                    t.update({"entry": e, "sl": e - s * risk, "tp": e + s * take_r * risk})
+                changed = True
+            e, sl, tp = t["entry"], t["sl"], t["tp"]
+            res = None
+            for k, c in enumerate(cs[:hold]):
+                if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
+                    res = ("LOSS", sl, k)
+                    break
+                if (c["high"] >= tp) if s > 0 else (c["low"] <= tp):
+                    res = ("WIN", tp, k)
+                    break
+            if not res and len(cs) >= hold:
+                res = ("TIME_EXIT", cs[hold - 1]["close"], hold - 1)
+            if not res:
+                continue
+            kind, ex, k = res
+            r = s * (ex - e) / risk - (NX_FEE + NX_FUND * (k + 1) / 24) * e / risk
+            if kind == "TIME_EXIT" and t.get("real") and AUTOTRADE_ENABLED_NEURO:
+                log_error(f"neuro time exit {t['symbol']}: {close_position_for_mode('neuro', t['symbol'], t['direction'])}")
+            with _nx_lock:
+                t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + 3600), "r": round(r, 3)})
+            changed = True
+            notify_trade_result("neuro", t["symbol"], t["direction"], e, ex, kind, round(r, 3), real=bool(t.get("real")), note="Нейро")
+        except Exception as e_:
+            log_error(f"neuro trade {t.get('symbol')}: {e_}")
+    if changed:
+        nx_save()
+
+
+def nx_loop():
+    time.sleep(120)
+    nx_load()
+    last_hour = (_NX.get("scan") or {}).get("hour")
+    while True:
+        heartbeat("nx_loop")
+        try:
+            if NEURO_ENABLED:
+                now = time.time()
+                h = int(now // 3600 * 3600)
+                if h != last_hour and now - h >= 30:   # a new hour: settle the trades, score the closed bar
+                    nx_settle(now)
+                    if now - h < 20 * 60:   # entry at the hour's open — too late into the hour, skip it
+                        nx_scan_once()
+                    last_hour = h
+        except Exception as e:
+            log_error(f"nx_loop: {e}")
+            with _nx_lock:
+                _NX["err"] = str(e)[:200]
+        time.sleep(30)
+
+
+def nx_stats():
+    m = _NX.get("model") or {}
+    with _nx_lock:
+        trades = list(_NX["trades"])
+        scan, err, last = _NX.get("scan"), _NX.get("err"), list(_NX.get("last") or [])
+    fin = [t for t in trades if t["status"] == "CLOSED" and t.get("r") is not None]
+    rs = [t["r"] for t in fin]
+    t0 = min((t["hour"] for t in trades), default=None)
+    weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
+    return {"on": NEURO_ENABLED, "auto": AUTOTRADE_ENABLED_NEURO, "tg": TELEGRAM_ALERTS_NEURO,
+            "risk": MODULE_RISK_PCT.get("neuro") or NX_RISK_DEFAULT,
+            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap")} if m else None,
+            "n_feats": len(NX_NAMES), "err": err, "scan": scan, "near": last,
+            "open": [t for t in trades if t["status"] == "OPEN"][-30:],
+            "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
+            "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
+            "last": [{k: t.get(k) for k in ("symbol", "side", "hour", "r", "result", "real")} for t in sorted(fin, key=lambda t: -t["hour"])[:30]]}
+
+
+@app.route("/api/nx/status")
+def api_nx_status():
+    try:
+        return jsonify(nx_stats())
+    except Exception as e:
+        log_error(f"nx status: {e}")
         return jsonify({"err": f"статистика не посчиталась: {e}"})
 
 
@@ -33286,7 +34004,7 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
   <div id="hdrActions" style="display:none;">
-    <div class="hdrRow"><span class="hdrLbl">Neuro</span><button id="resetNeuroBtn" class="btnDanger">🗑 Очистить</button><button id="restartNeuroBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
+    <div class="hdrRow" style="display:none;"><span class="hdrLbl">Neuro</span><button id="resetNeuroBtn" class="btnDanger">🗑 Очистить</button><button id="restartNeuroBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">S/R Zones</span><button id="resetSnrBtn" class="btnDanger">🗑 Очистить</button><button id="restartSnrBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">Peak Rev.</span><button id="resetPrvBtn" class="btnDanger">🗑 Очистить</button><button id="restartPrvBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">Симулятор</span><button id="resetSimulatorBtn" class="btnDanger">🗑 Сбросить</button></div>
@@ -33451,12 +34169,12 @@ INDEX_HTML = """<!doctype html>
       
       <div class="settingRow">
         <div>
-          <div class="label">Работа (майнинг + живой скан)</div>
-          <div class="sub">самообучающаяся система поиска зависимостей по 20 монетам — выключение здесь останавливает и переобучение, и живой скан сигналов</div>
+          <div class="label">Работа (каждый час — 120 монет)</div>
+          <div class="sub">модель, обученная на 6 годах истории 127 монет: в начале каждого часа оценивает только что закрытую свечу по 89 параметрам; выключение останавливает сигналы и учёт сделок</div>
         </div>
         <label class="switch"><input type="checkbox" id="setNeuro"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow">
+      <div class="settingRow" style="display:none;">
         <div>
           <div class="name">Neuro: дополнительные условия (12)</div>
           <div class="sub">ликвидации, long/short толпы, OI+цена, изменение фандинга, премия к индексу, открытие недели/месяца, хай/лоу прошлого дня, сжатие, серия 5+, сила к BTC, круглые уровни — действует со следующего майнинга; выключите, чтобы сравнить с прежним набором</div>
@@ -33593,12 +34311,12 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Алерты Neuro</div>
-          <div class="sub">новые живые сигналы самообучающейся системы зависимостей (топ-N монет, см. настройку выше)</div>
+          <div class="label">↳ Алерты Нейро</div>
+          <div class="sub">новые сигналы Нейро: монета, сторона, стоп и тейк</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramNeuro"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow">
+      <div class="settingRow" style="display:none;">
         <div>
           <div class="label">↳ Сводка бэктеста Neuro</div>
           <div class="sub">краткая сводка по топ-N монетам после каждого полного цикла бэктеста — по одной строке на монету, например "BTC-45%-RR2" (винрейт и подобранный RR — те же цифры что и на карточке монеты)</div>
@@ -33715,7 +34433,7 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">свой % для каждого модуля (0.1–100); пустое поле — общий % выше. 🎯 сильные зоны: пустое поле — 0.5% (их много одновременно, на истории просадка доходила до 50R). Бэктест «с $15» каждого модуля считает со своим %</div>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-          <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro" title="Neuro" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro 0.5" title="Нейро: пусто — 0.5% (не общий %)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSnr" min="0.1" max="100" step="0.5" placeholder="S/R" title="S/R Zones" style="display:none;width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R" title="Peak Reversal" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctEmw" min="0.1" max="100" step="0.5" placeholder="EMA 0.5" title="EMA — касания: пусто — 0.5% (не общий %)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
@@ -33732,8 +34450,8 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Neuro</div>
-          <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча под безопасное расстояние до ликвидации и размера позиции, что и у Sweep/остальных режимов</div>
+          <div class="label">↳ Нейро</div>
+          <div class="sub">вход по рынку в начале часа, стоп и тейк сразу на бирже, выход через 12 ч; риск — поле «Neuro» ниже (пусто = 0.5%, не общий %): сделок бывает много одновременно</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeNeuro"><span class="switchSlider"></span></label>
       </div>
@@ -34858,7 +35576,54 @@ function neuroPaperHtml(p) {
   </div>`;
 }
 
-async function refreshNeuro() {
+async function refreshNeuro() {   // v0.99.619 — Neuro v3: the model, the yearly check, the last scan, the trades
+  const panel = document.getElementById('neuroPanel');
+  let d;
+  try { d = await (await fetch('/api/nx/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
+  const card = (title, body) => `<div class="zcard"><div class="zh">${title}</div>${body}</div>`;
+  const tile = (l, v, n) => `<div class="ztile"><div class="zl">${l}</div><div class="zv">${v}</div>${n ? `<div class="zn">${n}</div>` : ''}</div>`;
+  const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  const coin = s => (s || '').replace('_USDT', '');
+  const hm = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
+  const m = d.model, rs = (m && m.research) || {}, rule = (m && m.rule) || {};
+  const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
+  let h = '';
+  // 1. what it is and how it did on the years it never saw
+  let top = `<div class="dim">Одна модель на все монеты: каждый час смотрит ${d.n_feats || 89} параметров только что закрытой часовой свечи у 120 ликвидных монет — EMA, MACD, Supertrend, Ишимоку, ADX, RSI, стохастик, CCI, объёмы, свечи, 4ч / день / неделя, BTC и ETH, фандинг, час и день недели. Сигнал — только у лучших ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 0.3}% часов.</div>`;
+  if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
+  else {
+    const ys = rs.years || {};
+    const all = Object.values(ys).filter(x => x && x.n);
+    const n = all.reduce((a, x) => a + x.n, 0), avg = n ? all.reduce((a, x) => a + x.avg * x.n, 0) / n : null;
+    const wk = all.length ? all.reduce((a, x) => a + x.wk, 0) / all.length : null, dd = Math.max(0, ...all.map(x => x.dd || 0));
+    top += `<div class="zsub">Проверка на истории 127 монет — каждый год модель не видела. Результат на сделку:</div>
+      ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
+      <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>сделка до <b>${rule.hold_h || 12} ч</b></span><span>просадка до <b>${Math.round(dd)}R</b></span></div>
+      <div class="zsub">Вход — по рынку в начале часа, стоп — <b>${rule.stop_atr} ATR</b> часового графика, тейк — <b>${rule.take_r} риска</b>, через ${rule.hold_h} ч выход. Не больше ${m.side_cap || 12} сделок в одну сторону.</div>
+      ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «Neuro» в настройках риска (пусто = ${d.risk}%). Сделок бывает много одновременно — держите риск маленьким.</div>`}`;
+  }
+  h += card(`🧠 Нейро ${pill}`, top);
+  // 2. the last scan
+  const sc = d.scan, near = d.near || [];
+  const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;">
+      <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.pct}%</span></span>`;
+  h += card('🔎 Последний час', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, 'монет')}${tile('сигналов', sc.signals, '')}${tile('открыто', sc.opened, '')}</div>
+    ${near.length ? `<div class="zsub" style="margin-top:8px;">ближе всех к порогу (100% — сигнал):</div><div>${near.map(chip).join('')}</div>` : ''}
+    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · следующий пересчёт в начале часа</div>`
+    : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
+  // 3. the trades
+  const op = d.open || [];
+  const row = t => `<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);">
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span>${t.real ? ' <span class="dim">· 💰</span>' : ''}</span>
+      <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry != null ? t.entry : t.px)} · до ${hm(t.until)}</span></div>`;
+  h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
+    ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map(row).join('')}</div>` : ''}
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${zBars(d.last.map(t => ({label: `${coin(t.symbol)} ${t.side > 0 ? '↑' : '↓'}`, sub: hm(t.hour), v: t.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}`);
+  h += `<details class="zcard"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на 6 годах часовых свечей 127 монет Binance: для каждого часа — чем кончилась бы сделка со стопом ${rule.stop_atr || 1} ATR и тейком ${rule.take_r || 2}R за ${rule.hold_h || 12} ч. Порог выбран честно: модель учили на прошлых годах и проверяли на следующем, которого она не видела; 2025–26 — финальная проверка. В начале каждого часа бот считает те же параметры тем же кодом, что и в исследовании, и открывает сделки у часов с оценкой выше порога (по монете и стороне — одна сделка). Учёт сделок — по часовым свечам, как в исследовании: вход по открытию часа, стоп раньше тейка, выход по закрытию ${rule.hold_h || 12}-го часа; комиссии и фандинг учтены. Отбор монет по прошлой доходности Нейро не помогает (проверено) — модель сама учитывает, что за монета и какой рынок.</div></details>`;
+  setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
+}
+
+async function refreshNeuroOld() {   // v0.99.619 — the old per-coin Neuro, not shown
   const panel = document.getElementById('neuroPanel');
   try {
     const data = await (await fetch('/api/neuro/status')).json();
@@ -36666,22 +37431,26 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>сделка до <b>${Math.round((rule.hold_h || 24))} ч</b></span><span>просадка до <b>${dd}R</b></span></div>
       <div class="zsub">Вход — на EMA, стоп — <b>${rule.stop_datr} дневного хода</b> монеты за EMA, тейк — <b>${rule.take_r} риска</b>. Не больше ${m.side_cap || 12} сделок в одну сторону.</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «EMA» в настройках риска (пусто = ${d.risk}%). Сделок много одновременно: просадка на истории до ${dd}R — держите риск маленьким.</div>`}`;
+    const sl = d.sel || {}, cr = sl.rule || {}, rsl = sl.research || {};
+    if (sl.of) top += `<div class="zsub">🧮 <b>Авто-отбор монет:</b> торгуются <b>${sl.coins} из ${sl.of}</b> — у которых сделки модели были в среднем ≥ ${cr.min_avg != null ? '+' + cr.min_avg : '+0.1'}R (от ${cr.min_n || 10} сделок, история + живые). Остальные — только виртуально, без сигналов и сделок; монета войдёт в список, когда наберёт результат.${rsl.sel ? ` На истории 2025–26: <b>${sgR(rsl.sel.avg)}</b> на сделку, просадка ${rsl.sel.dd}R (без отбора ${sgR(rsl.all.avg)}, просадка ${rsl.all.dd}R).` : ''}</div>`;
   }
   h += card(`📐 EMA — касания ${pill}`, top);
   // 2. armed now
   const ar = d.armed || [];
-  const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;">
+  const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;${a.sel === false ? 'opacity:.45;' : ''}" ${a.sel === false ? 'title="монета не в отборе — только виртуально"' : ''}>
       <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑ лонг' : '↓ шорт'}</span> <span class="dim">EMA ${a.n} · ${tfN[a.tf]} · ${a.dist > 0 ? '+' : ''}${a.dist}%</span></span>`;
-  h += card(`🎯 На прицеле в этот час · ${d.armed_n || 0}`, ar.length ? `<div>${ar.slice(0, 12).map(chip).join('')}</div>${ar.length > 12 ? `<div class="dim" style="font-size:var(--fs-xs);">и ещё ${ar.length - 12}</div>` : ''}<div class="dim" style="font-size:var(--fs-xs);">коснётся цена EMA до конца часа — придёт сигнал${d.auto ? ' и откроется сделка' : ''}; процент — до уровня от цены</div>`
+  ar.sort((x, y) => (y.sel !== false) - (x.sel !== false));
+  h += card(`🎯 На прицеле в этот час · ${d.armed_n || 0}`, ar.length ? `<div>${ar.slice(0, 12).map(chip).join('')}</div>${ar.length > 12 ? `<div class="dim" style="font-size:var(--fs-xs);">и ещё ${ar.length - 12}</div>` : ''}<div class="dim" style="font-size:var(--fs-xs);">коснётся цена EMA до конца часа — придёт сигнал${d.auto ? ' и откроется сделка' : ''}; процент — до уровня от цены; бледные — монеты не в отборе (только виртуально)</div>`
     : `<div class="dim" style="font-size:var(--fs-sm);">сейчас подходящих уровней нет — пересчёт каждый час${d.scan ? ` (последний ${hm(d.scan.t)}, ${d.scan.coins} монет)` : ''}</div>`);
   // 3. the trades
   const op = d.open || [];
   const row = t => `<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);">
-      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">EMA ${t.n} · ${tfN[t.tf]}${t.real ? ' · 💰' : ''}</span></span>
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">EMA ${t.n} · ${tfN[t.tf]}${t.real ? ' · 💰' : ''}${t.sel === false ? ' · вне отбора' : ''}</span></span>
       <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry)} · до ${hm(t.until)}</span></div>`;
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
+    ${d.sel && d.sel.n_all > (d.n || 0) ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">выше — монеты в отборе; все монеты вместе: ${d.sel.n_all} сделок, ${sgR(d.sel.avg_all)} в среднем</div>` : ''}
     ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map(row).join('')}</div>` : ''}
-    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${zBars(d.last.map(t => ({label: `${coin(t.symbol)} ${t.side > 0 ? '↑' : '↓'}`, sub: `EMA ${t.n} ${tfN[t.tf]} · ${hm(t.t_in)}`, v: t.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}`);
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${zBars(d.last.map(t => ({label: `${coin(t.symbol)} ${t.side > 0 ? '↑' : '↓'}`, sub: `EMA ${t.n} ${tfN[t.tf]} · ${hm(t.t_in)}${t.sel === false ? ' · вне отбора' : ''}`, v: t.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}`);
   h += `<details class="zcard"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Каждый час бот считает уровни EMA формирующихся свечей (их значение известно с открытия свечи и не меняется) и оценивает, каким было бы касание в этот час: график и EMA, разгон к уровню, EMA вокруг, RSI трёх графиков, тренд дня и недели, BTC, сила монеты, другие EMA рядом. Уровни с оценкой выше порога «на прицеле»: цена проверяется каждые 30 с, при касании — сигнал в Telegram${d.auto ? ' и сделка' : ''}. Считается только первое касание EMA за свечу. Учёт сделок — по часовым свечам, как в исследовании: стоп раньше тейка, в час входа тейк не считается, выход через 24 ч; комиссии и фандинг учтены.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
@@ -39484,11 +40253,10 @@ if __name__ == "__main__":
     threading.Thread(target=ema_bull_loop, daemon=True).start()
     threading.Thread(target=amd_loop, daemon=True).start()
     threading.Thread(target=amd_backtest_loop, daemon=True).start()
-    threading.Thread(target=neuro_mining_loop, daemon=True).start()
-    threading.Thread(target=neuro_mining_watchdog, daemon=True).start()
     threading.Thread(target=nq_backtest_loop, daemon=True).start()
     threading.Thread(target=nq_live_loop, daemon=True).start()
-    threading.Thread(target=neuro_live_loop, daemon=True).start()
+    # v0.99.619 — the old per-coin Neuro (mining + live loops) is replaced by Neuro v3 (nx_loop)
+    threading.Thread(target=nx_loop, daemon=True).start()
     threading.Thread(target=snr_backtest_loop, daemon=True).start()
     threading.Thread(target=snr_filter_loop, daemon=True).start()   # v0.99.337
     threading.Thread(target=prv_filter_loop, daemon=True).start()   # v0.99.361
