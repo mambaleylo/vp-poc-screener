@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.616"
+APP_VERSION = "0.99.617"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -29888,6 +29888,14 @@ def zm_loop():
         time.sleep(ZM_SCAN_SEC)
 
 
+def zm_stats_safe():
+    try:
+        return zm_stats()
+    except Exception as e:   # v0.99.617 — the zones tab never fails because of this card
+        log_error(f"zm stats: {e}")
+        return {"on": ZM_ENABLED, "err": f"статистика не посчиталась: {e}"}
+
+
 def zm_stats():
     m = _ZM.get("model") or {}
     with _zones_lock:
@@ -30045,7 +30053,7 @@ def api_zones_status():
                     "autotrade": AUTOTRADE_ENABLED_ZONES, "max_days": ZONES_MAX_DAYS, "tp_user": ZONES_TP_PCT,
                     "learn_min": ZONES_LEARN_MIN, "train_mode": bool(ZONES.get("train_mode")),
                     "own": own_stats(), "own_exams": own_exam_list(), "autotrade_own": AUTOTRADE_ENABLED_ZONES_OWN,
-                    "oc": oc_stats(), "zm": zm_stats()})
+                    "oc": oc_stats(), "zm": zm_stats_safe()})
 
 
 @app.route("/api/zones/train_mode", methods=["POST"])
@@ -35189,11 +35197,11 @@ async function refreshZones() {
     <div class="zseg">${segs.map(([k, t, c]) => `<button class="${k === sub ? 'on' : ''}" data-zs="${k}" onclick="zonesSub('${k}')">${t}${c !== '' ? `<span class="zc">${c}</span>` : ''}</button>`).join('')}</div>
     ${pane('now', `${zStatusHtml(d)}
       ${summary}
+      ${zmHtml(d, zmZ)}
       <div class="zsec">Активные зоны автора (${act.length})</div>
       <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 8px;">${d.autotrade ? 'по этим постам бот ставит лимитки на бирже, когда цена подходит' : 'автоторговля выкл — только отслеживаю'}</div>
       ${act.length ? zonePostBlocks(act) : '<div class="dim" style="margin-bottom:10px;">нет — новые посты из группы появятся здесь</div>'}
-      ${zoneTradesHtml(closedTr)}
-      ${zmHtml(d, zmZ)}`)}
+      ${zoneTradesHtml(closedTr)}`)}
     ${pane('rules', `<div class="dim" style="font-size:var(--fs-sm);margin:0 0 8px;">Что бот ставит на бирже и почему — всё подобрано на истории постов: выбор на старых, проверка на новых.</div>
       ${ruleCard}${zonesTpvCard(lr.tpv, card, d)}${zonesStopxCard(lr.stopx, card, d)}${riskCard}`)}
     ${pane('anal', `<div class="dim" style="font-size:var(--fs-sm);margin:0 0 8px;">Справка: откуда такие итоги и что ещё проверялось. На торговлю напрямую не влияет.</div>
@@ -35369,7 +35377,10 @@ function ocHtml(d, ocZ) {   // v0.99.528 — v2: more features, trees, a 3-way h
   return `<div class="zcard" style="font-size:var(--fs-sm);"><div class="zh">🧪 Поиск по результату <span class="pill">наблюдение</span></div>${body}</div>`;
 }
 // v0.99.616 — «сильные зоны»: the model trained on Binance history, its yearly check and the live record
-function zmHtml(d, zmZ) {
+function zmHtml(d, zmZ) {   // v0.99.617 — a broken card never takes the whole tab down
+  try { return _zmHtml(d, zmZ); } catch (e) { return `<div class="zcard" style="font-size:var(--fs-sm);">🎯 Сильные зоны: карточка не отрисовалась (${String(e).replace(/</g, '&lt;')})</div>`; }
+}
+function _zmHtml(d, zmZ) {
   const o = d.zm || {}, m = o.model, rs = (m && m.research) || {};
   const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
   const dt = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
@@ -35399,7 +35410,7 @@ function zmHtml(d, zmZ) {
     ${act.length ? `<div style="margin-top:8px;">${zonePostBlocks(act)}</div>` : '<div class="dim" style="margin-top:6px;">активных сильных зон сейчас нет — модель ждёт хорошую</div>'}
     ${(o.last || []).length ? `<details><summary>последние итоги (${o.last.length})</summary>${zBars(o.last.map(r => ({label: (r.symbol || '').replace('_USDT', '') + ' ' + (r.side === 'long' ? 'лонг' : 'шорт'), sub: new Date(r.t * 1000).toLocaleDateString('ru-RU'), v: r.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}
     <div class="zsub">${o.auto ? 'Сделки ставятся на бирже с риском зон.' : 'Сейчас только виртуальный учёт. Торговать: Настройки → Автоторговля → «Зоны: 🎯 сильные зоны».'}</div>`;
-  return `<div class="zcard" style="font-size:var(--fs-sm);margin-top:10px;"><div class="zh">🎯 Сильные зоны ${pill}</div>${body}</div>`;
+  return `<div class="zcard" style="font-size:var(--fs-sm);"><div class="zh">🎯 Сильные зоны ${pill}</div>${body}</div>`;
 }
 async function ownScanNow() {
   try { await fetch('/api/zones/own/scan', {method: 'POST'}); } catch (e) {}

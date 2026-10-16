@@ -19805,3 +19805,6 @@ v0.99.616 - Zones: «🎯 Сильные зоны» — a zone model trained off
          the ladder takes its own stop / take in R. Own switches (scan, trading, Telegram) and its own
          risk, 0.5% by default — never the common risk. A card on the «Сейчас» tab with the yearly check
          and the live record. The research scripts are in tools/zones_model.
+v0.99.617 - Zones: the «🎯 Сильные зоны» card moved to the top of «Сейчас», right under the summary (it was
+         at the very bottom, under the author's zones and the closed trades — the user did not see it). A
+         card or a stats error now shows as a line in the card instead of taking the whole tab down.
