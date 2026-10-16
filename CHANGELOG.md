@@ -19853,3 +19853,9 @@ v0.99.621 - «EMA — касания»: the far take (the user: "полноце�
          2025–26 (unseen) +0.39R at 6.8/wk (+239R, drawdown 38R) vs +0.15R (+127R, 52R) of the old rule; WR
          ~50%. The coin auto-selection is off for it (too few trades per coin to judge). The hold is the
          rule's and is kept per trade (the open 24 h trades finish as before); texts follow the rule.
+v0.99.622 - Strong zones: take 4R (the take sweep, the user: "особенно зоны, полноценная проверка разных тейков").
+         All 20 stop (0.75 / 1 / 1.5 / 2 daily ATR) × take (1.5 / 2 / 3 / 4 / 6 R) rules in the same capped
+         walk-forward; stop 0.75 daily ATR beyond the far edge with take 4R beat the old 1 / 3R in every year
+         and was confirmed with 3 models per fold: 2022 +0.46R, 2023 +0.27R, 2024 +0.22R, 2025–26 (unseen)
+         +0.17R at 7.7/wk, +383R over the four years vs +279R. The model is re-exported for it (version 2,
+         downloaded on start); zones already open keep their own take. «Чего ожидать» uses the new trades.

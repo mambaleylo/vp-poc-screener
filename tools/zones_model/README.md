@@ -18,3 +18,9 @@ Run from this folder (needs numpy, pandas, lightgbm, pyarrow; ~30 GB disk, 16 GB
 Chosen: stop = 1 daily ATR beyond the zone's far edge, take = 3R from the average entry, the top 5% of the scores,
 at most 12 active zones per side. Walk-forward per trade: 2022 +0.36R (2.8/wk), 2023 +0.18R (7.8/wk),
 2024 +0.20R (5.1/wk), 2025–26 (never seen while choosing) +0.17R (6.4/wk); drawdowns up to 52R → small risk.
+
+v0.99.622 — the take sweep (the user: "полноценная проверка разных тейков"): `zt_wf.py` judges every stop 0.75 / 1 /
+1.5 / 2 daily ATR × take 1.5 / 2 / 3 / 4 / 6 R label in the same capped walk-forward. Stop 0.75 / take 4R beat the
+deployed 1 / 3R in every year; with 3 models per fold (`LAB=G_0.75_R4.0 python3 zm_expect2.py`): 2022 +0.46R,
+2023 +0.27R, 2024 +0.22R, 2025–26 +0.17R (+383R in all vs +279R). `zm_export2.py` exports it with the monthly
+expectation; `t_bot_e2e2.py` checks the bot's ladder (23/23).

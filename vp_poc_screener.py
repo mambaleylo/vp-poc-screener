@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.621"
+APP_VERSION = "0.99.622"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -29605,15 +29605,15 @@ def oc_loop():
 # edges, the stop a day's move of the coin beyond the far edge, the take a multiple of the risk.
 ZM_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_zones_model.json")
 ZM_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_zones_model.json"
-ZM_MODEL_VER = 1
+ZM_MODEL_VER = 2   # v0.99.622 — 2: stop 0.75 daily ATR, take 4R (the take sweep)
 ZM_ENABLED = os.environ.get("VP_ZONES_ZM", "1") == "1"
 AUTOTRADE_ENABLED_ZONES_ZM = os.environ.get("VP_AUTOTRADE_ZONES_ZM", "0") == "1"
 TELEGRAM_ALERTS_ZONES_ZM = os.environ.get("VP_TG_ZONES_ZM", "1") == "1"
 ZM_TOP = int(os.environ.get("VP_ZONES_ZM_TOP", "120"))   # coins scanned (by 24h volume), like the research's 127
 ZM_SCAN_SEC = 3600
 # v0.99.620 — what to expect (user: «бэктест, чтобы понять чего ожидать»): the walk-forward trades (q 0.95, cap 12)
-# month by month by exit, 2025–26 (models trained only on the years before); tools/zones_model/zm_expect.py
-ZM_EXPECT = json.loads('{"months":[["2025-01",27,-8.1],["2025-02",17,13.5],["2025-03",29,-8.6],["2025-04",31,22.9],["2025-05",27,-11.8],["2025-06",20,-5.1],["2025-07",38,2.7],["2025-08",25,-9.6],["2025-09",24,-10.6],["2025-10",17,-9.3],["2025-11",4,-3.2],["2025-12",19,-4.2],["2026-01",32,56.0],["2026-02",8,1.1],["2026-03",39,-11.2],["2026-04",48,7.9],["2026-05",31,21.5],["2026-06",18,14.4],["2026-07",32,-4.0],["2026-08",76,30.5],["2026-09",20,14.1]],"all_months":57,"pos_months":28,"worst":-13.9,"best":56.0,"max_gap_d":25,"zone_days_share":0.34}')
+# month by month by exit, 2025–26 (models trained only on the years before); tools/zones_model/zm_expect2.py + zm_export2.py
+ZM_EXPECT = json.loads('{"months":[["2025-01",38,-19.6],["2025-02",21,9.5],["2025-03",38,-9.8],["2025-04",29,36.3],["2025-05",34,-15.3],["2025-06",31,-7.2],["2025-07",37,2.3],["2025-08",26,-10.7],["2025-09",34,-4.6],["2025-10",25,0.9],["2025-11",5,0.8],["2025-12",24,-1.0],["2026-01",36,69.9],["2026-02",6,-2.8],["2026-03",49,-24.1],["2026-04",56,15.6],["2026-05",45,10.9],["2026-06",16,1.9],["2026-07",49,6.9],["2026-08",83,36.5],["2026-09",19,19.3]],"all_months":57,"pos_months":32,"worst":-24.1,"best":69.9,"max_gap_d":19,"zone_days_share":0.39}')
 ZM_RISK_DEFAULT = 0.5   # % per strong zone when its own field is empty — never the common risk (ladders at once)
 ZM_SIDE_CAP = int(os.environ.get("VP_ZONES_ZM_SIDE_CAP", "12"))   # active strong zones per side: one market move takes them all
 _ZM = {"model": None, "err": None, "last_scan": None, "loaded_t": None}
@@ -36689,7 +36689,7 @@ function _zmHtml(d, zmZ) {
       ${zBars(rows, v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b> на сделку</span><span><b>~${wk == null ? '—' : wk.toFixed(1)}</b> сделок в неделю</span><span>держится <b>~${days == null ? '—' : days.toFixed(1)}</b> дн.</span><span>худшая просадка <b>${dd}R</b></span></div>
       <div class="zbanner warn">Сделок много одновременно, и один обвал рынка выбивает их пачкой: просадка на истории доходила до ${dd}R. Поэтому риск на сильную зону свой и маленький — по умолчанию 0.5% (при нём просадка ~${Math.round(dd * 0.5)}% счёта).</div>
-      <div class="zsub">Правило сделки: лимитки на оба края зоны, стоп — <b>${m.rule.buf_datr} дневной ход</b> монеты за дальним краем, тейк — <b>${m.rule.tp_r} риска</b> от средней цены входа, зона ждёт 14 дней. WR низкий по замыслу: тейк втрое дальше стопа.</div>`;
+      <div class="zsub">Правило сделки: лимитки на оба края зоны, стоп — <b>${m.rule.buf_datr} дневной ход</b> монеты за дальним краем, тейк — <b>${m.rule.tp_r} риска</b> от средней цены входа, зона ждёт 14 дней. WR низкий по замыслу: тейк в ${m.rule.tp_r} раза дальше стопа.</div>`;
     const ex = o.expect;
     if (ex && ex.months) {   // v0.99.620 — what to expect, month by month
       const mn = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
