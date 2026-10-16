@@ -19784,3 +19784,10 @@ v0.99.614 - Zones: the volatility take is also researched per coin group: calm c
          of how the bot trades now, and horizontal bars instead of number tables for the take,
          the confirmed stop, the risk, the fixed take and the breakeven variants; the tables and
          explanations moved under «подробнее».
+v0.99.615 - Zones: the "search by result" model is read from disk at once after a start (it was read
+         only after 4 minutes, so after every update the tab said the model was not trained). A
+         training run that finds nothing to choose now records why, and the tab shows it instead
+         of "starts in a few minutes" for ever. The "our zones" and "search by result" cards are
+         redesigned per the user's request: tiles (learning, found by itself, live zones), bars for
+         ours vs the author's result and for the exam (ours / the author / the nearest zone), the
+         time the last post was checked, and the long description and tables under «подробнее».

@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.614"
+APP_VERSION = "0.99.615"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28768,7 +28768,7 @@ ZONES_OC_PER_SIDE = 3        # the nearest candidates per side per snapshot
 ZONES_OC_TPS = (3.0, 5.0, 8.0, 12.0, 20.0)   # takes tried (from the average entry)
 ZONES_OC_FIT_MAX = 5000      # samples per fit (speed on a phone)
 _OC = {"samples": [], "done": {}, "model": None, "eval": None, "tp": None, "thr": None, "built": None, "ver": None, "var": None,
-       "filters": {}, "hist": []}   # v0.99.556 — the adaptive filters in use and every exam so far
+       "filters": {}, "hist": [], "last_try": None}   # v0.99.556 — the adaptive filters in use and every exam so far
 _oc_lock = threading.Lock()
 
 
@@ -29328,6 +29328,7 @@ def oc_train():
     with _oc_lock:
         rows = [s for s in _OC["samples"] if len(s["x"]) == OC_NFEAT]
     if len(rows) < 500:
+        _oc_try(f"мало примеров в истории: {len(rows)} из 500 — история монет ещё собирается")
         return None
     rows.sort(key=lambda s: s["t"])
     t_a, t_b = rows[len(rows) * 6 // 10]["t"], rows[len(rows) * 8 // 10]["t"]
@@ -29366,6 +29367,8 @@ def oc_train():
                     if var not in var_best or rob > var_best[var]["rob"]:
                         var_best[var] = row
     if not cands:
+        _oc_try("ни один вариант модели, тейка и порога не набрал хотя бы 10 сделок в каждой половине периода подбора — "
+                "отбирать нечем; повторю через сутки на дополненной истории")
         return None
     # v0.99.556 — the adaptive filters, tuned for the 3 best model / take / bar choices
     n_val_all = len({(s["t"], s["s"], s["side"]) for s in val_rows})
@@ -29423,7 +29426,15 @@ def oc_train():
                                            "test_nofilt": test_nofilt.get("avg"), "author": (ev.get("author_test") or {}).get("avg"),
                                            "samples": len(rows)})
         del _OC["hist"][:-60]
+    _oc_try(None)
     return ev
+
+
+def _oc_try(why):
+    """v0.99.615 — the last training attempt and why it gave no model (kept on disk: the tab said
+    «начнёт через несколько минут» for ever when the training ran and found nothing to choose)"""
+    with _oc_lock:
+        _OC["last_try"] = {"t": time.time(), "why": why}
 
 
 def oc_scan_once():
@@ -29505,16 +29516,24 @@ def oc_stats():
     live["longs"] = sum(1 for r_ in live["rows"] if r_["side"] == "long")
     with _oc_lock:
         hist = list(_OC.get("hist") or [])[-20:]
+        last_try = _OC.get("last_try")
     return {"samples": n, "eval": ev, "tp": tp, "thr": thr, "built": built, "hist": hist,
+            "last_try": last_try, "loaded": _OC_LOADED[0], "model_on": bool(_OC.get("model")),
             "active": sum(1 for z in zs if z.get("status") in ("watch", "in_trade")), "live": live,
             # v0.99.528 — the author's ladders over the same weeks as our live zones
             "author_live": oc_author_window(t_live, time.time()) if t_live else None}
 
 
+_OC_LOADED = [False]
+
+
 def oc_loop():
     """build / extend the data set and retrain once a day; scan every hour"""
-    time.sleep(240)
+    # v0.99.615 — the stored model is read at once (it was read only after 4 minutes, and right after
+    # every restart / update the tab said «модель ещё не обучена»); the heavy work still waits
     oc_load()
+    _OC_LOADED[0] = True
+    time.sleep(240)
     last_train = 0.0
     while True:
         heartbeat("oc_loop")
@@ -34875,42 +34894,58 @@ function ownSpark(curve) {   // v0.99.505 — full width, with its scale and a c
     <span class="dim" style="position:absolute;right:4px;top:28px;font-size:var(--fs-xs);">50%</span>
     <span class="dim" style="position:absolute;right:4px;bottom:2px;font-size:var(--fs-xs);">0%</span></div>`;
 }
-function ownHtml(d, ownZ) {
+function ownHtml(d, ownZ) {   // v0.99.615 — tiles and bars on top, the text under «подробнее»
   const o = d.own || {}, ex = d.own_exams || {};
-  const box = 'padding:8px 10px;margin-bottom:8px;background:var(--inset);border-radius:var(--r-sm);font-size:var(--fs-sm);';
-    const need = 15;
-  const learnPct = Math.min(100, Math.round(100 * (o.model ? 1 : (o.pos || 0) / need)));
-  const bar = (pct, col) => `<div style="height:8px;background:var(--card);border-radius:4px;overflow:hidden;margin:3px 0;"><div style="width:${pct}%;height:100%;background:${col};"></div></div>`;
+  const need = 15;
   const sgn = v => v == null ? '—' : (v > 0 ? '+' : '') + v + 'R';
+  const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  const dt = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
+  const tile = (l, v, n) => `<div class="ztile"><div class="zl">${l}</div><div class="zv">${v}</div>${n ? `<div class="zn">${n}</div>` : ''}</div>`;
+  const bar = (pct, col) => `<div style="height:6px;background:var(--card);border-radius:3px;overflow:hidden;margin-top:4px;"><div style="width:${pct}%;height:100%;background:${col};"></div></div>`;
+  const learnPct = Math.min(100, Math.round(100 * (o.model ? 1 : (o.pos || 0) / need)));
   const last = (ex.last || []).map(e => `<div>${e.hits === e.n ? '✅' : (e.hits ? '🟡' : '❌')} ${zdate(e.t)} · ${(e.symbol || '?').replace('_USDT', '')}${e.train ? ' 📚' : ''}: ${e.hits}/${e.n}${e.items.map(it => it.hit ? ` · ${it.side === 'long' ? 'лонг' : 'шорт'} №${it.rank}, ±${it.err_pct}%${it.before_h != null ? ', раньше поста на ' + it.before_h + ' ч' : ''}${it.cmp ? `, автор ${sgn(it.cmp.author)} / мы ${sgn(it.cmp.ours)}` : ''}` : '').join('')}</div>`).join('');
-  const scan = o.last_scan ? `последний скан ${zdate(o.last_scan.t)}: ${o.last_scan.coins} монет, новых зон ${o.last_scan.new}` : 'скан ещё не запускался';
+  const lastT = (ex.last || [])[0] ? ex.last[0].t : null;
+  const scan = o.last_scan ? `скан ${dt(o.last_scan.t)}: ${o.last_scan.coins} монет, новых зон ${o.last_scan.new}` : 'скан ещё не запускался';
+  const c = o.cmp;
+  const cmpBars = c && c.n && c.author && c.ours ? `<div class="zsub">На одних и тех же ${c.n} совпавших зонах, те же правила (нет входа = 0) — в среднем на зону:</div>
+    ${zBars([{label: '📌 автор', sub: `входов ${c.author.entries}, WR ${c.author.wr == null ? '—' : c.author.wr + '%'}`, v: c.author.avg_r},
+             {label: '🔎 мы', sub: `входов ${c.ours.entries}, WR ${c.ours.wr == null ? '—' : c.ours.wr + '%'}`, v: c.ours.avg_r, hi: true}], v => sgR(+v.toFixed(3)))}` : '';
   return `<div class="zcard" style="font-size:var(--fs-sm);">
-    <div class="zh">🔎 Наш поиск зон</div> ${o.scan_on ? '' : '<span class="loss">(выключен в настройках)</span>'}
-    <div class="dim" style="margin-top:2px;">Бот сам ищет зоны по свечам 40 монет и учится находить такие же, как у автора: перед каждым постом автора он смотрит, были ли зоны автора среди его лучших трёх кандидатов.</div>
-    <div style="margin-top:6px;">Обучение: ${o.model ? `<span class="win">модель обучена</span> на ${o.model.n} примерах (совпадений с пабликом ${o.model.pos})` : `набрано совпавших зон ${o.pos || 0} из ${need} — до этого правила по умолчанию`}</div>
-    ${bar(learnPct, 'var(--acc)')}<div class="dim" style="font-size:var(--fs-xs);margin-top:-2px;">↑ готовность модели (нужно ${need} совпавших зон, дальше она дообучается на каждом новом посте)</div>
-    <div>Совпадения с пабликом: <b>${o.recall == null ? '—' : o.recall + '%'}</b> (${o.hits || 0} из ${o.exams || 0} зон, наш топ-3)${o.err_median != null ? ` · разница уровней (медиана) ${o.err_median}%` : ''}${o.early ? ` · нашли раньше поста: ${o.early}` : ''}</div>
-    ${o.recall != null ? bar(o.recall, 'var(--pos)') + '<div class="dim" style="font-size:var(--fs-xs);margin-top:-2px;">↑ доля зон автора, которые бот нашёл сам до поста (честный экзамен: модель не видела этот пост)</div>' : ''}
-    ${ownSpark(ex.curve)}
-    ${(() => { const c = o.cmp; if (!c || !c.n || !c.author || !c.ours) return '<div>Результат на совпавших зонах: пока нет отработанных</div>';
-      const row = (nm, x) => `<div>${nm}: <b>${sgn(x.avg_r)}</b> в среднем, медиана ${sgn(x.med_r)} · ${x.avg_pct > 0 ? '+' : ''}${x.avg_pct}% движения · входов ${x.entries}, WR ${x.wr == null ? '—' : x.wr + '%'} · стоп от входа ~${x.stop_med == null ? '—' : x.stop_med + '%'} · лучшая ${sgn(x.best_r)}</div>`;
-      return `<div style="margin-top:4px;">Результат на одних и тех же ${c.n} совпавших зонах (те же правила; нет входа = 0):</div>${row('автор', c.author)}${row('мы', c.ours)}
-        <div class="dim" style="font-size:var(--fs-sm);">R зависит от ширины зоны: у более узкой зоны стоп ближе, поэтому тот же тейк даёт больше R — но и выбивает чаще. Меньше ~50 зон — разница может быть случайной.</div>`; })()}
-    <div>Наши зоны со сканера: активных ${o.own_active || 0} · отработало ${o.own_done || 0}${o.own_avg_r != null ? ` · средний ${sgn(o.own_avg_r)}, WR ${o.own_wr}%` : ''} · ${d.autotrade_own ? '<span class="win">реальные сделки вкл</span>' : 'только наблюдение'}</div>
-    <div class="dim">${scan} <button onclick="ownScanNow()" style="background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);">🔎 сканировать сейчас</button></div>
-    ${last ? `<details style="margin-top:4px;"><summary class="dim" style="cursor:pointer;">последние проверки по постам</summary>${last}</details>` : ''}
+    <div class="zh">🔎 Наш поиск зон ${o.scan_on ? `<span class="pill${d.autotrade_own ? ' pos' : ''}">${d.autotrade_own ? 'торгует' : 'наблюдение'}</span>` : '<span class="pill neg">выключен в настройках</span>'}</div>
+    <div class="dim">Бот сам ищет зоны по свечам и учится находить такие же, как у автора: перед каждым постом проверяет, были ли зоны автора среди трёх его лучших.</div>
+    <div class="ztiles z3" style="margin-top:8px;">
+      ${tile('обучение', o.model ? '<span class="win">готово</span>' : `${o.pos || 0}/${need}`, (o.model ? `на ${o.model.n} примерах` : 'совпавших зон') + bar(learnPct, 'var(--acc)'))}
+      ${tile('нашёл сам', o.recall == null ? '—' : o.recall + '%', `${o.hits || 0} из ${o.exams || 0} зон автора` + (o.recall != null ? bar(o.recall, 'var(--pos)') : ''))}
+      ${tile('наши зоны', o.own_active || 0, `активных · отработало ${o.own_done || 0}${o.own_avg_r != null ? `, ${sgR(o.own_avg_r)}` : ''}`)}
+    </div>
+    ${cmpBars}
+    <div class="zstrip"><span>последний пост проверен <b>${lastT ? dt(lastT) : '—'}</b></span><span>${scan}</span></div>
+    <button onclick="ownScanNow()" class="zbtn">🔎 сканировать сейчас</button>
+    <details><summary>подробнее: как растёт точность, последние проверки</summary>
+      ${ownSpark(ex.curve)}
+      <div class="zsub">Модель учится на каждом посте автора: до ${need} совпавших зон работают правила по умолчанию, дальше она дообучается сама. «Нашёл сам» — доля зон автора, которые бот нашёл до поста, на модели, не видевшей этот пост.${o.err_median != null ? ` Разница уровней с автором (медиана) ${o.err_median}%.` : ''}${o.early ? ` Нашёл раньше поста: ${o.early}.` : ''}</div>
+      ${c && c.n ? `<div class="zsub">R зависит от ширины зоны: у более узкой стоп ближе, поэтому тот же тейк даёт больше R — но и выбивает чаще. Меньше ~50 зон — разница может быть случайной.</div>` : ''}
+      ${last ? `<div class="zsub"><b>Последние проверки по постам</b> (📚 — пост из загруженной истории):</div>${last}` : ''}
+    </details>
     ${ownZ.length ? `<details style="margin-top:4px;"><summary class="dim" style="cursor:pointer;">наши зоны (${ownZ.length})</summary>${zonePostBlocks(ownZ)}</details>` : ''}
   </div>`;
 }
 // v0.99.506 — our zones learned on the result, next to the author-repeating finder
+// v0.99.615 — user: "поиск по результату вот так выглядит, можно улучшить?": the verdict, bars and
+// tiles on top; the long description, the model details and the tables under «подробнее»
 function ocHtml(d, ocZ) {   // v0.99.528 — v2: more features, trees, a 3-way honest exam, the author side by side
   const o = d.oc || {}, ev = o.eval, a = ((d.act || {}).oc) || {};
   const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
   const dd = t => t ? new Date(t * 1000).toLocaleDateString('ru-RU') : '—';
-  const row = (nm, x, note, pw) => x ? `<tr><td>${nm}${note ? `<div class="dim">${note}</div>` : ''}</td><td>${x.n}${pw && x.per_week != null ? `<div class="dim">${x.per_week}/нед</div>` : ''}</td><td>${x.wr == null ? '—' : x.wr + '%'}</td><td>${sgR(x.avg)}</td></tr>` : '';
-  let body = `<div class="dim">Бот сам ищет зоны по свечам ${ev && ev.coins ? ev.coins : 40} монет и учится отбирать те, от которых цена <b>реально отыгрывала</b> по правилам лесенки автора (лимитки, стоп 2.5% за зоной, тейк от средней). Ищет зоны, как автор, на трёх графиках — 1ч (20 дней), 4ч (80 дней) и дневном (год). Видит 23 признака: саму зону (касания, объём, ширина, расстояние, график) и рынок вокруг (тренд монеты и BTC, волатильность, движение за сутки, пробивалась ли зона). Учится и <b>на выборе автора</b>: похожа ли зона на те, что он рисует, совпадает ли с его свежей зоной, следит ли он за монетой — всего 26 признаков. Пробует три модели — прямую на 11 и на всех признаках и деревья решений — и берёт лучшую. Одна активная зона на монету и сторону. Цель — <b>превзойти автора</b> по результату на сделку. Сейчас только наблюдение: без ордеров и сообщений.</div>`;
-  if (a.running) body += `<div style="margin-top:6px;"><span class="zspin">🔄</span> <b>${a.stage || 'работаю'}</b>${a.total ? ` — ${a.done || 0} из ${a.total}` : ''}<div class="dim">первый раз после обновления — история собирается заново (новые признаки), на телефоне до часа; дальше раз в сутки дополняется</div></div>`;
-  else if (a.error) body += `<div class="loss" style="margin-top:6px;">ошибка: ${a.error}</div>`;
+  const dt = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
+  const tile = (l, v, n) => `<div class="ztile"><div class="zl">${l}</div><div class="zv">${v}</div>${n ? `<div class="zn">${n}</div>` : ''}</div>`;
+  const lt = o.last_try;
+  let body = `<div class="dim">Бот сам ищет зоны по свечам ${ev && ev.coins ? ev.coins : 40} монет и учится отбирать те, от которых цена реально отыгрывала по правилам лесенки автора. Цель — превзойти автора. Только наблюдение: без ордеров и сообщений.</div>`;
+  if (a.running) body += `<div style="margin-top:8px;"><span class="zspin">🔄</span> <b>${a.stage || 'работаю'}</b>${a.total ? ` — ${a.done || 0} из ${a.total}` : ''}<div class="dim">собираю историю и переобучаю — на телефоне до часа; дальше раз в сутки</div></div>`;
+  else if (a.error) body += `<div class="zbanner neg">Ошибка обучения: ${a.error}</div>`;
+  else if (o.loaded === false) body += `<div class="dim" style="margin-top:8px;">загружаю сохранённую модель…</div>`;
+  else if (!ev && lt && lt.why) body += `<div class="zbanner warn">Модели пока нет: ${lt.why}. <span class="dim">Попытка ${dt(lt.t)}.</span></div>`;
+  else if (!ev) body += `<div class="dim" style="margin-top:8px;">модель ещё не обучалась — обучение начнётся через ~4 минуты после запуска бота и займёт до часа</div>`;
   if (ev && ev.ver >= 2) {
     const at = ev.author_test || {};
     const beatBase = ev.test && ev.base_test && ev.test.avg != null && ev.base_test.avg != null ? ev.test.avg - ev.base_test.avg : null;
@@ -34919,34 +34954,42 @@ function ocHtml(d, ocZ) {   // v0.99.528 — v2: more features, trees, a 3-way h
     // the difference against its chance spread (1.65 = 95 % one-sided): "better" only when it is beyond luck
     const zAuth = canCmp && ev.test.sd != null && at.sd != null ? beatAuth / Math.sqrt(ev.test.sd ** 2 / ev.test.n + at.sd ** 2 / at.n || 1e-9) : null;
     const verdict = !canCmp ? null : (zAuth == null ? (beatAuth > 0 ? 'better' : 'worse') : (zAuth >= 1.65 ? 'better' : (zAuth <= -1.65 ? 'worse' : 'same')));
-    body += `<div class="zkv" style="margin-top:8px;"><div>история</div><div>${ev.samples} зон-кандидатов, ${dd(ev.first_t)} — ${dd(ev.last_t)}</div>
-      <div>выбрано</div><div><b>${ev.var_name}</b> · тейк <b>+${ev.tp}%</b> · беру лучшие ${Math.round(ev.q * 100)}% зон<div class="dim">выбор — по худшей из двух половин периода подбора: что сработало только в одной, не берётся</div></div>
-      <div>подстроено</div><div>${(ev.filters || []).length ? ev.filters.map(f => '<b>' + f.txt + '</b>').join(' · ') : 'фильтры не помогли на подборе — беру без них'}${ev.test_nofilt && (ev.filters || []).length ? `<div class="dim">на экзамене с фильтрами ${sgR(ev.test.avg)} (${ev.test.n}), без них ${sgR(ev.test_nofilt.avg)} (${ev.test_nofilt.n}) — помогла ли подстройка там, где не подбиралась</div>` : ''}</div></div>
-      <div class="zsub">Честно, по времени: модели учились до ${dd(ev.split_t)}, лучшая выбиралась на ${dd(ev.split_t)}—${dd(ev.test_t)}, экзамен — после ${dd(ev.test_t)}: на нём ничего не подбиралось. Стиль автора — только по его постам до ${dd(ev.split_t)}.${ev.auth_share != null ? ` На экзамене ${ev.auth_share}% выбранных зон совпали со свежей зоной автора.` : ''}</div>
-      <div class="zwrap"><table class="ztbl"><thead><tr><th>экзамен</th><th>сделок</th><th>WR</th><th>средний</th></tr></thead><tbody>
-      ${row('🧪 наш поиск', ev.test, 'выбранная модель', true)}${row('📌 автор канала', at.n ? at : null, 'его посты за те же недели, те же правила лесенки', true)}${row('без модели', ev.base_test, 'просто ближайшая зона')}</tbody></table></div>
-      ${canCmp ? `<div class="zbanner ${verdict === 'better' && ev.test.avg > 0 ? 'pos' : (ev.test.avg > 0 ? 'warn' : 'neg')}">${verdict === 'better' && ev.test.avg > 0 ? `🏆 На экзамене наш поиск лучше автора на ${beatAuth.toFixed(2)}R за сделку — и это больше случайного разброса.`
-          : verdict === 'same' ? `На уровне автора: разница ${beatAuth >= 0 ? '+' : ''}${beatAuth.toFixed(2)}R за сделку — в пределах случайности, превосходства пока нет.`
-          : ev.test.avg > 0 ? `В плюсе, но хуже автора на ${(-beatAuth).toFixed(2)}R за сделку.` : 'На экзамене в минусе — автора пока не превзошёл.'}${beatBase != null ? ` Против «просто ближайшей зоны»: ${beatBase >= 0 ? '+' : ''}${beatBase.toFixed(2)}R.` : ''}</div>`
-        : `<div class="zsub">Сравнить с автором пока нельзя: на неделях экзамена мало его отработанных постов (${at.n || 0}, нужно 10) или наших сделок.</div>`}
-      ${(ev.variants || []).length ? `<details><summary>все модели</summary><div class="zsub">каждая на своём лучшем тейке и пороге; «подбор» — где выбирали, «экзамен» — где не видели</div><div class="zwrap"><table class="ztbl"><thead><tr><th>модель</th><th>подбор</th><th>экзамен</th></tr></thead><tbody>${ev.variants.map(v => `<tr class="${v.var === ev.var ? 'zbest' : ''}"><td>${v.name}<div class="dim">тейк +${v.tp}% · лучшие ${Math.round(v.q * 100)}%</div></td><td>${sgR(v.val.avg)}<div class="dim">${v.val.n}</div></td><td>${sgR(v.test.avg)}<div class="dim">${v.test.n}</div></td></tr>`).join('')}</tbody></table></div></details>` : ''}`;
-  if ((o.hist || []).length) {   // v0.99.556 — is it getting better?
-    const h = o.hist.slice().reverse();
-    body += `<details><summary>история экзаменов (${o.hist.length})</summary><div class="zsub">каждое переобучение (раз в сутки): что выбрано и как сдан экзамен — так видно, улучшается ли поиск</div><div class="zwrap"><table class="ztbl"><thead><tr><th>дата</th><th>экзамен</th><th>автор</th></tr></thead><tbody>${h.map(x => `<tr><td>${dd(x.t)}${(x.sel_ver || 0) < 558 ? ' <span class="dim">(старый отбор)</span>' : ''}<div class="dim">тейк +${x.tp}% · лучшие ${Math.round(x.q * 100)}%${(x.filters || []).length ? ' · ' + x.filters.join(', ') : ''}</div></td><td>${sgR(x.test)}<div class="dim">${x.test_n || 0} · WR ${x.test_wr == null ? '—' : x.test_wr + '%'}${x.test_nofilt != null && (x.filters || []).length ? ' · без фильтров ' + (x.test_nofilt > 0 ? '+' : '') + x.test_nofilt + 'R' : ''}</div></td><td>${sgR(x.author)}</td></tr>`).join('')}</tbody></table></div></details>`;
+    body += canCmp ? `<div class="zbanner ${verdict === 'better' && ev.test.avg > 0 ? 'pos' : (ev.test.avg > 0 ? 'warn' : 'neg')}">${verdict === 'better' && ev.test.avg > 0 ? `🏆 На экзамене наш поиск лучше автора на ${beatAuth.toFixed(2)}R за сделку — и это больше случайного разброса.`
+        : verdict === 'same' ? `На уровне автора: разница ${beatAuth >= 0 ? '+' : ''}${beatAuth.toFixed(2)}R за сделку — в пределах случайности, превосходства пока нет.`
+        : ev.test.avg > 0 ? `В плюсе, но хуже автора на ${(-beatAuth).toFixed(2)}R за сделку.` : 'На экзамене в минусе — автора пока не превзошёл.'}</div>`
+      : `<div class="zbanner warn">Сравнить с автором пока нельзя: на неделях экзамена мало его отработанных постов (${at.n || 0}, нужно 10) или наших сделок.</div>`;
+    const sub = x => x ? `${x.n} сд.${x.wr == null ? '' : ' · WR ' + x.wr + '%'}${x.per_week != null ? ' · ' + x.per_week + '/нед' : ''}` : '';
+    body += `<div class="zsub">Экзамен — результат на сделку на последних неделях истории, на которых ничего не подбиралось (после ${dd(ev.test_t)}):</div>
+      ${zBars([{label: '🧪 наш поиск', sub: sub(ev.test), v: ev.test && ev.test.avg, hi: true},
+               {label: '📌 автор', sub: sub(at.n ? at : null) || 'мало постов', v: at.n ? at.avg : null},
+               {label: 'просто ближайшая зона', sub: sub(ev.base_test), v: ev.base_test && ev.base_test.avg}], v => sgR(+v.toFixed(3)))}
+      <div class="zstrip"><span>модель <b>${(ev.var_name || '').split(',')[0]}</b></span><span>тейк <b>+${ev.tp}%</b></span><span>берёт лучшие <b>${Math.round(ev.q * 100)}%</b> зон</span><span>обучена <b>${dd(ev.t)}</b></span></div>
+      ${lt && lt.why && lt.t > (ev.t || 0) ? `<div class="zsub">⚠️ Последнее переобучение ${dt(lt.t)} новой модели не дало (${lt.why}) — работает прежняя.</div>` : ''}
+      <details><summary>подробнее: что подстроено, все модели, история экзаменов</summary>
+      <div class="zkv" style="margin-top:8px;"><div>история</div><div>${ev.samples} зон-кандидатов, ${dd(ev.first_t)} — ${dd(ev.last_t)}</div>
+      <div>выбрано</div><div><b>${ev.var_name}</b><div class="dim">выбор — по худшей из двух половин периода подбора: что сработало только в одной, не берётся</div></div>
+      <div>подстроено</div><div>${(ev.filters || []).length ? ev.filters.map(f => '<b>' + f.txt + '</b>').join(' · ') : 'фильтры не помогли на подборе — беру без них'}${ev.test_nofilt && (ev.filters || []).length ? `<div class="dim">на экзамене с фильтрами ${sgR(ev.test.avg)} (${ev.test.n}), без них ${sgR(ev.test_nofilt.avg)} (${ev.test_nofilt.n})</div>` : ''}</div>
+      ${beatBase != null ? `<div>против ближайшей зоны</div><div>${beatBase >= 0 ? '+' : ''}${beatBase.toFixed(2)}R за сделку</div>` : ''}</div>
+      <div class="zsub">Честно, по времени: модели учились до ${dd(ev.split_t)}, лучшая выбиралась на ${dd(ev.split_t)}—${dd(ev.test_t)}, экзамен — после ${dd(ev.test_t)}. Стиль автора — только по его постам до ${dd(ev.split_t)}.${ev.auth_share != null ? ` На экзамене ${ev.auth_share}% выбранных зон совпали со свежей зоной автора.` : ''}</div>
+      ${(ev.variants || []).length ? `<div class="zsub"><b>Все модели</b> на экзамене (каждая на своём лучшем тейке и пороге):</div>${zBars(ev.variants.map(v => ({label: v.name.split(',')[0], sub: `тейк +${v.tp}% · лучшие ${Math.round(v.q * 100)}% · ${v.test.n} сд.`, v: v.test.avg, hi: v.var === ev.var})), v => sgR(+v.toFixed(3)))}` : ''}
+      ${(o.hist || []).length ? (() => { const h = o.hist.slice().reverse();   // v0.99.556 — is it getting better?
+        return `<div class="zsub"><b>История экзаменов</b> (${o.hist.length}) — каждое переобучение; так видно, улучшается ли поиск:</div><div class="zwrap"><table class="ztbl"><thead><tr><th>дата</th><th>экзамен</th><th>автор</th></tr></thead><tbody>${h.map(x => `<tr><td>${dd(x.t)}${(x.sel_ver || 0) < 558 ? ' <span class="dim">(старый отбор)</span>' : ''}<div class="dim">тейк +${x.tp}% · лучшие ${Math.round(x.q * 100)}%${(x.filters || []).length ? ' · ' + x.filters.join(', ') : ''}</div></td><td>${sgR(x.test)}<div class="dim">${x.test_n || 0} · WR ${x.test_wr == null ? '—' : x.test_wr + '%'}</div></td><td>${sgR(x.author)}</td></tr>`).join('')}</tbody></table></div>`; })() : ''}
+      </details>`;
   }
-  } else if (!a.running) body += `<div class="dim" style="margin-top:6px;">${ev ? 'новая версия поиска — история собирается заново, начнётся через несколько минут после запуска' : 'модель ещё не обучена — начнёт через несколько минут после запуска бота'}</div>`;
   const lv = o.live || {}, al = o.author_live || {};
-  body += `<div style="margin-top:8px;">Живые зоны: активных ${o.active || 0} · отработало ${lv.n || 0}${lv.n ? ` · средний ${sgR(lv.avg)}, WR ${lv.wr}%` : ''}${al.n ? ` · автор за те же недели: ${al.n} сделок, ${sgR(al.avg)}` : ''} · только наблюдение</div>`;
-  // v0.99.531 — what the live results are made of
-  if ((lv.rows || []).length) {
+  body += `<div class="zsub" style="margin-bottom:6px;"><b>Вживую</b> (зоны, найденные после обучения):</div><div class="ztiles z3">
+    ${tile('активных', o.active || 0, '')}
+    ${tile('отработало', lv.n || 0, lv.n ? `${sgR(lv.avg)} · WR ${lv.wr}%` : '')}
+    ${tile('автор', al.n ? sgR(al.avg) : '—', al.n ? `${al.n} сделок за те же недели` : 'за те же недели')}</div>`;
+  if ((lv.rows || []).length) {   // v0.99.531 — what the live results are made of
     const tfN = {1: '1ч', 4: '4ч', 24: '1д'}, resN = {WIN: 'тейк', LOSS: 'стоп', BE: 'бу', TIME_EXIT: 'время'};
     body += `<details><summary>из чего сложились живые итоги</summary><div class="zsub">последние ${lv.rows.length}: закрылись за ${lv.days || '?'} дн., лонгов ${lv.longs} из ${lv.rows.length}${lv.days && lv.days <= 3 && lv.rows.length >= 10 ? ' — почти все в одни дни: это одно движение рынка, а не много независимых сделок' : ''}</div>
       <div class="zwrap"><table class="ztbl"><thead><tr><th>монета</th><th>итог</th><th>налилось</th></tr></thead><tbody>${lv.rows.map(r => `<tr><td>${(r.symbol || '').replace('_USDT', '')} ${r.side === 'long' ? 'лонг' : 'шорт'} <span class="dim">${tfN[r.tf] || ''}</span><div class="dim">${dd(r.t)}${r.exit_t ? ' → ' + dd(r.exit_t) : ''}</div></td><td>${resN[r.res] || r.res || ''} ${sgR(r.r)}</td><td>${r.filled == null ? '—' : r.filled}</td></tr>`).join('')}</tbody></table></div></details>`;
   }
-  body += `
+  body += `<details><summary>как он работает</summary><div class="zsub">Ищет зоны, как автор, на трёх графиках — 1ч (20 дней), 4ч (80 дней) и дневном (год). Видит 23 признака: саму зону (касания, объём, ширина, расстояние, график) и рынок вокруг (тренд монеты и BTC, волатильность, движение за сутки, пробивалась ли зона). Учится и на выборе автора: похожа ли зона на те, что он рисует, совпадает ли с его свежей зоной, следит ли он за монетой — всего 26 признаков. Пробует три модели — прямую на 11 и на всех признаках и деревья решений — и берёт лучшую. Правила лесенки — как у автора: лимитки, стоп 2.5% за зоной, тейк от средней. Одна активная зона на монету и сторону. Переобучается раз в сутки.</div></details>
     <button onclick="zonesPost('/api/zones/oc/retrain', {}); setTimeout(refreshZones, 1500);" class="zbtn">↻ дополнить историю и переобучить</button>
     ${ocZ.length ? `<details style="margin-top:6px;"><summary class="dim" style="cursor:pointer;">зоны поиска по результату (${ocZ.length})</summary>${zonePostBlocks(ocZ)}</details>` : ''}`;
-  return `<div class="zcard" style="font-size:var(--fs-sm);"><div class="zh">🧪 Поиск по результату</div>${body}</div>`;
+  return `<div class="zcard" style="font-size:var(--fs-sm);"><div class="zh">🧪 Поиск по результату <span class="pill">наблюдение</span></div>${body}</div>`;
 }
 async function ownScanNow() {
   try { await fetch('/api/zones/own/scan', {method: 'POST'}); } catch (e) {}
