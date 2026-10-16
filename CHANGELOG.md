@@ -19847,3 +19847,9 @@ v0.99.620 - Strong zones: what to expect (the user: "бэктест, чтобы 
          no entry — an empty screen for days is normal (checked: the bot's scanner on history gives 0, 0, 0,
          0, then 25 at once). The live block shows the coins nearest the bar after a quiet scan.
          Script: tools/zones_model/zm_expect.py.
+v0.99.621 - «EMA — касания»: the far take (the user: "полноценная проверка разных тейков"). Stop 0.5 / 0.75 / 1
+         daily ATR × take 4 / 5 / 6 / 8 R × hold 1 / 3 / 7 days in the same walk-forward; chosen stop 0.75
+         daily ATR past the EMA, take 4R, out after 72 h, top 3%: 2022 +0.22R, 2023 +0.48R, 2024 +0.70R,
+         2025–26 (unseen) +0.39R at 6.8/wk (+239R, drawdown 38R) vs +0.15R (+127R, 52R) of the old rule; WR
+         ~50%. The coin auto-selection is off for it (too few trades per coin to judge). The hold is the
+         rule's and is kept per trade (the open 24 h trades finish as before); texts follow the rule.

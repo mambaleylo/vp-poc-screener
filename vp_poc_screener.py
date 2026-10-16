@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.620"
+APP_VERSION = "0.99.621"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -29942,7 +29942,7 @@ def zm_stats():
 # the price is watched every 30 s; the virtual record follows the 1h candles exactly as the research did.
 EMX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_ema_model.json")
 EMX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_ema_model.json"
-EMX_MODEL_VER = 2   # v0.99.619 — 2: + the per-coin tallies of the coin auto-selection
+EMX_MODEL_VER = 3   # v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
 EMX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_emx_state.json")
 EMX_TFS = ("4h", "1d", "1w", "1M")
 EMX_EMAS = {"4h": (20, 50, 100, 200), "1d": (7, 14, 21, 28, 50, 100, 200), "1w": (7, 14, 21, 28, 50, 100, 200),
@@ -30316,7 +30316,8 @@ def emx_fire(a, t_touch, live_px=None):
     direction = "LONG" if a["side"] > 0 else "SHORT"
     tr = {"id": f"emx_{a['symbol']}_{a['tf']}_{a['n']}_{a['hour']}", "symbol": a["symbol"], "tf": a["tf"], "n": a["n"], "side": a["side"],
           "direction": direction, "entry": a["lv"], "sl": a["sl"], "tp": a["tp"], "score": a["score"], "t_in": int(t_touch),
-          "hour": a["hour"], "until": int(a["hour"] + m.get("rule", {}).get("hold_h", 24) * 3600), "status": "OPEN", "result": None,
+          "hour": a["hour"], "until": int(a["hour"] + int(m.get("rule", {}).get("hold_h", 24)) * 3600), "hold": int(m.get("rule", {}).get("hold_h", 24)),
+          "status": "OPEN", "result": None,
           "r": None, "exit": None, "t_out": None, "real": False, "live_px": live_px, "sel": emx_coin_ok(a["symbol"])}
     if AUTOTRADE_ENABLED_EMW and live_px and tr["sel"]:
         try:
@@ -30335,7 +30336,7 @@ def emx_fire(a, t_touch, live_px=None):
     if TELEGRAM_ALERTS_EMW and tr["sel"]:
         pct = lambda p: (p - a["lv"]) / a["lv"] * 100
         send_telegram(f"{'🟢' if a['side'] > 0 else '🔴'} {a['symbol'].replace('_USDT', '')} {direction} · EMA {a['n']} ({EMX_TF_NAME[a['tf']]}) — касание\n"
-                      f"вход {a['lv']:.6g} · стоп {a['sl']:.6g} ({pct(a['sl']):+.1f}%) · тейк {a['tp']:.6g} ({pct(a['tp']):+.1f}%) · держать до 24 ч\n"
+                      f"вход {a['lv']:.6g} · стоп {a['sl']:.6g} ({pct(a['sl']):+.1f}%) · тейк {a['tp']:.6g} ({pct(a['tp']):+.1f}%) · держать до {int(m.get('rule', {}).get('hold_h', 24))} ч\n"
                       f"оценка модели {a['score']} · " + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"), category="emw")
 
 
@@ -30386,7 +30387,8 @@ def emx_settle(now=None):
             s, fill, sl, tp = t["side"], t["entry"], t["sl"], t["tp"]
             risk = abs(fill - sl) or 1e-12
             res = None
-            for k, c in enumerate(cs[:24]):
+            hold = int(t.get("hold") or 24)   # v0.99.621 — the rule's hold (72 h since the far take), kept per trade
+            for k, c in enumerate(cs[:hold]):
                 if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
                     gap = (c["open"] <= sl) if s > 0 else (c["open"] >= sl)
                     res = ("LOSS", c["open"] if (gap and k > 0) else sl, k)
@@ -30394,8 +30396,8 @@ def emx_settle(now=None):
                 if k > 0 and ((c["high"] >= tp) if s > 0 else (c["low"] <= tp)):
                     res = ("WIN", tp, k)
                     break
-            if not res and len(cs) >= 24:
-                res = ("TIME_EXIT", cs[23]["close"], 23)
+            if not res and len(cs) >= hold:
+                res = ("TIME_EXIT", cs[hold - 1]["close"], hold - 1)
             if not res:
                 continue
             kind, ex, k = res
@@ -34229,7 +34231,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">Работа (уровни каждый час + цена каждые 30 сек)</div>
-          <div class="sub">касания EMA 20–200 на 4ч / дне / неделе / месяце у 120 ликвидных монет; лучшие ~3% по модели, обученной на 6 годах истории — сигнал при касании: вход на EMA, стоп полдневного хода, тейк 2 риска, до 24 ч</div>
+          <div class="sub">касания EMA 20–200 на 4ч / дне / неделе / месяце у 120 ликвидных монет; лучшие ~3% по модели, обученной на 6 годах истории — сигнал при касании: вход на EMA, стоп 0.75 дневного хода, тейк 4 риска, до 3 дней</div>
         </div>
         <label class="switch"><input type="checkbox" id="setEmw"><span class="switchSlider"></span></label>
       </div>
@@ -34490,7 +34492,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow subRow"><!-- v0.99.618 — «EMA — касания» trades again -->
         <div>
           <div class="label">↳ EMA — касания</div>
-          <div class="sub">реальная сделка по рынку при касании уровня «на прицеле»: стоп полдневного хода за EMA, тейк 2 риска, закрытие через 24 ч. Риск — поле «EMA» (пусто — 0.5%, не общий %)</div>
+          <div class="sub">реальная сделка по рынку при касании уровня «на прицеле»: стоп 0.75 дневного хода за EMA, тейк 4 риска, закрытие через 3 дня. Риск — поле «EMA» (пусто — 0.5%, не общий %)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeEmw"><span class="switchSlider"></span></label>
       </div>
@@ -37470,7 +37472,7 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
     ${d.sel && d.sel.n_all > (d.n || 0) ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">выше — монеты в отборе; все монеты вместе: ${d.sel.n_all} сделок, ${sgR(d.sel.avg_all)} в среднем</div>` : ''}
     ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map(row).join('')}</div>` : ''}
     ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${zBars(d.last.map(t => ({label: `${coin(t.symbol)} ${t.side > 0 ? '↑' : '↓'}`, sub: `EMA ${t.n} ${tfN[t.tf]} · ${hm(t.t_in)}${t.sel === false ? ' · вне отбора' : ''}`, v: t.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}`);
-  h += `<details class="zcard"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Каждый час бот считает уровни EMA формирующихся свечей (их значение известно с открытия свечи и не меняется) и оценивает, каким было бы касание в этот час: график и EMA, разгон к уровню, EMA вокруг, RSI трёх графиков, тренд дня и недели, BTC, сила монеты, другие EMA рядом. Уровни с оценкой выше порога «на прицеле»: цена проверяется каждые 30 с, при касании — сигнал в Telegram${d.auto ? ' и сделка' : ''}. Считается только первое касание EMA за свечу. Учёт сделок — по часовым свечам, как в исследовании: стоп раньше тейка, в час входа тейк не считается, выход через 24 ч; комиссии и фандинг учтены.</div></details>`;
+  h += `<details class="zcard"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Каждый час бот считает уровни EMA формирующихся свечей (их значение известно с открытия свечи и не меняется) и оценивает, каким было бы касание в этот час: график и EMA, разгон к уровню, EMA вокруг, RSI трёх графиков, тренд дня и недели, BTC, сила монеты, другие EMA рядом. Уровни с оценкой выше порога «на прицеле»: цена проверяется каждые 30 с, при касании — сигнал в Telegram${d.auto ? ' и сделка' : ''}. Считается только первое касание EMA за свечу. Учёт сделок — по часовым свечам, как в исследовании: стоп раньше тейка, в час входа тейк не считается, выход через ${rule.hold_h || 24} ч; комиссии и фандинг учтены.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
 
