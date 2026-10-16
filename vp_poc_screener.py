@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.619"
+APP_VERSION = "0.99.620"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -29611,6 +29611,9 @@ AUTOTRADE_ENABLED_ZONES_ZM = os.environ.get("VP_AUTOTRADE_ZONES_ZM", "0") == "1"
 TELEGRAM_ALERTS_ZONES_ZM = os.environ.get("VP_TG_ZONES_ZM", "1") == "1"
 ZM_TOP = int(os.environ.get("VP_ZONES_ZM_TOP", "120"))   # coins scanned (by 24h volume), like the research's 127
 ZM_SCAN_SEC = 3600
+# v0.99.620 — what to expect (user: «бэктест, чтобы понять чего ожидать»): the walk-forward trades (q 0.95, cap 12)
+# month by month by exit, 2025–26 (models trained only on the years before); tools/zones_model/zm_expect.py
+ZM_EXPECT = json.loads('{"months":[["2025-01",27,-8.1],["2025-02",17,13.5],["2025-03",29,-8.6],["2025-04",31,22.9],["2025-05",27,-11.8],["2025-06",20,-5.1],["2025-07",38,2.7],["2025-08",25,-9.6],["2025-09",24,-10.6],["2025-10",17,-9.3],["2025-11",4,-3.2],["2025-12",19,-4.2],["2026-01",32,56.0],["2026-02",8,1.1],["2026-03",39,-11.2],["2026-04",48,7.9],["2026-05",31,21.5],["2026-06",18,14.4],["2026-07",32,-4.0],["2026-08",76,30.5],["2026-09",20,14.1]],"all_months":57,"pos_months":28,"worst":-13.9,"best":56.0,"max_gap_d":25,"zone_days_share":0.34}')
 ZM_RISK_DEFAULT = 0.5   # % per strong zone when its own field is empty — never the common risk (ladders at once)
 ZM_SIDE_CAP = int(os.environ.get("VP_ZONES_ZM_SIDE_CAP", "12"))   # active strong zones per side: one market move takes them all
 _ZM = {"model": None, "err": None, "last_scan": None, "loaded_t": None}
@@ -29824,7 +29827,7 @@ def zm_scan_once():
     btc = _oc_btc_series(bh1)
     bv = btc["v"][-1] if btc and btc["v"] else 0.0
     bh1 = bh1[-480:]
-    made, seen, found = 0, 0, []
+    made, seen, found, near = 0, 0, [], []
     for sym in _own_top_syms(ZM_TOP):
         try:
             cs = _own_candles(sym, now)
@@ -29845,6 +29848,7 @@ def zm_scan_once():
             vec = dict(zip(list(_OWN_FEATS) + list(_OC_CTX_FEATS), x))
             vec.update(zm_cand_feats(c, cs, d1, sf, cands))
             sc = zm_score(m, [float(vec.get(k, 0.0)) for k in m["feats"]])
+            near.append((sc, sym, c["side"]))
             if sc >= m["thr"] and (c["side"] not in best or sc > best[c["side"]][0]):
                 best[c["side"]] = (sc, c)
         found += [(sc, sym, c, sf["datr"]) for sc, c in best.values()]
@@ -29865,8 +29869,15 @@ def zm_scan_once():
         with _zones_lock:
             ZONES["zones"].insert(0, z)
         made += 1
+    top, used = [], set()   # v0.99.620 — the coins nearest the bar (the scan is alive on a quiet day too)
+    for sc, sym, side in sorted(near, key=lambda x: -x[0]):
+        if (sym, side) not in used and sc > 0 and m["thr"] > 0:
+            used.add((sym, side))
+            top.append({"symbol": sym, "side": side, "pct": round(100 * sc / m["thr"])})
+        if len(top) >= 6:
+            break
     with _zm_lock:
-        _ZM["last_scan"] = {"t": int(now), "coins": seen, "new": made}
+        _ZM["last_scan"] = {"t": int(now), "coins": seen, "new": made, "near": top}
     if made:
         zones_save()
     return made
@@ -29907,7 +29918,7 @@ def zm_stats():
         last, err = _ZM.get("last_scan"), _ZM.get("err")
     return {"on": ZM_ENABLED, "auto": AUTOTRADE_ENABLED_ZONES_ZM, "tg": TELEGRAM_ALERTS_ZONES_ZM, "top": ZM_TOP,
             "model": {k: m.get(k) for k in ("ver", "lab", "q", "thr", "trained_to", "rule", "research")} if m else None,
-            "err": err, "last_scan": last,
+            "err": err, "last_scan": last, "expect": ZM_EXPECT,
             "active": sum(1 for z in zs if z.get("status") in ("watch", "in_trade")),
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None,
             "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
@@ -36677,9 +36688,17 @@ function _zmHtml(d, zmZ) {
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b> на сделку</span><span><b>~${wk == null ? '—' : wk.toFixed(1)}</b> сделок в неделю</span><span>держится <b>~${days == null ? '—' : days.toFixed(1)}</b> дн.</span><span>худшая просадка <b>${dd}R</b></span></div>
       <div class="zbanner warn">Сделок много одновременно, и один обвал рынка выбивает их пачкой: просадка на истории доходила до ${dd}R. Поэтому риск на сильную зону свой и маленький — по умолчанию 0.5% (при нём просадка ~${Math.round(dd * 0.5)}% счёта).</div>
       <div class="zsub">Правило сделки: лимитки на оба края зоны, стоп — <b>${m.rule.buf_datr} дневной ход</b> монеты за дальним краем, тейк — <b>${m.rule.tp_r} риска</b> от средней цены входа, зона ждёт 14 дней. WR низкий по замыслу: тейк втрое дальше стопа.</div>`;
+    const ex = o.expect;
+    if (ex && ex.months) {   // v0.99.620 — what to expect, month by month
+      const mn = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+      body += `<details><summary><b>📅 Чего ожидать — по месяцам 2025–26</b></summary>
+        ${zBars(ex.months.slice().reverse().map(x => ({label: mn[+x[0].slice(5) - 1] + ' ' + x[0].slice(2, 4), sub: `${x[1]} сделок`, v: x[2]})), v => sgR(+(+v).toFixed(1)))}
+        <div class="zsub">Прибыль неровная: за ${ex.all_months} месяцев проверки в плюсе ${ex.pos_months}, худший месяц ${sgR(ex.worst)}, лучший ${sgR(ex.best)} — итог делают несколько сильных месяцев. Новые зоны приходят пачками, когда рынок резко двигается (до 13 за день), и только в ~${Math.round(ex.zone_days_share * 100)}% дней; бывает до ${ex.max_gap_d} дней без новых входов. Пустой экран днями — нормально.</div></details>`;
+    }
   }
   const lv = o;
   body += `<div class="zsub" style="margin-bottom:6px;"><b>Вживую</b>${o.last_scan ? ` · скан ${dt(o.last_scan.t)}: ${o.last_scan.coins} монет, новых ${o.last_scan.new}` : ''}:</div>
+    ${o.last_scan && (o.last_scan.near || []).length && !o.last_scan.new ? `<div class="dim" style="font-size:var(--fs-xs);margin-bottom:6px;">ближе всех к порогу (100% — зона берётся): ${o.last_scan.near.map(x => `<b>${(x.symbol || '').replace('_USDT', '')}</b> ${x.side === 'long' ? '↑' : '↓'} ${x.pct}%`).join(' · ')}</div>` : ''}
     <div class="ztiles z3">${tile('активных', o.active || 0, '')}${tile('отработало', o.n || 0, o.n ? `${sgR(o.avg)} · WR ${o.wr}%` : (o.per_week != null ? `~${o.per_week} зон в неделю` : ''))}${tile('итого', o.n ? sgR(o.sum) : '—', o.auto ? 'реальные сделки' : 'виртуально')}</div>
     ${act.length ? `<div style="margin-top:8px;">${zonePostBlocks(act)}</div>` : '<div class="dim" style="margin-top:6px;">активных сильных зон сейчас нет — модель ждёт хорошую</div>'}
     ${(o.last || []).length ? `<details><summary>последние итоги (${o.last.length})</summary>${zBars(o.last.map(r => ({label: (r.symbol || '').replace('_USDT', '') + ' ' + (r.side === 'long' ? 'лонг' : 'шорт'), sub: new Date(r.t * 1000).toLocaleDateString('ru-RU'), v: r.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}

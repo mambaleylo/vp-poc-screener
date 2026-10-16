@@ -19840,3 +19840,10 @@ v0.99.619 - Neuro rebuilt (the user: "добавить ещё как можно 
          walk-forward 2025–26 +0.29R with drawdown 12R vs +0.15R / 52R for all coins; 79 of 127 coins pass,
          the rest stay virtual and join when their record is good. The EMA watchdog no longer reports a hang
          while the hourly levels are counted (it beats per coin; limit 60 min). Scripts: tools/neuro_model.
+v0.99.620 - Strong zones: what to expect (the user: "бэктест, чтобы понять чего ожидать, или экран пустой так
+         и останется"). The walk-forward trades month by month for 2025–26 (models trained only on the years
+         before), shown as bars under «📅 Чего ожидать»: 28 of 57 months positive, worst -13.9R, best +56R,
+         new zones come in bursts on sharp market moves (up to 13 a day) on ~34% of days, up to 25 days with
+         no entry — an empty screen for days is normal (checked: the bot's scanner on history gives 0, 0, 0,
+         0, then 25 at once). The live block shows the coins nearest the bar after a quiet scan.
+         Script: tools/zones_model/zm_expect.py.
