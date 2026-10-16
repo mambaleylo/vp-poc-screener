@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.617"
+APP_VERSION = "0.99.618"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7520,7 +7520,7 @@ LOOP_MAX_GAP_SEC = {
     "scan_loop": 30 * 60,
     "snr_live_loop": 60 * 60,
     "prv_live_loop": 60 * 60,
-    "emw_live_loop": 15 * 60, "emw_backtest_loop": 60 * 60,   # v0.99.570
+    "emx_loop": 15 * 60,   # v0.99.618 — «EMA — касания» (the W/M loops no longer run)
     "battery_watch_loop": 30 * 60,   # v0.99.582
     "neuro_live_loop": 60 * 60,
     "reconcile_loop": 30 * 60,
@@ -7541,7 +7541,7 @@ LOOP_LABELS = {
     "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
     "snr_backtest_loop": "S/R бэктест", "prv_backtest_loop": "Peak Reversal бэктест",
     "neuro_mining_loop": "Neuro майнинг",
-    "emw_live_loop": "EMA W/M живой скан", "emw_backtest_loop": "EMA W/M обучение",   # v0.99.570
+    "emx_loop": "EMA — касания",   # v0.99.618
     "battery_watch_loop": "батарея телефона",   # v0.99.582
 }
 BACKTEST_RETRY_AFTER_ERROR_SEC = int(os.environ.get("VP_BACKTEST_RETRY_AFTER_ERROR_SEC", 1800))  # v0.99.322 — failed backtest cycles retry in 30 min, not a full refresh interval later
@@ -29918,6 +29918,515 @@ def zm_stats():
                       "res": z["result"].get("result")} for z in fin[:20]]}
 
 
+# ---- v0.99.618 «EMA — касания»: user — "такую же работу глобальную по индикатору EMA: полную аналитику, все
+# свечи, все EMA, тейки — на выходе рабочий индикатор с сигналами минимум несколько в неделю". Researched off
+# the phone on Binance 1h history of 127 coins, 2020–2026: every first touch of EMA n on the 4h (20/50/100/200),
+# daily, weekly and monthly (7/14/21/28/50/100/200) chart in a candle's period — 1.16 million touches, both
+# sides, the limit sitting at the EMA from the period's open; each replayed with 112 stop / take / hold rules.
+# A touch by itself is a coin flip (shorts win in bear years, longs in bull ones); a model of 39 features (the
+# chart and the EMA, the move into it, the EMAs around, RSI of three charts, the daily / weekly trend, BTC,
+# the coin vs BTC, other EMAs near the level) picks the touches. Judged walk-forward (trained on the years
+# before): stop 0.5 daily ATR past the EMA, take 2R, out after 24 h, the top 3% of the scores, at most 12
+# at once per side — 2022 +0.19R x 5/wk, 2023 +0.33R x 15/wk, 2024 +0.34R x 14/wk, 2025–26 (never seen while
+# choosing) +0.15R x 9/wk. The phone: every hour each coin's EMA levels of the forming candles, the touch scored
+# as if it came this hour (all the features are known at the hour's start), the levels above the bar armed;
+# the price is watched every 30 s; the virtual record follows the 1h candles exactly as the research did.
+EMX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_ema_model.json")
+EMX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_ema_model.json"
+EMX_MODEL_VER = 1
+EMX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_emx_state.json")
+EMX_TFS = ("4h", "1d", "1w", "1M")
+EMX_EMAS = {"4h": (20, 50, 100, 200), "1d": (7, 14, 21, 28, 50, 100, 200), "1w": (7, 14, 21, 28, 50, 100, 200),
+            "1M": (7, 14, 21, 28, 50, 100, 200)}
+EMX_TF_I = {"4h": 0, "1d": 1, "1w": 2, "1M": 3}
+EMX_TF_NAME = {"4h": "4ч", "1d": "день", "1w": "неделя", "1M": "месяц"}
+EMX_TOP = int(os.environ.get("VP_EMX_TOP", "120"))
+EMX_RISK_DEFAULT = 0.5      # % when the EMA module's own risk field is empty — never the common risk (many at once)
+EMX_FEE, EMX_FUND = 0.001, 0.0003
+EMX_POLL_SEC = 30
+_EMX = {"model": None, "err": None, "armed": [], "armed_at": None, "trades": [], "loaded": False, "scan": None}
+_emx_lock = threading.Lock()
+
+
+def emx_atr_series(bars, n=14):
+    tr = [bars[0]["high"] - bars[0]["low"]] + [max(bars[i]["high"] - bars[i]["low"], abs(bars[i]["high"] - bars[i - 1]["close"]),
+                                                   abs(bars[i]["low"] - bars[i - 1]["close"])) for i in range(1, len(bars))] if bars else []
+    out = [None] * len(bars)
+    s = 0.0
+    for i, v in enumerate(tr):
+        s += v
+        if i >= n:
+            s -= tr[i - n]
+        if i >= n - 1:
+            out[i] = s / n
+    return out
+
+
+def emx_rsi_series(closes, n=14):
+    out = [None] * len(closes)
+    if len(closes) <= n:
+        return out
+    g = l = 0.0
+    for i in range(1, n + 1):
+        d = closes[i] - closes[i - 1]
+        g += max(d, 0.0)
+        l += max(-d, 0.0)
+    g /= n
+    l /= n
+    out[n] = 100.0 if l == 0 else 100 - 100 / (1 + g / l)
+    for i in range(n + 1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        g = (g * (n - 1) + max(d, 0.0)) / n
+        l = (l * (n - 1) + max(-d, 0.0)) / n
+        out[i] = 100.0 if l == 0 else 100 - 100 / (1 + g / l)
+    return out
+
+
+def emx_period_end(tf, ps):
+    return ps + {"4h": 4 * 3600, "1d": 86400}[tf] if tf in ("4h", "1d") else emw_next_period(ps, tf)
+
+
+def emx_series(h1, h4, d1):
+    """the TF candles (closed, oldest first) with their EMAs, ATR, RSI — the research's series()"""
+    B = {"4h": h4, "1d": d1, "1w": emw_bars(d1, "1w"), "1M": emw_bars(d1, "1M")}
+    S = {}
+    for tf in EMX_TFS:
+        bs = B[tf]
+        C = [b["close"] for b in bs]
+        S[tf] = {"bars": bs, "t": [b["time"] for b in bs], "end": [emx_period_end(tf, b["time"]) for b in bs], "C": C,
+                 "ema": {n: emw_ema(C, n) for n in EMX_EMAS[tf]}, "atr": emx_atr_series(bs, 14), "rsi": emx_rsi_series(C, 14)}
+    dC = S["1d"]["C"]
+    S["1d"]["ema_ctx"] = {50: emw_ema(dC, 50), 200: emw_ema(dC, 200)}
+    S["1w"]["ema_ctx"] = {21: emw_ema(S["1w"]["C"], 21)}
+    S["h1_rsi"] = emx_rsi_series([c["close"] for c in h1], 14)
+    return S
+
+
+def _emx_last_closed(S, tf, t):
+    return bisect.bisect_right(S[tf]["end"], t) - 1
+
+
+def _emx_ret(C, j, k):
+    return (C[j - 1] / C[j - 1 - k] - 1) * 100 if j - 1 - k >= 0 and C[j - 1 - k] > 0 else 0.0
+
+
+def _emx_round_near(lv):
+    if lv <= 0:
+        return 0.0
+    lo, hi = lv * 0.997, lv * 1.003
+    k = math.floor(math.log10(lv))
+    for scale, w in ((10 ** k, 1.0), (10 ** k / 2, 0.7), (10 ** k / 10, 0.4)):
+        q = math.ceil(lo / scale) * scale
+        if q <= hi:
+            return w
+    return 0.0
+
+
+def emx_features(S, h1, t_hour, tf, n, b, side, lv, bt, ps):
+    """the research's features(): everything known at the start of the hour t_hour (h1 = the closed 1h candles
+    before it, TF candles < b, the period's hours since ps); bt = BTC's {"cs", "t", "S"}"""
+    T = S[tf]
+    j = len(h1)
+    Ch = [c["close"] for c in h1]
+    px = Ch[j - 1]
+    kd = _emx_last_closed(S, "1d", t_hour)
+    dS = S["1d"]
+    if kd < 20 or dS["atr"][kd] is None:
+        return None
+    datr = dS["atr"][kd] / dS["C"][kd] * 100
+    if datr < 0.1:
+        return None
+    dpx = datr / 100 * px
+    A = T["atr"][b - 1]
+    if not A or A <= 0 or dpx <= 0:
+        return None
+    k0 = bisect.bisect_left([c["time"] for c in h1], ps)
+    lows = [x["low"] for x in T["bars"][max(0, b - 3):b]] + [h1[i]["low"] for i in range(k0, j)]
+    highs = [x["high"] for x in T["bars"][max(0, b - 3):b]] + [h1[i]["high"] for i in range(k0, j)]
+    ext = min(lows) if side < 0 else max(highs)
+    f = {"tf": float(EMX_TF_I[tf]), "n": math.log(n), "side": float(side)}
+    f["rise3"] = abs(lv - ext) / A
+    f["rise3_d"] = abs(lv - ext) / dpx
+    op = h1[k0]["open"] if k0 < j else px
+    f["rise_live"] = abs(lv - op) / A
+    vals = [T["ema"][m][b - 1] for m in EMX_EMAS[tf] if T["ema"][m][b - 1] is not None]
+    pc = T["C"][b - 1]
+    f["n_emas"] = float(len(vals))
+    f["beyond"] = float(sum(1 for v in vals if (v > pc if side < 0 else v < pc)))
+    f["beyond_sh"] = f["beyond"] / len(vals) if vals else 0.0
+    e = T["ema"][n]
+    f["slope"] = (-side) * (e[b - 1] - e[b - 4]) / A if b >= 4 and e[b - 4] is not None else 0.0
+    f["dist_prev"] = side * (pc - lv) / A
+    since = 0
+    for k in range(b - 1, max(-1, b - 201), -1):
+        if e[k] is None:
+            break
+        if (T["C"][k] > e[k]) if side < 0 else (T["C"][k] < e[k]):
+            break
+        since += 1
+    f["since"] = math.log1p(since)
+    f["touches20"] = float(sum(1 for k in range(max(0, b - 20), b) if e[k] is not None and T["bars"][k]["low"] <= e[k] <= T["bars"][k]["high"]))
+    r = T["rsi"][b - 1]
+    f["s_rsi_tf"] = ((r if r is not None else 50.0) - 50) * (-side)
+    rd = dS["rsi"][kd]
+    f["s_rsi_d"] = ((rd if rd is not None else 50.0) - 50) * (-side)
+    rh = S["h1_rsi"][j - 1]
+    f["s_rsi_h"] = ((rh if rh is not None else 50.0) - 50) * (-side)
+    for m in (50, 200):
+        ev = dS["ema_ctx"][m][kd]
+        f[f"s_d_ema{m}"] = side * (px - ev) / dpx if ev else 0.0
+    kw = _emx_last_closed(S, "1w", t_hour)
+    ew = S["1w"]["ema_ctx"][21][kw] if kw >= 0 else None
+    f["s_w_ema21"] = side * (px / ew - 1) * 100 if ew else 0.0
+    for nm, k in (("r24", 24), ("r72", 72), ("r7d", 168)):
+        f["s_" + nm] = side * _emx_ret(Ch, j, k)
+    bj = bisect.bisect_left(bt["t"], t_hour)
+    bC = [c["close"] for c in bt["cs"][max(0, bj - 200):bj]]
+    f["s_b24"] = side * _emx_ret(bC, len(bC), 24) if len(bC) > 25 else 0.0
+    f["s_b7d"] = side * _emx_ret(bC, len(bC), 168) if len(bC) > 169 else 0.0
+    bkd = _emx_last_closed(bt["S"], "1d", t_hour)
+    be = bt["S"]["1d"]["ema_ctx"][50][bkd] if bkd >= 0 else None
+    f["s_b_ema50"] = side * (bt["S"]["1d"]["C"][bkd] / be - 1) * 100 if be else 0.0
+    f["s_rs7"] = f["s_r7d"] - f["s_b7d"]
+    dd = dS["bars"]
+    for m in (30, 90, 365):
+        seg = dd[max(0, kd - m + 1):kd + 1]
+        hh, ll = max(x["high"] for x in seg), min(x["low"] for x in seg)
+        pos = (px - ll) / (hh - ll) if hh > ll else 0.5
+        f[f"s_pos{m}"] = pos if side > 0 else 1 - pos
+    f["datr"] = datr
+    f["atr_tf"] = A / px * 100
+    Vh = [c.get("volume") or 0 for c in h1]
+    v24 = sum(Vh[max(0, j - 24):j])
+    v20 = sum(Vh[max(0, j - 480):j]) / 20 if j > 24 else 0
+    f["vol24"] = math.log((v24 + 1e-9) / (v20 + 1e-9)) if v20 > 0 else 0.0
+    conf, near = 0, 99.0
+    for tf2 in EMX_TFS:
+        k2 = _emx_last_closed(S, tf2, t_hour) if tf2 != tf else b - 1
+        if k2 < 0:
+            continue
+        for m in EMX_EMAS[tf2]:
+            if tf2 == tf and m == n:
+                continue
+            v = S[tf2]["ema"][m][k2]
+            if v is None:
+                continue
+            dz = abs(v - lv) / dpx
+            near = min(near, dz)
+            conf += dz <= 0.3
+    f["conf"] = float(conf)
+    f["near"] = min(near, 20.0)
+    f["prog"] = (t_hour - ps) / (emx_period_end(tf, ps) - ps)
+    f["round"] = _emx_round_near(lv)
+    return {k: round(float(v), 5) for k, v in f.items()}
+
+
+def emx_model():
+    with _emx_lock:
+        m = _EMX["model"]
+    if m and m.get("ver") == EMX_MODEL_VER:
+        return m
+    m = None
+    try:
+        if os.path.exists(EMX_MODEL_FILE):
+            with open(EMX_MODEL_FILE) as f:
+                m = json.load(f)
+            if m.get("ver") != EMX_MODEL_VER:
+                m = None
+    except Exception as e:
+        log_error(f"ema model read: {e}")
+        m = None
+    if not m:
+        try:
+            r = requests.get(EMX_MODEL_URL.format(ref="main"), params={"nocache": int(time.time())}, timeout=60)
+            r.raise_for_status()
+            m = r.json()
+            if m.get("ver") != EMX_MODEL_VER or not m.get("models"):
+                raise RuntimeError(f"версия модели {m.get('ver')} вместо {EMX_MODEL_VER}")
+            tmp = EMX_MODEL_FILE + ".new"
+            with open(tmp, "w") as f:
+                json.dump(m, f, separators=(",", ":"))
+            os.replace(tmp, EMX_MODEL_FILE)
+        except Exception as e:
+            with _emx_lock:
+                _EMX["err"] = f"модель не скачалась: {e}"
+            log_error(f"ema model download: {e}")
+            return None
+    with _emx_lock:
+        _EMX.update({"model": m, "err": None})
+    return m
+
+
+def emx_load():
+    try:
+        if os.path.exists(EMX_STATE_FILE):
+            with open(EMX_STATE_FILE) as f:
+                d = json.load(f)
+            with _emx_lock:
+                _EMX["trades"] = d.get("trades") or []
+                _EMX["armed"] = d.get("armed") or []
+                _EMX["armed_at"] = d.get("armed_at")
+    except Exception as e:
+        log_error(f"ema state load: {e}")
+    _EMX["loaded"] = True
+
+
+def emx_save():
+    try:
+        with _emx_lock:
+            data = json.dumps({"trades": _EMX["trades"][-600:], "armed": _EMX["armed"], "armed_at": _EMX["armed_at"]})
+        tmp = EMX_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(data)
+        os.replace(tmp, EMX_STATE_FILE)
+    except Exception as e:
+        log_error(f"ema state save: {e}")
+
+
+def _emx_coin(sym, now):
+    h1 = _zm_closed(sym, "1h", 3600, 1000, now)
+    h4 = _zm_closed(sym, "4h", 4 * 3600, 1000, now)
+    d1 = _zm_closed(sym, "1d", 86400, 3000, now)
+    return h1, h4, d1
+
+
+def emx_levels(sym, h1, h4, d1, t_hour, m, bt):
+    """the forming candles' EMA levels of one coin at the start of the hour t_hour, scored; the ones above the bar"""
+    if len(h1) < 200 or len(d1) < 30:
+        return []
+    S = emx_series(h1, h4, d1)
+    px = h1[-1]["close"]
+    kd = len(S["1d"]["bars"]) - 1
+    datr = S["1d"]["atr"][kd] / S["1d"]["C"][kd] * 100 if S["1d"]["atr"][kd] else 0
+    if datr < 0.1:
+        return []
+    out = []
+    for tf in EMX_TFS:
+        T = S[tf]
+        if tf in ("4h", "1d"):
+            b = len(T["bars"])
+            ps = T["end"][-1] if b else None
+        else:
+            ps = emw_period_start(t_hour, tf)
+            b = sum(1 for x in T["t"] if x < ps)
+        if not ps or b < 2 or ps > t_hour:
+            continue
+        k0 = bisect.bisect_left([c["time"] for c in h1], ps)
+        op = h1[k0]["open"] if k0 < len(h1) else px
+        for n in EMX_EMAS[tf]:
+            lv = T["ema"][n][b - 1] if b - 1 < len(T["ema"][n]) else None
+            if lv is None or op == lv:
+                continue
+            side = 1 if op > lv else -1
+            if any((c["low"] <= lv) if side > 0 else (c["high"] >= lv) for c in h1[k0:]):
+                continue   # touched earlier in this candle: only the first touch counts
+            if abs(px - lv) / px * 100 > 1.5 * datr:
+                continue   # out of reach this hour
+            f = emx_features(S, h1, t_hour, tf, n, b, side, lv, bt, ps)
+            if not f:
+                continue
+            x = [float(f.get(k, 0.0)) for k in m["feats"]]
+            sc = sum(zm_tree_pred(t_, x) for t_ in m["models"]) / len(m["models"])
+            if sc >= m["thr"]:
+                risk = lv * m["rule"]["stop_datr"] * f["datr"] / 100
+                out.append({"symbol": sym, "tf": tf, "n": n, "side": side, "lv": lv, "score": round(sc, 3), "datr": f["datr"],
+                            "sl": lv - side * risk, "tp": lv + side * m["rule"]["take_r"] * risk, "hour": t_hour, "px": px,
+                            "dist": round((lv - px) / px * 100, 2)})
+    return out
+
+
+def emx_arm():
+    """at the start of an hour: the armed levels of the hour for the liquid coins"""
+    m = emx_model()
+    if not m:
+        return
+    now = time.time()
+    t_hour = int(now // 3600 * 3600)
+    bh1 = _zm_closed("BTC_USDT", "1h", 3600, 1000, now)
+    bh4 = _zm_closed("BTC_USDT", "4h", 4 * 3600, 1000, now)
+    bd1 = _zm_closed("BTC_USDT", "1d", 86400, 3000, now)
+    bt = {"cs": bh1, "t": [c["time"] for c in bh1], "S": emx_series(bh1, bh4, bd1)}
+    armed, coins = [], 0
+    for sym in _own_top_syms(EMX_TOP):
+        try:
+            h1, h4, d1 = _emx_coin(sym, now)
+            armed += emx_levels(sym, h1, h4, d1, t_hour, m, bt)
+            coins += 1
+        except Exception as e:
+            log_error(f"ema levels {sym}: {e}")
+    armed.sort(key=lambda a: -a["score"])
+    with _emx_lock:
+        _EMX["armed"], _EMX["armed_at"] = armed, t_hour
+        _EMX["scan"] = {"t": int(now), "coins": coins, "armed": len(armed)}
+    emx_save()
+
+
+def _emx_can_open(sym, side):
+    m = _EMX.get("model") or {}
+    with _emx_lock:
+        opn = [t for t in _EMX["trades"] if t["status"] == "OPEN"]
+    if any(t["symbol"] == sym and t["side"] == side for t in opn):
+        return False
+    return sum(1 for t in opn if t["side"] == side) < int(m.get("side_cap") or 12)
+
+
+def emx_fire(a, t_touch, live_px=None):
+    """a touch of an armed level: the signal (and the real order when the switch is on)"""
+    if not _emx_can_open(a["symbol"], a["side"]):
+        return
+    m = _EMX.get("model") or {}
+    direction = "LONG" if a["side"] > 0 else "SHORT"
+    tr = {"id": f"emx_{a['symbol']}_{a['tf']}_{a['n']}_{a['hour']}", "symbol": a["symbol"], "tf": a["tf"], "n": a["n"], "side": a["side"],
+          "direction": direction, "entry": a["lv"], "sl": a["sl"], "tp": a["tp"], "score": a["score"], "t_in": int(t_touch),
+          "hour": a["hour"], "until": int(a["hour"] + m.get("rule", {}).get("hold_h", 24) * 3600), "status": "OPEN", "result": None,
+          "r": None, "exit": None, "t_out": None, "real": False, "live_px": live_px}
+    if AUTOTRADE_ENABLED_EMW and live_px:
+        try:
+            risk = MODULE_RISK_PCT.get("emw") or EMX_RISK_DEFAULT
+            res = execute_autotrade("emw", a["symbol"], direction, live_px, a["sl"], a["tp"], extra={"ema": f"{a['tf']} {a['n']}"},
+                                    risk_pct_override=risk)
+            tr["real"] = (res or {}).get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+            tr["autotrade"] = {"status": (res or {}).get("status"), "detail": str((res or {}).get("detail") or "")[:200]}
+        except Exception as e:
+            log_error(f"ema autotrade {a['symbol']}: {e}")
+    with _emx_lock:
+        if any(t["id"] == tr["id"] for t in _EMX["trades"]):
+            return
+        _EMX["trades"].append(tr)
+    emx_save()
+    if TELEGRAM_ALERTS_EMW:
+        pct = lambda p: (p - a["lv"]) / a["lv"] * 100
+        send_telegram(f"{'🟢' if a['side'] > 0 else '🔴'} {a['symbol'].replace('_USDT', '')} {direction} · EMA {a['n']} ({EMX_TF_NAME[a['tf']]}) — касание\n"
+                      f"вход {a['lv']:.6g} · стоп {a['sl']:.6g} ({pct(a['sl']):+.1f}%) · тейк {a['tp']:.6g} ({pct(a['tp']):+.1f}%) · держать до 24 ч\n"
+                      f"оценка модели {a['score']} · " + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"), category="emw")
+
+
+def emx_watch_tick():
+    """every 30 s: the armed levels of this hour against the price"""
+    with _emx_lock:
+        armed, hour = list(_EMX["armed"]), _EMX["armed_at"]
+    now = time.time()
+    if not armed or hour is None or now >= hour + 3600:
+        return
+    px = {}
+    for t in get_tickers() or []:
+        try:
+            px[t["contract"]] = float(t.get("last") or 0)
+        except (TypeError, ValueError):
+            pass
+    for a in armed:
+        p = px.get(a["symbol"])
+        if p and ((p <= a["lv"]) if a["side"] > 0 else (p >= a["lv"])):
+            emx_fire(a, now, p)
+
+
+def emx_settle(now=None):
+    """after each hour: armed levels touched by the 1h candle but not caught live (the record must match the
+    research) and the open trades walked on the 1h candles — stop first, no take in the entry hour, out at 24 h"""
+    now = now or time.time()
+    with _emx_lock:
+        armed, hour = list(_EMX["armed"]), _EMX["armed_at"]
+    if armed and hour is not None and now >= hour + 3600:
+        for a in armed:
+            try:
+                cs = [c for c in (get_candles_range(a["symbol"], "1h", hour, hour) or []) if c["time"] == hour]
+                if cs and ((cs[0]["low"] <= a["lv"]) if a["side"] > 0 else (cs[0]["high"] >= a["lv"])):
+                    emx_fire(a, hour)
+            except Exception as e:
+                log_error(f"ema settle {a['symbol']}: {e}")
+        with _emx_lock:
+            if _EMX["armed_at"] == hour:
+                _EMX["armed"] = []
+    with _emx_lock:
+        opn = [t for t in _EMX["trades"] if t["status"] == "OPEN"]
+    changed = False
+    for t in opn:
+        try:
+            cs = [c for c in (get_candles_range(t["symbol"], "1h", t["hour"], int(now)) or []) if c["time"] + 3600 <= now and c["time"] >= t["hour"]]
+            if not cs:
+                continue
+            s, fill, sl, tp = t["side"], t["entry"], t["sl"], t["tp"]
+            risk = abs(fill - sl) or 1e-12
+            res = None
+            for k, c in enumerate(cs[:24]):
+                if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
+                    gap = (c["open"] <= sl) if s > 0 else (c["open"] >= sl)
+                    res = ("LOSS", c["open"] if (gap and k > 0) else sl, k)
+                    break
+                if k > 0 and ((c["high"] >= tp) if s > 0 else (c["low"] <= tp)):
+                    res = ("WIN", tp, k)
+                    break
+            if not res and len(cs) >= 24:
+                res = ("TIME_EXIT", cs[23]["close"], 23)
+            if not res:
+                continue
+            kind, ex, k = res
+            r = s * (ex - fill) / risk - (EMX_FEE + EMX_FUND * (k + 1) / 24) * fill / risk
+            if kind == "TIME_EXIT" and t.get("real") and AUTOTRADE_ENABLED_EMW:
+                log_error(f"ema time exit {t['symbol']}: {close_position_for_mode('emw', t['symbol'], t['direction'])}")
+            with _emx_lock:
+                t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + 3600), "r": round(r, 3)})
+            changed = True
+            notify_trade_result("emw", t["symbol"], t["direction"], fill, ex, kind, round(r, 3), real=bool(t.get("real")),
+                                note=f"EMA {t['n']} ({EMX_TF_NAME[t['tf']]})")
+        except Exception as e:
+            log_error(f"ema trade {t.get('symbol')}: {e}")
+    if changed:
+        emx_save()
+
+
+def emx_loop():
+    time.sleep(90)
+    emx_load()
+    last_hour = None
+    while True:
+        heartbeat("emx_loop")
+        try:
+            if EMW_ENABLED:
+                now = time.time()
+                h = int(now // 3600 * 3600)
+                if h != last_hour and now - h >= 20:   # a new hour: settle the past one, arm this one
+                    emx_settle(now)
+                    emx_arm()
+                    last_hour = h
+                with live_http():
+                    emx_watch_tick()
+        except Exception as e:
+            log_error(f"emx_loop: {e}")
+            with _emx_lock:
+                _EMX["err"] = str(e)[:200]
+        time.sleep(EMX_POLL_SEC)
+
+
+def emx_stats():
+    m = _EMX.get("model") or {}
+    with _emx_lock:
+        trades = list(_EMX["trades"])
+        armed = list(_EMX["armed"])
+        scan, err = _EMX.get("scan"), _EMX.get("err")
+    fin = [t for t in trades if t["status"] == "CLOSED" and t.get("r") is not None]
+    rs = [t["r"] for t in fin]
+    t0 = min((t["t_in"] for t in trades), default=None)
+    weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
+    return {"on": EMW_ENABLED, "auto": AUTOTRADE_ENABLED_EMW, "tg": TELEGRAM_ALERTS_EMW,
+            "risk": MODULE_RISK_PCT.get("emw") or EMX_RISK_DEFAULT,
+            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap")} if m else None,
+            "err": err, "scan": scan, "armed": armed[:40], "armed_n": len(armed),
+            "open": [t for t in trades if t["status"] == "OPEN"][-30:],
+            "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
+            "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
+            "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "n", "t_in", "r", "result", "real")} for t in sorted(fin, key=lambda t: -t["t_in"])[:30]]}
+
+
+@app.route("/api/emx/status")
+def api_emx_status():
+    try:
+        return jsonify(emx_stats())
+    except Exception as e:
+        log_error(f"emx status: {e}")
+        return jsonify({"err": f"статистика не посчиталась: {e}"})
+
+
 @app.route("/api/zones/oc/retrain", methods=["POST"])
 def api_oc_retrain():
     def run():
@@ -32804,7 +33313,7 @@ INDEX_HTML = """<!doctype html>
 </header>
 <div class="tabs">
   <div class="tab active" data-tab="prv" style="color:var(--prv);">Peak Reversal</div>
-  <div class="tab" data-tab="emw" style="color:#7fd1ff;">📐 EMA W/M</div>
+  <div class="tab" data-tab="emw" style="color:#7fd1ff;">📐 EMA</div>
   <div class="tab" data-tab="zones" style="color:#4caf50;">🎯 Зоны</div>
   <div class="tab" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
   <div class="tab" data-tab="signals">Volume</div>
@@ -32987,11 +33496,11 @@ INDEX_HTML = """<!doctype html>
         <label class="switch"><input type="checkbox" id="setSnrSingleBest"><span class="switchSlider"></span></label>
       </div>
     </div></details>
-    <details class="settingsGroup" style="--mod-color:#7fd1ff;"><summary class="settingsGroupTitle">📐 EMA W/M (неделя / месяц)</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:#7fd1ff;"><summary class="settingsGroupTitle">📐 EMA — касания</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
-          <div class="label">Работа (обучение + живой скан)</div>
-          <div class="sub">только шорт: цена под EMA 7/14/28/50/100 недели (месяца) резко растёт к ним снизу — вход на касании живой свечи (цена проверяется каждые 30 сек); стоп, тейк и срок — выучены на истории всех монет и проверены на train/test</div>
+          <div class="label">Работа (уровни каждый час + цена каждые 30 сек)</div>
+          <div class="sub">касания EMA 20–200 на 4ч / дне / неделе / месяце у 120 ликвидных монет; лучшие ~3% по модели, обученной на 6 годах истории — сигнал при касании: вход на EMA, стоп полдневного хода, тейк 2 риска, до 24 ч</div>
         </div>
         <label class="switch"><input type="checkbox" id="setEmw"><span class="switchSlider"></span></label>
       </div>
@@ -33209,7 +33718,7 @@ INDEX_HTML = """<!doctype html>
           <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro" title="Neuro" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSnr" min="0.1" max="100" step="0.5" placeholder="S/R" title="S/R Zones" style="display:none;width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R" title="Peak Reversal" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctEmw" min="0.1" max="100" step="0.5" placeholder="EMA" title="EMA W/M" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctEmw" min="0.1" max="100" step="0.5" placeholder="EMA 0.5" title="EMA — касания: пусто — 0.5% (не общий %)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctZones" min="0.1" max="100" step="0.5" placeholder="Зоны" title="Зоны" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctZm" min="0.1" max="100" step="0.1" placeholder="🎯 0.5" title="🎯 Сильные зоны: пусто — 0.5% (не общий %!)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
         </div>
@@ -33249,10 +33758,10 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradePrv"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow" style="display:none;"><!-- v0.99.595 — EMA W/M only alerts now -->
+      <div class="settingRow subRow"><!-- v0.99.618 — «EMA — касания» trades again -->
         <div>
-          <div class="label">↳ EMA W/M</div>
-          <div class="sub">только подтверждённые EMA; стоп и тейк — по дневному ATR, срок удержания (2 / 7 / 28 дн.) — из обучения; риск — свой «EMA» или общий</div>
+          <div class="label">↳ EMA — касания</div>
+          <div class="sub">реальная сделка по рынку при касании уровня «на прицеле»: стоп полдневного хода за EMA, тейк 2 риска, закрытие через 24 ч. Риск — поле «EMA» (пусто — 0.5%, не общий %)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeEmw"><span class="switchSlider"></span></label>
       </div>
@@ -36131,79 +36640,50 @@ async function emwLoadTrades(det, key) {
   });
   box.innerHTML = rows.length ? rows.join('') : '<div class="dim">нет сделок</div>';
 }
-async function refreshEmw() {
+async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the model, the yearly check, the armed levels, the trades
   const panel = document.getElementById('emwPanel');
   let d;
-  try { d = await (await fetch('/api/emw/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
-  const cfg = d.config || {};
-  const m = d.model;
-  const tfName = tf => tf === '1M' ? 'месяц' : 'неделя';
+  try { d = await (await fetch('/api/emx/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
+  const card = (title, body) => `<div class="zcard"><div class="zh">${title}</div>${body}</div>`;
+  const tile = (l, v, n) => `<div class="ztile"><div class="zl">${l}</div><div class="zv">${v}</div>${n ? `<div class="zn">${n}</div>` : ''}</div>`;
   const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
-  const pctOf = (atr, ap) => atr == null || ap == null ? '' : ` <span class="dim">(~${(atr * ap).toFixed(1)}%)</span>`;
-  let h = `<details class="dim hint-block" style="margin-bottom:10px;"><summary style="cursor:pointer;"><b>📐 EMA W/M</b> — уведомление: цена снизу резко дошла до EMA недели / месяца на живой свече · как работает</summary>Бот не торгует сам — присылает уведомление при касании, решение за тобой. EMA текущей свечи совпадает с ценой ровно тогда, когда цена доходит до EMA закрытых свечей, поэтому уровень всей недели / месяца известен с её открытия и не перерисовывается. Цена проверяется каждые ${cfg.poll_sec || 30} сек; за ${cfg.prealert_pct}% до уровня приходит напоминание.
-    <br>Шаблон (только шорт): последняя закрытая свеча закрылась под всеми EMA 7/14/28/50/100 или всеми, кроме двух; новая свеча открылась под уровнем; к EMA была накачка ≥ ${cfg.rise_min || 1.5} средней свечи этого графика (ATR недели / месяца) — от минимума живой свечи или последних свечей.
-    <br>Статистика — все такие касания на истории всех монет (вход на EMA): какой откат и как часто был за 7 дней, как далеко выносило за вход перед откатом, и какие стоп / тейк чаще всего отрабатывали (тейк — откат, который давали ${(cfg.take_q || []).join(' / ')}% касаний, стоп — за выносом, дальше которого не заходили ${(cfg.stop_q || []).join(' / ')}% откатов, держать ${(cfg.hold || []).join(' / ')} дн.; комиссии и фандинг ${cfg.funding_pct_day}%/день учтены). Это описание прошлого, без проверки на новых данных. Пересчёт раз в ${Math.round((cfg.refresh_sec || 86400) / 3600)} ч.</details>`;
-  if (d.enabled === false) h += '<div style="padding:10px 12px;margin-bottom:8px;background:var(--neg-bg);border:1px solid var(--neg);border-radius:var(--r-sm);font-size:var(--fs-sm);">⏸ <b>«EMA W/M» выключен в настройках</b> — статистика и живой скан не идут.</div>';
-  if (d.backtest_running) {
-    const pct = d.progress_total ? Math.round(d.progress_done / d.progress_total * 100) : 0;
-    h += `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:4px;">пересчёт статистики: ${d.progress_done}/${d.progress_total}${coresTxt(d.calc)}</div>
-      <div style="height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-bottom:10px;"><div style="height:100%;width:${pct}%;background:#7fd1ff;"></div></div>`;
-  } else if (d.waiting_for_slot) h += '<div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">⏳ ждёт свободного слота бэктеста</div>';
-  else h += `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">статистика посчитана: ${d.last_backtest_finished ? fmtDateTime(d.last_backtest_finished) : 'ещё нет — первый пересчёт через ~15 мин после запуска'}</div>`;
-  const lv = d.levels || {};
-  h += `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">живой скан: ${lv.at ? `уровни ${lv.levels} на ${lv.coins} монетах (пересчёт ${fmtDateTime(lv.at)})` : 'уровни ещё считаются'}${d.prices_at ? ` · цена ${fmtDateTime(d.prices_at)}` : ''}</div>`;
-  h += `<div style="display:flex;gap:6px;margin-bottom:10px;"><button onclick="emwPost('/api/emw/restart_backtest')" class="zbtn">↻ Пересчитать статистику</button>
-    <button onclick="emwPost('/api/reset/emw', 'Очистить статистику и уведомления «EMA W/M»?')" class="zbtn" style="color:var(--neg);">🗑 Очистить</button></div>`;
-  if (m) h += `<div style="padding:10px 12px;margin-bottom:10px;border-radius:var(--r-sm);font-size:var(--fs-sm);border:1px solid var(--line);background:var(--inset);">🔔 Уведомления при каждом касании по шаблону — бот не входит сам. Статистика: ${m.coins} монет, ${(m.setups || []).reduce((a, s_) => a + ((s_.hist || {}).n || 0), 0)} касаний по шаблону.</div>`;
-  // live: the forming candles' levels near the price
-  const w = d.watch || [];
-  _emwWatch = w;
-  h += `<div class="secTitle">Сейчас у EMA — живая свеча · ${w.length}</div><div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">нажми на строку — откроется график: свечи недели / месяца с EMA 7/14/28 и 4ч-свечи у уровня</div>`;
-  h += w.length ? w.map((r, i) => {
-    const dirTxt = r.dir === 'LONG' ? '<span class="dirb long">LONG</span>' : '<span class="dirb short">SHORT</span>';
-    const near = r.dist_pct <= 0 ? '<b class="win">у уровня</b>' : `до уровня <b>${r.dist_pct}%</b>`;
-    const hist = r.hist ? ` · эта монета: ${r.hist[0]} сделок, ${r.hist[1]} в плюс, ${sgR(r.hist[2])}` : '';
-    return `<div onclick="emwChartWatch(${i})" style="cursor:pointer;padding:8px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);${r.confirmed ? '' : 'opacity:.75;'}">
-      <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;"><span><b>${r.symbol.replace('_USDT', '')}</b> ${dirTxt} EMA ${r.ema} · ${tfName(r.tf)}</span>
-        <span class="dim" style="white-space:nowrap;">${r.confirmed ? '📊 есть статистика' : 'мало истории'} · 📈</span></div>
-      <div>${near} · вход ≈ ${fmtNum(r.trigger)} (EMA ${fmtNum(r.level)}) · цена ${fmtNum(r.price)}${r.touched ? ' · <span class="dim">в этой свече уже касалась</span>' : ''}</div>
-      <div class="dim">${r.rise_mode === 'swing' ? 'рост от минимума последних свечей' : 'свеча выросла от'} ${fmtNum(r.ext)} (${r.ext_pct > 0 ? '+' : ''}${r.ext_pct}% от входа) · ${r.rise} ATR${r.need_rise != null ? ` (нужно ≥ ${r.need_rise})` : ''} · под ${r.n_def - r.miss} из ${r.n_def} EMA${r.sl != null ? ` · SL ${fmtNum(r.sl)} · TP ${fmtNum(r.tp)}` : (r.wick_mode ? ' · вход по реакции (4ч закрылась обратно под уровнем)' : '')}${hist} · свеча до ${fmtDateTime(r.bar_end)}</div>
-    </div>`;
-  }).join('') : `<div class="dim" style="font-size:var(--fs-sm);">рядом с уровнями (в пределах ${cfg.watch_pct}%) сейчас никого</div>`;
-  h += '<div style="height:10px;"></div>' + prvHonestHtml(d.honest);
-  const sigs = d.signals || [];
-  _emwSigs = sigs;
-  if (sigs.length) h += sigListHtml(sigs.map((sg, i) => sigItemHtml(sg, {onclick: `emwChartSig(${i})`, extra: [sg.desc || '', sg.level ? `EMA ${fmtNum(sg.level)}` : '', sg.ext ? `рост от ${fmtNum(sg.ext)}${sg.rise != null ? ` (${sg.rise} ATR)` : ''}` : '',
-    sg.coin_hist ? `монета: ${sg.coin_hist[0]} сд., ${sg.coin_hist[1]} в плюс` : '', sg.leverage ? `плечо ${sg.leverage_planned ? '~' : ''}${sg.leverage}x` : '']})));
-  // v0.99.595 — what the pattern's touches did, per EMA (descriptive, the whole history)
-  if (m && m.setups) {
-    h += `<div class="secTitle" style="margin-top:10px;">Статистика по истории — все монеты вместе</div>
-      <div class="dim" style="font-size:var(--fs-xs);margin-bottom:6px;">все касания по шаблону, вход на EMA. В дневных ATR (в скобках — примерно в % цены).</div>`;
-    for (const tf of ['1w', '1M']) {
-      const rows = m.setups.filter(s => s.tf === tf);
-      if (!rows.length) continue;
-      h += `<div style="font-weight:700;margin:8px 0 2px;">${tf === '1w' ? 'Неделя' : 'Месяц'}</div>`;
-      const setupHtml = s => {
-        const L = s.learn || {}, b = s.best, H = s.hist || {};
-        const pc = v => pctOf(v, L.atr_pct);
-        const head = `<b>EMA ${s.ema}</b> <span class="dirb short">SHORT</span> <span class="dim">· касаний по шаблону ${H.n || 0}${L.coins ? ` (${L.coins} монет)` : ''}</span>`;
-        if (!b) return `<div style="padding:8px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);"><div>${head}</div><div class="dim">мало истории (нужно ≥ ${m.min_train} касаний) — уведомления всё равно приходят, без статистики</div></div>`;
-        const pb = (H.pb || []).map(x => `≥ <b>${x[1]} ATR</b> <span class="dim">(~${x[2]}%)</span> у ${Math.round(x[0] * 100)}%`).join(' · ');
-        const os = (H.os || []).map(x => `до <b>${x[1]} ATR</b> <span class="dim">(~${x[2]}%)</span> у ${Math.round(x[0] * 100)}%`).join(' · ');
-        const a = b.all || {};
-        const grid = (s.grid || []).map(g => `<tr><td>−${g.tk}${pc(g.tk)}</td><td>+${g.sl}${pc(g.sl)}</td><td>${g.hold} дн.</td><td>${g.all.wr}%</td><td>${sgR(g.all.avg)}</td><td class="dim">${g.all.n}</td></tr>`).join('');
-        return `<div style="padding:8px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);"><div>${head}</div>
-          ${pb ? `<div>откат за 7 дн.: ${pb}${H.pb_hours != null ? ` <span class="dim">· обычно за ~${H.pb_hours} ч</span>` : ''}</div>` : ''}
-          ${os ? `<div>вынос за вход перед откатом: ${os}</div>` : ''}
-          ${s.often && (s.often.tk !== b.tk || s.often.sl !== b.sl || s.often.hold !== b.hold) ? `<div style="margin-top:3px;">чаще всего срабатывало: тейк <b>−${s.often.tk} ATR</b>${pc(s.often.tk)} · стоп <b>+${s.often.sl} ATR</b>${pc(s.often.sl)} · до ${s.often.hold} дн. — <b>${s.often.all.wr}%</b> в плюс, в среднем ${sgR(s.often.all.avg)} <span class="dim">(${s.often.all.n} сделок)</span></div>` : ''}
-          <div style="margin-top:3px;">выгоднее всего было: тейк <b>−${b.tk} ATR</b>${pc(b.tk)} · стоп <b>+${b.sl} ATR</b>${pc(b.sl)} · до ${b.hold} дн. — <b>${a.wr}%</b> в плюс, в среднем ${sgR(a.avg)} <span class="dim">(${a.n} сделок${b.hours != null ? `, тейк обычно за ~${b.hours < 48 ? b.hours + ' ч' : Math.round(b.hours / 24) + ' дн.'}` : ''})</span></div>
-          <details><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">другие стоп / тейк</summary><div style="overflow-x:auto;"><table style="font-size:var(--fs-sm);white-space:nowrap;"><thead><tr><th>тейк</th><th>стоп</th><th>держать</th><th>в плюс</th><th>средний</th><th>сделок</th></tr></thead><tbody>${grid}</tbody></table></div></details>
-          <details ontoggle="emwLoadTrades(this, '${s.key}')"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">сделки на истории</summary><div class="btTradesBox"></div></details></div>`;
-      };
-      h += rows.map(setupHtml).join('');
-    }
+  const tfN = {'4h': '4ч', '1d': 'день', '1w': 'неделя', '1M': 'месяц'};
+  const coin = s => (s || '').replace('_USDT', '');
+  const hm = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
+  const m = d.model, rs = (m && m.research) || {}, rule = (m && m.rule) || {};
+  const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
+  let h = '';
+  // 1. what it is and how it did on the years it never saw
+  let top = `<div class="dim">Касания EMA 20–200 на 4ч, дне, неделе и месяце у 120 ликвидных монет. Модель, обученная на 6 годах истории 127 монет (1.16 млн касаний), берёт ~${m && m.q ? Math.round((1 - m.q) * 100) : 3}% лучших.</div>`;
+  if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
+  else {
+    const ys = rs.years || {};
+    const all = Object.values(ys).filter(x => x && x.n);
+    const n = all.reduce((a, x) => a + x.n, 0), avg = n ? all.reduce((a, x) => a + x.avg * x.n, 0) / n : null;
+    const wk = all.length ? all.reduce((a, x) => a + x.wk, 0) / all.length : null, dd = Math.max(0, ...all.map(x => x.dd || 0));
+    top += `<div class="zsub">Проверка на истории — каждый год модель не видела. Результат на сделку:</div>
+      ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
+      <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>сделка до <b>${Math.round((rule.hold_h || 24))} ч</b></span><span>просадка до <b>${dd}R</b></span></div>
+      <div class="zsub">Вход — на EMA, стоп — <b>${rule.stop_datr} дневного хода</b> монеты за EMA, тейк — <b>${rule.take_r} риска</b>. Не больше ${m.side_cap || 12} сделок в одну сторону.</div>
+      ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «EMA» в настройках риска (пусто = ${d.risk}%). Сделок много одновременно: просадка на истории до ${dd}R — держите риск маленьким.</div>`}`;
   }
-  setPanelHtml(panel, h);
+  h += card(`📐 EMA — касания ${pill}`, top);
+  // 2. armed now
+  const ar = d.armed || [];
+  const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;">
+      <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑ лонг' : '↓ шорт'}</span> <span class="dim">EMA ${a.n} · ${tfN[a.tf]} · ${a.dist > 0 ? '+' : ''}${a.dist}%</span></span>`;
+  h += card(`🎯 На прицеле в этот час · ${d.armed_n || 0}`, ar.length ? `<div>${ar.slice(0, 12).map(chip).join('')}</div>${ar.length > 12 ? `<div class="dim" style="font-size:var(--fs-xs);">и ещё ${ar.length - 12}</div>` : ''}<div class="dim" style="font-size:var(--fs-xs);">коснётся цена EMA до конца часа — придёт сигнал${d.auto ? ' и откроется сделка' : ''}; процент — до уровня от цены</div>`
+    : `<div class="dim" style="font-size:var(--fs-sm);">сейчас подходящих уровней нет — пересчёт каждый час${d.scan ? ` (последний ${hm(d.scan.t)}, ${d.scan.coins} монет)` : ''}</div>`);
+  // 3. the trades
+  const op = d.open || [];
+  const row = t => `<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);">
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">EMA ${t.n} · ${tfN[t.tf]}${t.real ? ' · 💰' : ''}</span></span>
+      <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry)} · до ${hm(t.until)}</span></div>`;
+  h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
+    ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map(row).join('')}</div>` : ''}
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${zBars(d.last.map(t => ({label: `${coin(t.symbol)} ${t.side > 0 ? '↑' : '↓'}`, sub: `EMA ${t.n} ${tfN[t.tf]} · ${hm(t.t_in)}`, v: t.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}`);
+  h += `<details class="zcard"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Каждый час бот считает уровни EMA формирующихся свечей (их значение известно с открытия свечи и не меняется) и оценивает, каким было бы касание в этот час: график и EMA, разгон к уровню, EMA вокруг, RSI трёх графиков, тренд дня и недели, BTC, сила монеты, другие EMA рядом. Уровни с оценкой выше порога «на прицеле»: цена проверяется каждые 30 с, при касании — сигнал в Telegram${d.auto ? ' и сделка' : ''}. Считается только первое касание EMA за свечу. Учёт сделок — по часовым свечам, как в исследовании: стоп раньше тейка, в час входа тейк не считается, выход через 24 ч; комиссии и фандинг учтены.</div></details>`;
+  setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
 
 function prvHonestHtml(h) {   // v0.99.546 — the honest live check
@@ -39016,8 +39496,8 @@ if __name__ == "__main__":
     threading.Thread(target=prv_backtest_loop, daemon=True).start()
     threading.Thread(target=prv_live_loop, daemon=True).start()
     threading.Thread(target=entry_retry_loop, daemon=True).start()   # v0.99.566
-    threading.Thread(target=emw_backtest_loop, daemon=True).start()   # v0.99.570
-    threading.Thread(target=emw_live_loop, daemon=True).start()
+    # v0.99.618 — the old W/M touch alerts and their statistics are replaced by «EMA — касания» (emx_loop)
+    threading.Thread(target=emx_loop, daemon=True).start()
     threading.Thread(target=battery_watch_loop, daemon=True).start()   # v0.99.582
     zones_load()   # v0.99.438
     zones_fix_dup_pids()   # v0.99.549

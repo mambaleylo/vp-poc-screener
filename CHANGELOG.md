@@ -19808,3 +19808,16 @@ v0.99.616 - Zones: «🎯 Сильные зоны» — a zone model trained off
 v0.99.617 - Zones: the «🎯 Сильные зоны» card moved to the top of «Сейчас», right under the summary (it was
          at the very bottom, under the author's zones and the closed trades — the user did not see it). A
          card or a stats error now shows as a line in the card instead of taking the whole tab down.
+v0.99.618 - EMA tab: «EMA — касания» replaces the W/M touch alerts. The user asked for the same global work
+         as for the zones: all candles, all EMAs, takes — a working indicator with at least several signals a
+         week. Research on 6 years of Binance 1h history of 127 coins: every first touch of EMA 20–200 on the
+         4h, daily, weekly and monthly chart (1.16 million touches, both sides, entry at the EMA), 112 stop /
+         take / hold rules. A touch alone has no edge (it follows the market's direction); a model of 39
+         features picks them. Walk-forward, rule stop 0.5 daily ATR past the EMA / take 2R / out after 24 h,
+         top 3%, at most 12 per side: 2022 +0.19R 5/wk, 2023 +0.33R 15/wk, 2024 +0.34R 14/wk, 2025–26
+         (unseen) +0.15R 9/wk; checked with fills only 0.1% past the EMA too. The bot arms the forming
+         candles' EMA levels every hour (the score is known at the hour's start), watches the price every
+         30 s, signals in Telegram, trades with the EMA switch (risk: the EMA field, 0.5% when empty), and
+         keeps the virtual record on the 1h candles exactly as the research (checked: 47/48 levels and
+         75/75 trades equal). The tab redesigned: the yearly check, the armed levels as chips, the trades as
+         tiles; no long lists. The research scripts are in tools/ema_model.
