@@ -19791,3 +19791,17 @@ v0.99.615 - Zones: the "search by result" model is read from disk at once after 
          redesigned per the user's request: tiles (learning, found by itself, live zones), bars for
          ours vs the author's result and for the exam (ours / the author / the nearest zone), the
          time the last post was checked, and the long description and tables under «подробнее».
+v0.99.616 - Zones: «🎯 Сильные зоны» — a zone model trained off the phone on 6 years of Binance 1h history
+         of 127 coins (~1 million candidate zones from the bot's own finder, each replayed as a ladder).
+         The user asked for a real, powerful mechanism with better returns and then for 7–10 trades a
+         week. Research: the current rules have no edge (~0R); a blind or confirmed entry at a zone is a
+         coin flip minus fees; the edge is in choosing the zone (52 features: the zone, its freshness, the
+         daily trend, RSI, the coin vs BTC, BTC's state) together with the rule stop = 1 daily ATR beyond
+         the far edge, take = 3R. Judged walk-forward (trained on the years before, judged on the next),
+         top 5% of the scores, at most 12 active zones per side: 2022 +0.36R/trade, 2023 +0.18R,
+         2024 +0.20R, 2025–26 (unseen while choosing) +0.17R, ~6 trades a week, drawdowns up to 52R.
+         The phone only scores: the same candidates, features (checked equal to the research's) and trees
+         (vp_zones_model.json, pure Python, fetched from GitHub if missing); an hourly scan of 120 coins;
+         the ladder takes its own stop / take in R. Own switches (scan, trading, Telegram) and its own
+         risk, 0.5% by default — never the common risk. A card on the «Сейчас» tab with the yearly check
+         and the live record. The research scripts are in tools/zones_model.

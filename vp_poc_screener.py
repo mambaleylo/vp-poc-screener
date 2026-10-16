@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.615"
+APP_VERSION = "0.99.616"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1151,10 +1151,11 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "nq_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_mirror", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "auto_risk_enabled",
-                  "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones",
+                  "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones", "risk_pct_zm",
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
+                  "zones_zm_enabled", "autotrade_zones_zm", "telegram_alerts_zones_zm",   # v0.99.616
                   "telegram_alerts_trade_results", "telegram_trade_results_real_only",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
@@ -1228,10 +1229,13 @@ def get_settings():
         "risk_pct_neuro": MODULE_RISK_PCT["neuro"], "risk_pct_snr": MODULE_RISK_PCT["snr"],   # v0.99.435
         "risk_pct_prv": MODULE_RISK_PCT["prv"],
         "risk_pct_zones": MODULE_RISK_PCT["zones"],   # v0.99.438
+        "risk_pct_zm": MODULE_RISK_PCT.get("zm"),   # v0.99.616
         "autotrade_zones": AUTOTRADE_ENABLED_ZONES,
         "autotrade_zones_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
         "zones_own_scan": ZONES_OWN_SCAN, "autotrade_zones_own": AUTOTRADE_ENABLED_ZONES_OWN,   # v0.99.452
         "telegram_alerts_zones_own": TELEGRAM_ALERTS_ZONES_OWN,   # v0.99.454
+        "zones_zm_enabled": ZM_ENABLED, "autotrade_zones_zm": AUTOTRADE_ENABLED_ZONES_ZM,   # v0.99.616
+        "telegram_alerts_zones_zm": TELEGRAM_ALERTS_ZONES_ZM,
         "telegram_alerts_trade_results": TELEGRAM_ALERTS_TRADE_RESULTS,   # v0.99.457
         "telegram_trade_results_real_only": TELEGRAM_TRADE_RESULTS_REAL_ONLY,
         "telegram_alerts_zones": TELEGRAM_ALERTS_ZONES,
@@ -1503,6 +1507,12 @@ def apply_settings(updates):
         globals()["TELEGRAM_ALERTS_TRADE_RESULTS"] = bool(updates["telegram_alerts_trade_results"])
     if "telegram_trade_results_real_only" in updates:
         globals()["TELEGRAM_TRADE_RESULTS_REAL_ONLY"] = bool(updates["telegram_trade_results_real_only"])
+    if "zones_zm_enabled" in updates:   # v0.99.616
+        globals()["ZM_ENABLED"] = bool(updates["zones_zm_enabled"])
+    if "autotrade_zones_zm" in updates:
+        globals()["AUTOTRADE_ENABLED_ZONES_ZM"] = bool(updates["autotrade_zones_zm"])
+    if "telegram_alerts_zones_zm" in updates:
+        globals()["TELEGRAM_ALERTS_ZONES_ZM"] = bool(updates["telegram_alerts_zones_zm"])
     if "telegram_alerts_zones_own" in updates:   # v0.99.454
         globals()["TELEGRAM_ALERTS_ZONES_OWN"] = bool(updates["telegram_alerts_zones_own"])
     if "telegram_alerts_zones" in updates:
@@ -1526,7 +1536,7 @@ def apply_settings(updates):
             globals()[_g] = bool(updates[_k])
     if updates.get("emw_enabled"):
         EMW_BACKTEST_TRIGGER.set()
-    for _mod in ("neuro", "snr", "prv", "zones", "emw"):   # v0.99.435 — own risk % per module; empty / 0 = the common one
+    for _mod in ("neuro", "snr", "prv", "zones", "emw", "zm"):   # v0.99.435 — own risk % per module; empty / 0 = the common one
         _key = f"risk_pct_{_mod}"
         if _key in updates:
             try:
@@ -9148,7 +9158,7 @@ def kelly_risk(pairs):
             "auto_risk_n": n, "auto_risk_avg_r": round(mean, 3), "auto_risk_cautious_r": round(mean - se, 3)}
 
 
-MODULE_RISK_PCT = {"neuro": None, "snr": None, "prv": None, "zones": None, "emw": None}   # v0.99.435 — own risk % per module (None = the common one)
+MODULE_RISK_PCT = {"neuro": None, "snr": None, "prv": None, "zones": None, "emw": None, "zm": None}   # v0.99.435 — own risk % per module (None = the common one)
 RISK_PCT_MAX = 100.0   # v0.99.435 — user: "не ограничивай 50%"
 
 
@@ -24057,6 +24067,22 @@ def zones_ladder_check(pl, px):
     return None
 
 
+def zones_tp_px(st, avg, s, sl, tp_pct):
+    """v0.99.616 — the take of a ladder from its average entry: tp_pct % away, or (the «сильные зоны»
+    model's rule, st["tp_r"]) that many times the average's distance to the stop"""
+    if st.get("tp_r"):
+        return avg + s * st["tp_r"] * abs(avg - sl)
+    return avg * (1 + s * tp_pct / 100)
+
+
+def zones_auto_on(lead):
+    """v0.99.616 — real orders for this ladder: the author's posts by the zones switch, our finder by its
+    own switch, «сильные зоны» by theirs (independent of the others)"""
+    if lead.get("zm"):
+        return AUTOTRADE_ENABLED_ZONES_ZM
+    return AUTOTRADE_ENABLED_ZONES and not lead.get("oc") and (not lead.get("own") or AUTOTRADE_ENABLED_ZONES_OWN)
+
+
 def zones_ladder_step(st, c, s, sl, tp_pct, be=None):
     """One candle of a ladder (st: {"legs": [{"lim", "fill", "t"}], "result"}).
     Fills when the candle reaches a limit (at the limit, or at the open after a
@@ -24082,7 +24108,7 @@ def zones_ladder_step(st, c, s, sl, tp_pct, be=None):
         st["exit"], st["t_out"] = (c["open"] if gap else sl_eff), c["time"]
     elif prev:
         avg = sum(prev) / len(prev)
-        tp = avg * (1 + s * tp_pct / 100)
+        tp = zones_tp_px(st, avg, s, sl, tp_pct)
         if (s > 0 and c["high"] >= tp) or (s < 0 and c["low"] <= tp):
             st["result"], st["exit"], st["t_out"] = "WIN", tp, c["time"]
         elif be and not st.get("sl_be"):
@@ -26080,7 +26106,7 @@ def _zones_outbox_save():
 
 TELEGRAM_ALERTS_TRADE_RESULTS = os.environ.get("VP_TG_TRADE_RESULTS", "1") == "1"            # v0.99.457
 TELEGRAM_TRADE_RESULTS_REAL_ONLY = os.environ.get("VP_TG_TRADE_RESULTS_REAL", "0") == "1"
-_TRADE_MOD_NAMES = {"neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "zones": "Зоны",
+_TRADE_MOD_NAMES = {"zones_zm": "🎯 Сильные зоны", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "zones": "Зоны",
                     "zones_own": "Зоны · 🔎 наш поиск", "zones_appr": "Зоны · движение к зоне", "zones_pb": "Зоны · 🧪 откат"}
 
 
@@ -26201,6 +26227,10 @@ def zones_znotify(z, text, important=False):
     Telegram while it is still learning (the tab shows everything); once
     trained only their trades open / close are sent (touches, breaks and
     expiries of our zones are tab-only), and the switch can mute them all."""
+    if z.get("zm"):   # v0.99.616 — «сильные зоны»: the ladder, its fills and its end (no touches)
+        if TELEGRAM_ALERTS_ZONES_ZM and (important or text.startswith("📋")):
+            zones_notify("🎯 Сильная зона" + ("" if AUTOTRADE_ENABLED_ZONES_ZM else " (наблюдение, ордеров на бирже нет)") + ": " + text)
+        return
     if z.get("oc"):
         return   # v0.99.506 — "поиск по результату": tab only while it is being checked
     if z.get("own") and not (important and _own_tg_ok()):
@@ -26408,7 +26438,7 @@ def _zones_real_place(tr):
                 mmr = (STATE.get("scalp_mmr_map") or {}).get(sym, SCALP_DEFAULT_MMR_PCT)
             tiers = get_risk_limit_tiers_for_symbol(sym)
             tb = {sym: tiers} if tiers else None
-            risk = auto_risk_for("zones", sym) or AUTOTRADE_RISK_PCT_OF_BALANCE
+            risk = (MODULE_RISK_PCT.get("zm") or ZM_RISK_DEFAULT) if tr.get("zm") else (auto_risk_for("zones", sym) or AUTOTRADE_RISK_PCT_OF_BALANCE)
             equity = get_futures_total_equity()
             lims = [l["lim"] for l in tr["legs"]]
             avg = sum(lims) / len(lims)
@@ -26741,7 +26771,7 @@ def _zones_real_step(tr, pos_map):
                             zones_notify(f"🛑 {sym}: цена уже за стопом, стоп-ордер биржа не приняла — позиция закрыта по рынку")
                             changed = True
             if avg:
-                tp = avg * (1 + s * tr["tp_pct"] / 100)
+                tp = zones_tp_px(tr, avg, s, tr.get("hard") or tr["sl"], tr["tp_pct"])
                 if not r.get("tp_id") or abs(tp - (r.get("tp_px") or 0)) / tp > 0.0005:
                     old = r.get("tp_id")
                     try:
@@ -26823,6 +26853,9 @@ def _zones_ladder_finish(tr, group, res, px, tx):
             zz["status"] = "closed"
             zz["result"] = {"result": res, "r": round(pn["r"], 3), "pct": round(pn["pct"], 2)}
     z0 = group[0]
+    if z0.get("zm") and TELEGRAM_ALERTS_ZONES_ZM:   # v0.99.616
+        notify_trade_result("zones_zm", tr["symbol"], tr["direction"], pn["avg"], px, res, pn["r"], real=bool(tr.get("autotrade_fired")),
+                            note=f"лимиток налилось {pn['filled']} из {pn['legs']} · чистыми {pn['pct']:+.2f}% (с комиссией)")
     if not z0.get("oc") and (not z0.get("own") or _own_tg_ok()):
         notify_trade_result("zones_own" if z0.get("own") else "zones", tr["symbol"], tr["direction"], pn["avg"], px, res,
                             pn["r"], real=bool(tr.get("autotrade_fired")),
@@ -26878,6 +26911,7 @@ def _zones_ladder_tick(group, now, p, pos_map):
             twin = next((z for z in ZONES["zones"] if (z.get("trade") or {}).get("legs")
                          and z["trade"].get("status") in ("PENDING", "OPEN") and z.get("symbol") == sym
                          and z["side"] == lead["side"] and z.get("post_id") != lead.get("post_id")
+                         and bool(z.get("zm")) == bool(lead.get("zm")) and bool(z.get("oc")) == bool(lead.get("oc"))
                          and abs(z["post_time"] - lead["post_time"]) <= ZONES_DUP_SEC), None)
         if twin:
             with _zones_lock:
@@ -26888,7 +26922,7 @@ def _zones_ladder_tick(group, now, p, pos_map):
         if px_live and zones_fix_group_scale(group, px_live):   # v0.99.499 — misread decimal point
             zones_znotify(lead, f"🔧 {sym}: уровни прочитаны со сдвигом запятой — исправил под цену: "
                                 + " / ".join(f"{v:.6g}" for z_ in group for v in z_["levels"]))
-        pl = zones_ladder_plan(group, p["buf"])
+        pl = zones_ladder_plan(group, lead.get("zm_buf") or p["buf"])   # v0.99.616 — «сильные зоны»: a day's move
         if not pl:
             return False
         why = zones_ladder_check(pl, px_live)
@@ -26904,9 +26938,13 @@ def _zones_ladder_tick(group, now, p, pos_map):
         with _zones_lock:
             post = next((p_ for p_ in ZONES["posts"] if p_["id"] == lead.get("post_id")), None)
         tp_now, tp_k = zones_take_for(sym, p)   # v0.99.609
+        if lead.get("zm"):   # v0.99.616 — the take in R; tp_pct only for the text (at a full ladder)
+            avg_full = sum(pl["limits"]) / len(pl["limits"])
+            tp_now, tp_k = round(lead["zm_tpr"] * abs(avg_full - pl["sl"]) / avg_full * 100, 2), None
         tr = {"kind": "ladder", "symbol": sym, "direction": "LONG" if s > 0 else "SHORT", "time": int(now),
               "legs": [{"level": v, "lim": x, "fill": None, "t": None} for v, x in zip(pl["levels"], pl["limits"])],
               "sl": pl["sl"], "tp_pct": lead.get("oc_tp") or tp_now, "tp_k": None if lead.get("oc_tp") else tp_k, "tp": None, "entry": None, "status": "PENDING", "result": None,
+              "tp_r": lead.get("zm_tpr"), "zm": bool(lead.get("zm")),
               "stopx": None if (lead.get("own") or lead.get("oc")) else zones_stopx_rule(),   # v0.99.604
               "be": None if lead.get("oc") else p.get("be"),
               "chk_t": int(max(lead["post_time"], now - 3 * 86400)), "zones": [z["id"] for z in group],
@@ -26921,7 +26959,9 @@ def _zones_ladder_tick(group, now, p, pos_map):
                 zz["lead"] = lead["id"]
         lim_txt = " / ".join(f"{l['lim']:.6g}" for l in tr["legs"])
         zones_znotify(lead, f"📋 {sym} {'лонг' if s > 0 else 'шорт'}: лимитки {len(tr['legs'])} шт. — {lim_txt}\n"
-                            f"стоп {tr['sl']:.6g} ({p['buf']:g}% за дальней линией) · тейк +{tr['tp_pct']:g}% от средней цены входа"
+                            + (f"стоп {tr['sl']:.6g} ({lead['zm_buf']:g}% за дальней линией — дневной ход монеты) · тейк {tr['tp_r']:g}R от средней цены входа "
+                               f"(~+{tr['tp_pct']:g}%, если нальются обе) · оценка модели {lead.get('zm_score')}" if lead.get("zm") else
+                               f"стоп {tr['sl']:.6g} ({p['buf']:g}% за дальней линией) · тейк +{tr['tp_pct']:g}% от средней цены входа")
                             + ((" (по сути без тейка: выход по стопу или через 14 дн.)" if tr.get("tp_k") == "none"
                                 else f" ({tr['tp_k']:g} дневных хода монеты)") if tr.get("tp_k") else "")
                             + (f" · безубыток после +{tr['be']:g}%" if tr.get("be") else "")
@@ -26931,8 +26971,7 @@ def _zones_ladder_tick(group, now, p, pos_map):
     # v0.99.492 — the real limits sit on the exchange only while the price is near
     # (an open limit locks margin): placed when the price comes within a safe
     # distance of the next limit, taken off again when it leaves twice as far
-    want_real = (AUTOTRADE_ENABLED_ZONES and not tr.get("no_auto") and tr.get("status") in ("PENDING", "OPEN")
-                 and (not lead.get("own") or AUTOTRADE_ENABLED_ZONES_OWN) and not lead.get("oc"))
+    want_real = (zones_auto_on(lead) and not tr.get("no_auto") and tr.get("status") in ("PENDING", "OPEN"))
     px_now = (pos_map.get("_px") or {}).get(sym)
     nxt = next((l["lim"] for l in tr["legs"] if l["fill"] is None), None)
     pos_known = "_open" in (pos_map or {})   # v0.99.537 — the exchange's positions were read this round
@@ -27014,7 +27053,7 @@ def _zones_ladder_tick(group, now, p, pos_map):
                 avg = sum(fills) / len(fills)
                 first = tr["status"] == "PENDING"
                 with _zones_lock:
-                    tr.update({"status": "OPEN", "entry": avg, "tp": avg * (1 + s * tr["tp_pct"] / 100)})
+                    tr.update({"status": "OPEN", "entry": avg, "tp": zones_tp_px(tr, avg, s, tr.get("hard") or tr["sl"], tr["tp_pct"])})
                     if first:
                         tr["time"] = int(c["time"])
                     for zz in group:
@@ -27032,13 +27071,13 @@ def _zones_ladder_tick(group, now, p, pos_map):
                 on_ex = next((l_ for l_ in rl.get("legs") or [] if l_.get("i") == leg_i), None)
                 if on_ex:
                     ex_txt = "на бирже лимитка по этой линии стоит — исполнение придёт отдельным 💰-сообщением"
-                elif AUTOTRADE_ENABLED_ZONES and not tr.get("no_auto"):
+                elif zones_auto_on(lead) and not tr.get("no_auto"):
                     why_ = ((tr.get("autotrade") or {}).get("detail") or "").strip()
                     ex_txt = "на бирже ордера по этой линии нет" + (f" — {why_[:120]}" if why_ and not rl else
                                                                      (" (лот стоит на другой линии)" if rl else " (цена была далеко, лимитки ещё не выставлялись)"))
                 else:
                     ex_txt = "без автосделки" + (f" — {tr['no_auto']}" if tr.get("no_auto") else "")
-                if not AUTOTRADE_ENABLED_ZONES or tr.get("no_auto"):   # the bot's record is all there is
+                if not zones_auto_on(lead) or tr.get("no_auto"):   # the bot's record is all there is
                     zones_znotify(lead, f"📝 {sym}: по учёту бота налилась лимитка {len(fills)}/{len(tr['legs'])} по "
                                         f"{new[-1]['fill']:.6g} · средняя {avg:.6g} · стоп {tr['sl']:.6g} · тейк {tr['tp']:.6g}\n{ex_txt}",
                                   important=True)
@@ -27134,7 +27173,8 @@ def zones_monitor_tick(last_track=0.0):
             groups.setdefault(zones_group_key(z), []).append(z)
     ax_map = zones_author_exits()   # v0.99.519
     pos_map = {"_px": prices, "_ax": ax_map}
-    if real_tails or any(_zones_real_live(z) for g in groups.values() for z in g) or (AUTOTRADE_ENABLED_ZONES and groups):
+    if real_tails or any(_zones_real_live(z) for g in groups.values() for z in g) or (AUTOTRADE_ENABLED_ZONES and groups) \
+            or (AUTOTRADE_ENABLED_ZONES_ZM and any(z.get("zm") for g in groups.values() for z in g)):
         _zmon("позиции и ордера на бирже")
         try:
             with using_account("zones"):
@@ -27158,7 +27198,7 @@ def zones_monitor_tick(last_track=0.0):
     def _gprio(g):
         if any(_zones_real_live(z) for z in g):
             return 0
-        return 2 if all(z.get("own") or z.get("oc") for z in g) else 1
+        return 2 if all((z.get("own") or z.get("oc")) and not (z.get("zm") and AUTOTRADE_ENABLED_ZONES_ZM) for z in g) else 1
     glist = sorted(groups.values(), key=lambda g: (_gprio(g), min((z.get("trade") or {}).get("chk_at", 0) for z in g)))
     obs_until = None
     for k_, g in enumerate(glist):
@@ -29477,7 +29517,7 @@ def oc_scan_once():
         if made >= ZONES_OWN_MAX_ALERTS:
             break
         with _zones_lock:   # v0.99.531 — one active zone per coin and side: one move must not stop a whole bunch
-            dup = any(z.get("oc") and z.get("symbol") == sym and z.get("side") == c["side"]
+            dup = any(z.get("oc") and not z.get("zm") and z.get("symbol") == sym and z.get("side") == c["side"]
                       and z.get("status") in ("watch", "in_trade") for z in ZONES["zones"])
         if dup:
             continue
@@ -29499,7 +29539,7 @@ def oc_stats():
     with _oc_lock:
         ev, n, tp, thr, built = _OC["eval"], len(_OC["samples"]), _OC["tp"], _OC["thr"], _OC["built"]
     with _zones_lock:
-        zs = [z for z in ZONES["zones"] if z.get("oc") and z.get("status") != "deleted"]
+        zs = [z for z in ZONES["zones"] if z.get("oc") and not z.get("zm") and z.get("status") != "deleted"]
     done = [z["result"]["r"] for z in zs if z.get("result") and z["result"].get("r") is not None
             and z.get("status") in ("closed", "old", "expired", "broken")]
     live = _oc_stat(done)
@@ -29555,6 +29595,319 @@ def oc_loop():
             log_error(f"oc_loop: {e}")
             zones_act("oc", running=False, error=str(e)[:200])
         time.sleep(ZONES_OWN_SCAN_SEC)
+
+
+# ---- v0.99.616 «Сильные зоны»: user — "меня доходность не устраивает, нужен механизм настоящий, полноценный
+# и мощный … чтобы находились хорошие зоны, хоть и не часто, от которых вероятнее отскок и хорошая
+# доходность". A model trained OFF the phone on 6 years of Binance 1h history of 127 coins (~1 million
+# candidate zones, every one replayed as a ladder), checked honestly by time: trained on the years before,
+# judged on the year after (2022, 2023, 2024), the last period (2025–2026) kept unseen until the end.
+# The phone only scores: the same candidates (oc_candidates_mtf), the same 52 features, the trees in
+# vp_zones_model.json (pure Python), the same trade rule the model was judged on — limits on the zone's
+# edges, the stop a day's move of the coin beyond the far edge, the take a multiple of the risk.
+ZM_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_zones_model.json")
+ZM_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_zones_model.json"
+ZM_MODEL_VER = 1
+ZM_ENABLED = os.environ.get("VP_ZONES_ZM", "1") == "1"
+AUTOTRADE_ENABLED_ZONES_ZM = os.environ.get("VP_AUTOTRADE_ZONES_ZM", "0") == "1"
+TELEGRAM_ALERTS_ZONES_ZM = os.environ.get("VP_TG_ZONES_ZM", "1") == "1"
+ZM_TOP = int(os.environ.get("VP_ZONES_ZM_TOP", "120"))   # coins scanned (by 24h volume), like the research's 127
+ZM_SCAN_SEC = 3600
+ZM_RISK_DEFAULT = 0.5   # % per strong zone when its own field is empty — never the common risk (ladders at once)
+ZM_SIDE_CAP = int(os.environ.get("VP_ZONES_ZM_SIDE_CAP", "12"))   # active strong zones per side: one market move takes them all
+_ZM = {"model": None, "err": None, "last_scan": None, "loaded_t": None}
+_zm_lock = threading.Lock()
+
+
+def _zm_ema(vals, n):
+    k = 2 / (n + 1)
+    e = vals[0]
+    for v in vals[1:]:
+        e += k * (v - e)
+    return e
+
+
+def _zm_rsi(C, n=14):
+    if len(C) < n + 2:
+        return 50.0
+    g = l = 0.0
+    for i in range(1, n + 1):
+        d = C[i] - C[i - 1]
+        g += max(d, 0)
+        l += max(-d, 0)
+    g /= n
+    l /= n
+    for i in range(n + 1, len(C)):
+        d = C[i] - C[i - 1]
+        g = (g * (n - 1) + max(d, 0)) / n
+        l = (l * (n - 1) + max(-d, 0)) / n
+    return 100.0 if l == 0 else 100 - 100 / (1 + g / l)
+
+
+def _zm_atr(B, n=14):
+    if len(B) < 2:
+        return 0.0
+    trs = [max(B[i]["high"] - B[i]["low"], abs(B[i]["high"] - B[i - 1]["close"]), abs(B[i]["low"] - B[i - 1]["close"]))
+           for i in range(max(1, len(B) - n), len(B))]
+    return sum(trs) / len(trs)
+
+
+def _zm_ret(C, k):
+    return (C[-1] / C[-1 - k] - 1) * 100 if len(C) > k and C[-1 - k] > 0 else 0.0
+
+
+def zm_snap_feats(h1, d1, btc_h1, btc_d1):
+    """the coin's and the market's state at the scan (shared by its candidates); unsigned"""
+    C = [b["close"] for b in h1]
+    D = [b["close"] for b in d1]
+    px = C[-1]
+    datr = _zm_atr(d1, 14) / px * 100 if d1 else 0.0
+    a1 = _zm_atr(h1, 48) / px * 100
+    f = {"r24": _zm_ret(C, 24), "r72": _zm_ret(C, 72), "r7d": _zm_ret(C, 168), "r20d": _zm_ret(C, 479) if len(C) > 479 else _zm_ret(C, len(C) - 1),
+         "rsi1": _zm_rsi(C[-200:]), "rsi4": _zm_rsi([C[i] for i in range(len(C) - 1, -1, -4)][::-1][-200:]), "rsi_d": _zm_rsi(D[-200:]) if len(D) > 20 else 50.0,
+         "datr": datr, "volreg": (a1 * math.sqrt(24)) / datr if datr else 1.0}
+    for n in (20, 50, 200):
+        f[f"ema{n}"] = (px / _zm_ema(D[-3 * n:], n) - 1) * 100 / (datr or 1) if len(D) >= n else 0.0
+    for n in (30, 90, 365):
+        seg = d1[-n:]
+        if len(seg) >= min(n, 20):
+            hh, ll = max(b["high"] for b in seg), min(b["low"] for b in seg)
+            f[f"pos{n}"] = (px - ll) / (hh - ll) if hh > ll else 0.5
+        else:
+            f[f"pos{n}"] = 0.5
+    V_ = [b.get("volume") or 0 for b in h1]
+    f["vol24"] = math.log((sum(V_[-24:]) / 24 + 1e-12) / (sum(V_) / len(V_) + 1e-12)) if V_ else 0.0
+    BC = [b["close"] for b in btc_h1] if btc_h1 else []
+    BD = [b["close"] for b in btc_d1] if btc_d1 else []
+    f["b24"] = _zm_ret(BC, 24) if BC else 0.0
+    f["b7d"] = _zm_ret(BC, 168) if BC else 0.0
+    f["b_ema50"] = (BD[-1] / _zm_ema(BD[-150:], 50) - 1) * 100 if len(BD) >= 50 else 0.0
+    f["b_datr"] = _zm_atr(btc_d1, 14) / BD[-1] * 100 if len(BD) > 15 else 0.0
+    f["rs7"] = f["r7d"] - f["b7d"]
+    f["rs20"] = f["r20d"] - (_zm_ret(BC, 479) if len(BC) > 479 else 0.0)
+    return f
+
+
+_ZM_SIGNED = ("r24", "r72", "r7d", "r20d", "ema20", "ema50", "ema200", "b24", "b7d", "b_ema50", "rs7", "rs20")
+
+
+def _zm_round_in(lo, hi):
+    mid = (lo + hi) / 2
+    if mid <= 0:
+        return 0.0
+    k = math.floor(math.log10(mid))
+    best = 0.0
+    for scale, w in ((10 ** k, 1.0), (10 ** k / 2, 0.7), (10 ** k / 10, 0.4)):
+        q = math.ceil(lo / scale) * scale
+        if q <= hi:
+            best = max(best, w)
+    return best
+
+
+def zm_cand_feats(c, h1, d1, sf, cands_all):
+    """per candidate: signed so that + favours the zone's side"""
+    sg = 1 if c["side"] == "long" else -1
+    lo, hi = c["lo"], c["hi"]
+    px = h1[-1]["close"]
+    datr_px = sf["datr"] / 100 * px or 1e-12
+    near_edge = hi if sg > 0 else lo
+    far_edge = lo if sg > 0 else hi
+    f = {"side": float(sg), "d_dist": (sg * (px - near_edge)) / datr_px, "d_width": (hi - lo) / datr_px, "round": _zm_round_in(lo, hi)}
+    for k in _ZM_SIGNED:
+        f["s_" + k] = sg * sf[k]
+    for k in ("rsi1", "rsi4", "rsi_d"):
+        f["s_" + k] = (sf[k] - 50) * sg
+    for n in (30, 90, 365):
+        f["s_pos" + str(n)] = sf["pos" + str(n)] if sg > 0 else 1 - sf["pos" + str(n)]
+    bars = d1[-365:]
+    entries, last_touch, dep_max, swept = 0, None, 0.0, 0
+    away = False
+    for i, b in enumerate(bars):
+        if b["low"] <= hi and b["high"] >= lo:
+            if away:
+                entries += 1
+            away = False
+            last_touch = i
+            if (sg > 0 and b["low"] < far_edge and b["close"] > far_edge) or (sg < 0 and b["high"] > far_edge and b["close"] < far_edge):
+                swept += 1
+        else:
+            dist = (b["low"] - hi) if sg > 0 else (lo - b["high"])
+            if dist > datr_px:
+                away = True
+            if last_touch is not None:
+                dep_max = max(dep_max, dist / datr_px) if i - last_touch <= 10 else dep_max
+    f["d_entries"] = math.log1p(entries)
+    f["d_age_touch"] = math.log1p(len(bars) - last_touch) if last_touch is not None else 7.0
+    f["d_dep"] = min(dep_max, 30.0)
+    f["d_swept"] = math.log1p(swept)
+    f["d_broken90"] = float(sum(1 for b in d1[-90:] if (b["close"] < far_edge if sg > 0 else b["close"] > far_edge)))
+    conf = 0
+    for o in cands_all:
+        if o is c or o["side"] != c["side"]:
+            continue
+        if min(o["hi"], hi) - max(o["lo"], lo) > 0:
+            conf += 1
+    f["conf"] = float(conf)
+    if d1:
+        ext = min(b["low"] for b in d1[-365:]) if sg > 0 else max(b["high"] for b in d1[-365:])
+        f["d_to_ext"] = (sg * (far_edge - ext)) / datr_px
+    else:
+        f["d_to_ext"] = 0.0
+    return {k: round(max(-1e3, min(1e3, float(v))), 4) for k, v in f.items()}
+
+
+def zm_tree_pred(trees, x):
+    s = 0.0
+    for t in trees:
+        while isinstance(t, list):
+            v = x[t[0]]
+            t = t[3] if (v <= t[1] if v == v else t[2]) else t[4]
+        s += t
+    return s
+
+
+def zm_model():
+    """the model file next to the bot; a missing / older one is fetched from GitHub (the bot's
+    self-update downloads only the main file)"""
+    with _zm_lock:
+        m = _ZM["model"]
+    if m and m.get("ver") == ZM_MODEL_VER:
+        return m
+    m = None
+    try:
+        if os.path.exists(ZM_MODEL_FILE):
+            with open(ZM_MODEL_FILE) as f:
+                m = json.load(f)
+            if m.get("ver") != ZM_MODEL_VER:
+                m = None
+    except Exception as e:
+        log_error(f"zones model read: {e}")
+        m = None
+    if not m:
+        try:
+            r = requests.get(ZM_MODEL_URL.format(ref="main"), params={"nocache": int(time.time())}, timeout=60)
+            r.raise_for_status()
+            m = r.json()
+            if m.get("ver") != ZM_MODEL_VER or not m.get("models"):
+                raise RuntimeError(f"версия модели {m.get('ver')} вместо {ZM_MODEL_VER}")
+            tmp = ZM_MODEL_FILE + ".new"
+            with open(tmp, "w") as f:
+                json.dump(m, f, separators=(",", ":"))
+            os.replace(tmp, ZM_MODEL_FILE)
+        except Exception as e:
+            with _zm_lock:
+                _ZM["err"] = f"модель не скачалась: {e}"
+            log_error(f"zones model download: {e}")
+            return None
+    with _zm_lock:
+        _ZM.update({"model": m, "err": None, "loaded_t": time.time()})
+    return m
+
+
+def zm_score(m, x):
+    return sum(zm_tree_pred(t, x) for t in m["models"]) / len(m["models"])
+
+
+def _zm_closed(sym, tf, sec, n, now):
+    cs = get_candles_range(sym, tf, int(now) - (n + 2) * sec, int(now)) or []
+    return [c for c in cs if c["time"] + sec <= now][-n:]
+
+
+def zm_scan_once():
+    """the liquid coins: the bot's zone candidates scored by the model; the best one per coin and side
+    above the bar becomes a ladder (one active per coin and side)"""
+    m = zm_model()
+    if not m:
+        return 0
+    now = time.time()
+    rule = m["rule"]
+    bh1 = _zm_closed("BTC_USDT", "1h", 3600, 1000, now)
+    bd1 = _zm_closed("BTC_USDT", "1d", 86400, 400, now)
+    btc = _oc_btc_series(bh1)
+    bv = btc["v"][-1] if btc and btc["v"] else 0.0
+    bh1 = bh1[-480:]
+    made, seen, found = 0, 0, []
+    for sym in _own_top_syms(ZM_TOP):
+        try:
+            cs = _own_candles(sym, now)
+            h4 = _zm_closed(sym, "4h", 4 * 3600, 480, now)
+            d1 = _zm_closed(sym, "1d", 86400, 400, now)
+        except Exception:
+            continue
+        if len(cs) < 120 or len(d1) < 30:
+            continue
+        seen += 1
+        cands = oc_candidates_mtf([(1, cs), (4, h4), (24, d1[-365:])])
+        if not cands:
+            continue
+        sf = zm_snap_feats(cs, d1, bh1, bd1)
+        best = {}
+        for c in cands:
+            x = [round(v, 5) for v in _oc_vec(c, oc_ctx_feats(cs, c, bv))]
+            vec = dict(zip(list(_OWN_FEATS) + list(_OC_CTX_FEATS), x))
+            vec.update(zm_cand_feats(c, cs, d1, sf, cands))
+            sc = zm_score(m, [float(vec.get(k, 0.0)) for k in m["feats"]])
+            if sc >= m["thr"] and (c["side"] not in best or sc > best[c["side"]][0]):
+                best[c["side"]] = (sc, c)
+        found += [(sc, sym, c, sf["datr"]) for sc, c in best.values()]
+    found.sort(key=lambda t: -t[0])
+    for sc, sym, c, datr in found:
+        with _zones_lock:
+            act = [z for z in ZONES["zones"] if z.get("zm") and z.get("status") in ("watch", "in_trade")]
+        dup = any(z.get("symbol") == sym and z.get("side") == c["side"] for z in act)
+        if dup or datr <= 0 or sum(1 for z in act if z.get("side") == c["side"]) >= ZM_SIDE_CAP:
+            continue
+        lv = [c["hi"], c["lo"]] if c["side"] == "long" else [c["lo"], c["hi"]]
+        dec = max(2, 6 - math.floor(math.log10(abs(c["hi"])))) if c["hi"] > 0 else 8
+        z = zones_make({"id": f"zm_{sym}_{int(now)}", "symbol": sym, "post_time": now, "train": False}, c["side"],
+                       [round(v, dec) for v in lv])
+        # "oc" too: every place that keeps the author's statistics clean of our finders' zones skips it
+        z.update({"oc": True, "zm": True, "zm_score": round(sc, 3), "zm_buf": round(rule["buf_datr"] * datr, 3),
+                  "zm_tpr": rule["tp_r"], "zm_datr": round(datr, 3), "zm_tf": c.get("tf", 1), "zm_ver": m.get("ver")})
+        with _zones_lock:
+            ZONES["zones"].insert(0, z)
+        made += 1
+    with _zm_lock:
+        _ZM["last_scan"] = {"t": int(now), "coins": seen, "new": made}
+    if made:
+        zones_save()
+    return made
+
+
+def zm_loop():
+    time.sleep(180)
+    while True:
+        heartbeat("zm_loop")
+        try:
+            if ZM_ENABLED:
+                zm_scan_once()
+        except Exception as e:
+            log_error(f"zm_loop: {e}")
+            with _zm_lock:
+                _ZM["err"] = str(e)[:200]
+        time.sleep(ZM_SCAN_SEC)
+
+
+def zm_stats():
+    m = _ZM.get("model") or {}
+    with _zones_lock:
+        zs = [z for z in ZONES["zones"] if z.get("zm") and z.get("status") != "deleted"]
+    fin = sorted([z for z in zs if z.get("result") and z["result"].get("r") is not None
+                  and z.get("status") in ("closed", "old", "expired", "broken")], key=lambda z: -z["post_time"])
+    rs = [z["result"]["r"] for z in fin]
+    t0 = min((z["post_time"] for z in zs), default=None)
+    weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
+    with _zm_lock:
+        last, err = _ZM.get("last_scan"), _ZM.get("err")
+    return {"on": ZM_ENABLED, "auto": AUTOTRADE_ENABLED_ZONES_ZM, "tg": TELEGRAM_ALERTS_ZONES_ZM, "top": ZM_TOP,
+            "model": {k: m.get(k) for k in ("ver", "lab", "q", "thr", "trained_to", "rule", "research")} if m else None,
+            "err": err, "last_scan": last,
+            "active": sum(1 for z in zs if z.get("status") in ("watch", "in_trade")),
+            "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None,
+            "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
+            "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(zs) / weeks, 2) if weeks else None,
+            "last": [{"symbol": z["symbol"], "side": z["side"], "t": z["post_time"], "r": z["result"]["r"],
+                      "res": z["result"].get("result")} for z in fin[:20]]}
 
 
 @app.route("/api/zones/oc/retrain", methods=["POST"])
@@ -29692,7 +30045,7 @@ def api_zones_status():
                     "autotrade": AUTOTRADE_ENABLED_ZONES, "max_days": ZONES_MAX_DAYS, "tp_user": ZONES_TP_PCT,
                     "learn_min": ZONES_LEARN_MIN, "train_mode": bool(ZONES.get("train_mode")),
                     "own": own_stats(), "own_exams": own_exam_list(), "autotrade_own": AUTOTRADE_ENABLED_ZONES_OWN,
-                    "oc": oc_stats()})
+                    "oc": oc_stats(), "zm": zm_stats()})
 
 
 @app.route("/api/zones/train_mode", methods=["POST"])
@@ -32696,6 +33049,20 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setTgZonesOwn"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">🎯 Сильные зоны</div>
+          <div class="sub">раз в час проверяет 120 самых ликвидных монет: зоны находит так же, как наш поиск, а оценивает модель, обученная на 6 годах истории 127 монет (миллион зон, каждая проверена лесенкой). Берёт ~5% лучших — на истории это 7–12 сделок в неделю, в плюсе каждый год</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setZonesZm"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ 🎯 Сильные зоны в Telegram</div>
+          <div class="sub">новая зона (лимитки, стоп, тейк), налив лимиток и итог сделки; касания и пробои — только во вкладке</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgZonesZm"><span class="switchSlider"></span></label>
+      </div>
     </div></details>
 
     <details class="settingsGroup" style="--mod-color:#26a5e4;"><summary class="settingsGroupTitle">Telegram</summary><div class="settingsGroupBody">
@@ -32827,8 +33194,8 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow subRow" style="flex-wrap:wrap;">
         <div style="flex:1 1 100%;">
-          <div class="label">↳ Риск Neuro · P/R · Зоны</div>
-          <div class="sub">свой % для каждого модуля (0.1–100); пустое поле — общий % выше. Бэктест «с $15» каждого модуля считает со своим %</div>
+          <div class="label">↳ Риск Neuro · P/R · Зоны · 🎯</div>
+          <div class="sub">свой % для каждого модуля (0.1–100); пустое поле — общий % выше. 🎯 сильные зоны: пустое поле — 0.5% (их много одновременно, на истории просадка доходила до 50R). Бэктест «с $15» каждого модуля считает со своим %</div>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro" title="Neuro" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
@@ -32836,6 +33203,7 @@ INDEX_HTML = """<!doctype html>
           <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R" title="Peak Reversal" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctEmw" min="0.1" max="100" step="0.5" placeholder="EMA" title="EMA W/M" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctZones" min="0.1" max="100" step="0.5" placeholder="Зоны" title="Зоны" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctZm" min="0.1" max="100" step="0.1" placeholder="🎯 0.5" title="🎯 Сильные зоны: пусто — 0.5% (не общий %!)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
         </div>
       </div>
       <div class="settingRow subRow">
@@ -32900,6 +33268,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">реальные сделки по зонам, которые нашёл наш поиск. Выключено — они только отслеживаются виртуально (статистика во вкладке «Зоны»). Включайте, когда наш поиск догонит паблик по совпадениям и результату</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeZonesOwn"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳↳ Зоны: 🎯 сильные зоны</div>
+          <div class="sub">реальные сделки по зонам модели, обученной на 6 годах истории 127 монет: лимитки на края зоны, стоп — дневной ход монеты за зоной, тейк — 3 риска. Работает сам по себе, без остальных переключателей зон. Риск — как у зон. Выключено — только виртуальный учёт во вкладке «Зоны»</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeZonesZm"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -34785,7 +35160,8 @@ async function refreshZones() {
   window._zTr = Object.fromEntries(zs.filter(z => z.trade).map(z => [z.id, z.trade]));   // v0.99.537
   window._zPostSym = Object.fromEntries((d.posts || []).filter(p => p.symbol).map(p => [p.id, p.symbol]));   // v0.99.540
   const ownZ = zs.filter(z => z.own);
-  const ocZ = zs.filter(z => z.oc);   // v0.99.506 — "поиск по результату"
+  const ocZ = zs.filter(z => z.oc && !z.zm);   // v0.99.506 — "поиск по результату"
+  const zmZ = zs.filter(z => z.zm);   // v0.99.616 — «сильные зоны»
   const pub = zs.filter(z => !z.own && !z.oc);
   const act = pub.filter(z => z.status === 'watch' || z.status === 'in_trade');
   const trn = pub.filter(z => z.train && !(z.status === 'watch' || z.status === 'in_trade'));
@@ -34816,7 +35192,8 @@ async function refreshZones() {
       <div class="zsec">Активные зоны автора (${act.length})</div>
       <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 8px;">${d.autotrade ? 'по этим постам бот ставит лимитки на бирже, когда цена подходит' : 'автоторговля выкл — только отслеживаю'}</div>
       ${act.length ? zonePostBlocks(act) : '<div class="dim" style="margin-bottom:10px;">нет — новые посты из группы появятся здесь</div>'}
-      ${zoneTradesHtml(closedTr)}`)}
+      ${zoneTradesHtml(closedTr)}
+      ${zmHtml(d, zmZ)}`)}
     ${pane('rules', `<div class="dim" style="font-size:var(--fs-sm);margin:0 0 8px;">Что бот ставит на бирже и почему — всё подобрано на истории постов: выбор на старых, проверка на новых.</div>
       ${ruleCard}${zonesTpvCard(lr.tpv, card, d)}${zonesStopxCard(lr.stopx, card, d)}${riskCard}`)}
     ${pane('anal', `<div class="dim" style="font-size:var(--fs-sm);margin:0 0 8px;">Справка: откуда такие итоги и что ещё проверялось. На торговлю напрямую не влияет.</div>
@@ -34990,6 +35367,39 @@ function ocHtml(d, ocZ) {   // v0.99.528 — v2: more features, trees, a 3-way h
     <button onclick="zonesPost('/api/zones/oc/retrain', {}); setTimeout(refreshZones, 1500);" class="zbtn">↻ дополнить историю и переобучить</button>
     ${ocZ.length ? `<details style="margin-top:6px;"><summary class="dim" style="cursor:pointer;">зоны поиска по результату (${ocZ.length})</summary>${zonePostBlocks(ocZ)}</details>` : ''}`;
   return `<div class="zcard" style="font-size:var(--fs-sm);"><div class="zh">🧪 Поиск по результату <span class="pill">наблюдение</span></div>${body}</div>`;
+}
+// v0.99.616 — «сильные зоны»: the model trained on Binance history, its yearly check and the live record
+function zmHtml(d, zmZ) {
+  const o = d.zm || {}, m = o.model, rs = (m && m.research) || {};
+  const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  const dt = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
+  const tile = (l, v, n) => `<div class="ztile"><div class="zl">${l}</div><div class="zv">${v}</div>${n ? `<div class="zn">${n}</div>` : ''}</div>`;
+  const pill = !o.on ? '<span class="pill neg">выключено</span>' : (o.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">наблюдение</span>');
+  const act = zmZ.filter(z => z.status === 'watch' || z.status === 'in_trade');
+  let body = `<div class="dim">Зоны, которые на истории чаще давали отскок: модель обучена на 6 годах часовых свечей 127 монет Binance (около миллиона зон, каждая проверена лесенкой). Берёт ~${m && m.q ? Math.round((1 - m.q) * 100) : 5}% лучших.</div>`;
+  if (!m) body += `<div class="zbanner ${o.err ? 'neg' : 'warn'}">${o.err ? 'Модель не загрузилась: ' + o.err : 'Модель загружается…'}</div>`;
+  else {
+    const ys = rs.years || {};
+    const rows = Object.keys(ys).sort().map(y => { const x = ys[y] || {};
+      return {label: y === '2025' ? '2025–26' : y, sub: x.n ? `${x.n} сделок · ~${x.wk}/нед · итог ${x.sum > 0 ? '+' : ''}${x.sum}R, просадка до ${x.dd}R` : 'нет сделок', v: x.n ? x.avg : null, hi: y === '2025'}; });
+    const all = Object.values(ys).filter(x => x && x.n);
+    const n = all.reduce((a, x) => a + x.n, 0), avg = n ? all.reduce((a, x) => a + x.avg * x.n, 0) / n : null;
+    const days = n ? all.reduce((a, x) => a + (x.days || 0) * x.n, 0) / n : null;
+    const wk = all.length ? all.reduce((a, x) => a + (x.wk || 0), 0) / all.length : null;
+    const dd = Math.max(0, ...all.map(x => x.dd || 0));
+    body += `<div class="zsub"><b>Проверка на истории</b> — каждый год модель не видела (училась только на годах до него); ${rs.coins || 127} монет, не больше ${rs.cap || 12} зон в одну сторону, как у бота. Результат на сделку:</div>
+      ${zBars(rows, v => sgR(+(+v).toFixed(2)))}
+      <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b> на сделку</span><span><b>~${wk == null ? '—' : wk.toFixed(1)}</b> сделок в неделю</span><span>держится <b>~${days == null ? '—' : days.toFixed(1)}</b> дн.</span><span>худшая просадка <b>${dd}R</b></span></div>
+      <div class="zbanner warn">Сделок много одновременно, и один обвал рынка выбивает их пачкой: просадка на истории доходила до ${dd}R. Поэтому риск на сильную зону свой и маленький — по умолчанию 0.5% (при нём просадка ~${Math.round(dd * 0.5)}% счёта).</div>
+      <div class="zsub">Правило сделки: лимитки на оба края зоны, стоп — <b>${m.rule.buf_datr} дневной ход</b> монеты за дальним краем, тейк — <b>${m.rule.tp_r} риска</b> от средней цены входа, зона ждёт 14 дней. WR низкий по замыслу: тейк втрое дальше стопа.</div>`;
+  }
+  const lv = o;
+  body += `<div class="zsub" style="margin-bottom:6px;"><b>Вживую</b>${o.last_scan ? ` · скан ${dt(o.last_scan.t)}: ${o.last_scan.coins} монет, новых ${o.last_scan.new}` : ''}:</div>
+    <div class="ztiles z3">${tile('активных', o.active || 0, '')}${tile('отработало', o.n || 0, o.n ? `${sgR(o.avg)} · WR ${o.wr}%` : (o.per_week != null ? `~${o.per_week} зон в неделю` : ''))}${tile('итого', o.n ? sgR(o.sum) : '—', o.auto ? 'реальные сделки' : 'виртуально')}</div>
+    ${act.length ? `<div style="margin-top:8px;">${zonePostBlocks(act)}</div>` : '<div class="dim" style="margin-top:6px;">активных сильных зон сейчас нет — модель ждёт хорошую</div>'}
+    ${(o.last || []).length ? `<details><summary>последние итоги (${o.last.length})</summary>${zBars(o.last.map(r => ({label: (r.symbol || '').replace('_USDT', '') + ' ' + (r.side === 'long' ? 'лонг' : 'шорт'), sub: new Date(r.t * 1000).toLocaleDateString('ru-RU'), v: r.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}
+    <div class="zsub">${o.auto ? 'Сделки ставятся на бирже с риском зон.' : 'Сейчас только виртуальный учёт. Торговать: Настройки → Автоторговля → «Зоны: 🎯 сильные зоны».'}</div>`;
+  return `<div class="zcard" style="font-size:var(--fs-sm);margin-top:10px;"><div class="zh">🎯 Сильные зоны ${pill}</div>${body}</div>`;
 }
 async function ownScanNow() {
   try { await fetch('/api/zones/own/scan', {method: 'POST'}); } catch (e) {}
@@ -37097,6 +37507,9 @@ const setInputs = {
   autotrade_zones_own: document.getElementById('setAutotradeZonesOwn'),
   zones_own_scan: document.getElementById('setZonesOwnScan'),
   telegram_alerts_zones_own: document.getElementById('setTgZonesOwn'),
+  zones_zm_enabled: document.getElementById('setZonesZm'),   // v0.99.616
+  autotrade_zones_zm: document.getElementById('setAutotradeZonesZm'),
+  telegram_alerts_zones_zm: document.getElementById('setTgZonesZm'),
 };
 
 const setValueInputs = {
@@ -37105,6 +37518,7 @@ const setValueInputs = {
   risk_pct_snr: document.getElementById('setRiskPctSnr'),
   risk_pct_prv: document.getElementById('setRiskPctPrv'),
   risk_pct_zones: document.getElementById('setRiskPctZones'),
+  risk_pct_zm: document.getElementById('setRiskPctZm'),
   zones_tp_pct: document.getElementById('setZonesTpPct'),
   zones_max_days: document.getElementById('setZonesMaxDays'),
   snr_top_n: document.getElementById('setSnrTopN'),
@@ -38609,6 +39023,7 @@ if __name__ == "__main__":
         threading.Thread(target=zones_recheck_results, daemon=True).start()
     threading.Thread(target=own_scan_loop, daemon=True).start()   # v0.99.452 — our own zone finder
     threading.Thread(target=oc_loop, daemon=True).start()   # v0.99.506 — our zones by the result
+    threading.Thread(target=zm_loop, daemon=True).start()   # v0.99.616 — «сильные зоны»
     threading.Thread(target=reconcile_loop, daemon=True).start()
     for _n in LOOP_MAX_GAP_SEC:  # v0.99.322 — seed so startup delays (up to 12 min) don't read as stalls
         heartbeat(_n)
