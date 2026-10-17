@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.623"
+APP_VERSION = "0.99.624"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7519,7 +7519,7 @@ LOOP_MAX_GAP_SEC = {
     # live / fast loops
     "scan_loop": 30 * 60,
     "snr_live_loop": 60 * 60,
-    "prv_live_loop": 60 * 60,
+    "prx_loop": 60 * 60,   # v0.99.624 — Peak Reversal v2
     "emx_loop": 60 * 60,   # v0.99.618 — «EMA — касания» (the W/M loops no longer run); v0.99.619 — 15 -> 60 min, the hourly levels of 120 coins take longer on the phone (it beats per coin too)
     "battery_watch_loop": 30 * 60,   # v0.99.582
     "nx_loop": 60 * 60,   # v0.99.619 — Neuro v3 (the old live / mining loops no longer run)
@@ -7530,15 +7530,14 @@ LOOP_MAX_GAP_SEC = {
     # S/R, Peak, Neuro beat after every finished symbol (per-symbol
     # ceilings 300s / 720s), so an hour of silence there is a real stall.
     "snr_backtest_loop": 60 * 60,
-    "prv_backtest_loop": 60 * 60,
 }
 LOOP_LABELS = {
     "scan_loop": "Volume скан", "msnr_live_loop": "MSNR живой скан",
     "lsw_live_loop": "Sweep живой скан", "snr_live_loop": "S/R живой скан",
-    "prv_live_loop": "Peak Reversal живой скан", "nx_loop": "Нейро",
+    "prx_loop": "Peak Reversal", "nx_loop": "Нейро",
     "reconcile_loop": "сверка позиций (автоторговля)",
     "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
-    "snr_backtest_loop": "S/R бэктест", "prv_backtest_loop": "Peak Reversal бэктест",
+    "snr_backtest_loop": "S/R бэктест",
     "emx_loop": "EMA — касания",   # v0.99.618
     "battery_watch_loop": "батарея телефона",   # v0.99.582
 }
@@ -31159,6 +31158,336 @@ def api_nx_status():
         return jsonify({"err": f"статистика не посчиталась: {e}"})
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# v0.99.624 — Peak Reversal v2 (the user: "сделай p/r" after the audit). The audit on Binance 1h history of 127
+# coins 2021–2026 (tools/prv_audit): the band touch itself loses in every year in all 4 608 rule variants
+# (−0.03…−0.18R), 13 filters and the per-coin search the old module did lose too. A model over every event of
+# the EMA20 Keltner channel (1h and 4h: a wick 1.5 ATR past the basis or a close back after a close beyond)
+# with its band features + the 89 Neuro features finds the part that works: stop 1.5 ATR, take 3R, out after
+# 48 bars, the best 1% per side — 2022 +0.25R, 2023 +0.39R, 2024 +0.44R, 2025–26 +0.28R. The phone: at each
+# hour's start the just-closed 1h bar (and the 4h bar when it closed) of the liquid coins; an event above the
+# bar is an entry at market; the virtual record follows the chart's candles exactly as the research labels.
+PRX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_prv_model.json")
+PRX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_prv_model.json"
+PRX_MODEL_VER = 1
+PRX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_prx_state.json")
+PRX_TOP = int(os.environ.get("VP_PRX_TOP", "120"))
+PRX_RISK_DEFAULT = 0.5
+PRX_FEE, PRX_FUND = 0.001, 0.0003
+PRX_BAND_NAMES = ["tf", "side", "depth", "cdepth", "pdepth", "outside_n", "reent", "close_out", "slope", "squeeze", "atrp", "body", "wick"]
+_PRX = {"model": None, "err": None, "trades": [], "loaded": False, "scan": None, "last": []}
+_prx_lock = threading.Lock()
+
+
+def prx_series(cs):
+    """the channel of one chart (closed bars): ATR 14, EMA20 basis, the 20-close st. dev., bars closed 1.5 ATR out"""
+    n = len(cs)
+    atr = neuro_atr_series(cs, 14)
+    bs = prv_ma_series(cs, "EMA", 20)
+    C = [c["close"] for c in cs]
+    sd = [None] * n
+    for i in range(19, n):
+        w = C[i - 19:i + 1]
+        mu = sum(w) / 20
+        sd[i] = math.sqrt(max(0.0, sum((x - mu) ** 2 for x in w) / 20))
+    cd = [((C[i] - bs[i]) / atr[i]) if (atr[i] and bs[i] is not None) else None for i in range(n)]
+    out_n = [0.0] * n
+    for i in range(1, n):
+        out_n[i] = out_n[i - 1] + 1 if (cd[i] is not None and abs(cd[i]) >= 1.5) else 0.0
+    return {"atr": atr, "bs": bs, "sd": sd, "cd": cd, "out_n": out_n}
+
+
+def prx_event(cs, S, i, hrs):
+    """the band event of bar i (the research's prv_ev): (side, the 13 band features) or None"""
+    if i < 40:
+        return None
+    a, b = S["atr"][i], S["bs"][i]
+    if not a or b is None or S["cd"][i - 1] is None:
+        return None
+    c = cs[i]
+    hi_d, lo_d, c_d, p_d = (c["high"] - b) / a, (b - c["low"]) / a, S["cd"][i], S["cd"][i - 1]
+    ev = []
+    if hi_d >= 1.5 or (p_d >= 1.5 and c_d < p_d):
+        ev.append(-1)
+    if lo_d >= 1.5 or (p_d <= -1.5 and c_d > p_d):
+        ev.append(1)
+    if len(ev) != 1:
+        return None
+    s = ev[0]
+    depth = hi_d if s < 0 else lo_d
+    cdepth, pdepth = -s * c_d, -s * p_d
+    rg = c["high"] - c["low"]
+    b5 = S["bs"][i - 5]
+    f = [float(hrs), float(s), depth, cdepth, pdepth, S["out_n"][i], float(pdepth >= 1.5 and cdepth < pdepth), float(cdepth >= 1.5),
+         s * (b - b5) / a if b5 is not None else 0.0, (2 * S["sd"][i]) / (1.5 * a) if (a and S["sd"][i] is not None) else 1.0,
+         a / c["close"] * 100, s * (c["close"] - c["open"]) / rg if rg > 0 else 0.0,
+         ((min(c["open"], c["close"]) - c["low"]) if s > 0 else (c["high"] - max(c["open"], c["close"]))) / rg if rg > 0 else 0.0]
+    return s, f
+
+
+def prx_model():
+    with _prx_lock:
+        m = _PRX["model"]
+    if m and m.get("ver") == PRX_MODEL_VER:
+        return m
+    m = None
+    try:
+        if os.path.exists(PRX_MODEL_FILE):
+            with open(PRX_MODEL_FILE) as f:
+                m = json.load(f)
+            if m.get("ver") != PRX_MODEL_VER or m.get("feats") != PRX_BAND_NAMES + NX_NAMES:
+                m = None
+    except Exception as e:
+        log_error(f"p/r model read: {e}")
+        m = None
+    if not m:
+        try:
+            r = requests.get(PRX_MODEL_URL.format(ref="main"), params={"nocache": int(time.time())}, timeout=120)
+            r.raise_for_status()
+            m = r.json()
+            if m.get("ver") != PRX_MODEL_VER or not m.get("models"):
+                raise RuntimeError(f"версия модели {m.get('ver')} вместо {PRX_MODEL_VER}")
+            if m.get("feats") != PRX_BAND_NAMES + NX_NAMES:
+                raise RuntimeError("признаки модели не совпадают с кодом бота — нужно обновить бота")
+            tmp = PRX_MODEL_FILE + ".new"
+            with open(tmp, "w") as f:
+                json.dump(m, f, separators=(",", ":"))
+            os.replace(tmp, PRX_MODEL_FILE)
+        except Exception as e:
+            with _prx_lock:
+                _PRX["err"] = f"модель не скачалась: {e}"
+            log_error(f"p/r model download: {e}")
+            return None
+    with _prx_lock:
+        _PRX.update({"model": m, "err": None})
+    return m
+
+
+def prx_load():
+    try:
+        if os.path.exists(PRX_STATE_FILE):
+            with open(PRX_STATE_FILE) as f:
+                d = json.load(f)
+            with _prx_lock:
+                _PRX["trades"] = d.get("trades") or []
+                _PRX["scan"] = d.get("scan")
+                _PRX["last"] = d.get("last") or []
+    except Exception as e:
+        log_error(f"p/r state load: {e}")
+    _PRX["loaded"] = True
+
+
+def prx_save():
+    try:
+        with _prx_lock:
+            data = json.dumps({"trades": _PRX["trades"][-800:], "scan": _PRX["scan"], "last": _PRX["last"]})
+        tmp = PRX_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(data)
+        os.replace(tmp, PRX_STATE_FILE)
+    except Exception as e:
+        log_error(f"p/r state save: {e}")
+
+
+def prx_coin_events(sym, now, ref, t_hour):
+    """the coin's events of the bars that closed at t_hour: [(tf hours, side, feature row, atr, close)]"""
+    h1 = _zm_closed(sym, "1h", 3600, 1000, now)
+    if len(h1) < 400 or h1[-1]["time"] + 3600 != t_hour:
+        return []
+    h4 = _zm_closed(sym, "4h", 4 * 3600, 1000, now)
+    d1 = _zm_closed(sym, "1d", 86400, 3000, now)
+    out, row = [], None
+    charts = [(1, h1)]
+    if t_hour % (4 * 3600) == 0 and h4 and h4[-1]["time"] + 4 * 3600 == t_hour:
+        charts.append((4, h4))
+    for hrs, cs in charts:
+        S = prx_series(cs)
+        ev = prx_event(cs, S, len(cs) - 1, hrs)
+        if not ev:
+            continue
+        if row is None:
+            row = nx_series(h1, h4, d1, emw_bars(d1, "1w"), ref["btc"], ref["eth"], _nx_funding(sym, now), start=len(h1) - 1)[-1]
+            if row is None:
+                return []
+        out.append((hrs, ev[0], ev[1] + row, S["atr"][-1], cs[-1]["close"]))
+    return out
+
+
+def prx_scan_once():
+    m = prx_model()
+    if not m:
+        return
+    now = time.time()
+    t_hour = int(now // 3600 * 3600)
+    ref = {"btc": _zm_closed("BTC_USDT", "1h", 3600, 1000, now), "eth": _zm_closed("ETH_USDT", "1h", 3600, 1000, now)}
+    cands, coins, events, best = [], 0, 0, []
+    for sym in _own_top_syms(PRX_TOP):
+        heartbeat("prx_loop")
+        try:
+            evs = prx_coin_events(sym, now, ref, t_hour)
+            coins += 1
+            for hrs, s, x, atr, px in evs:
+                events += 1
+                sc = sum(zm_tree_pred(t_, x) for t_ in m["models"][str(s)]) / len(m["models"][str(s)])
+                thr = m["thr"][str(s)]
+                best.append((sc / thr if thr > 0 else 0.0, sym, s, hrs, round(sc, 3)))
+                if sc >= thr and atr:
+                    cands.append({"symbol": sym, "side": s, "tf": hrs, "score": round(sc, 3), "atr": atr, "px": px})
+        except Exception as e:
+            log_error(f"p/r scan {sym}: {e}")
+    best.sort(reverse=True)
+    live = {}
+    if cands:
+        for t in get_tickers() or []:
+            try:
+                live[t["contract"]] = float(t.get("last") or 0) or None
+            except (TypeError, ValueError):
+                pass
+    opened, cap = 0, int(m.get("side_cap") or 12)
+    for c in sorted(cands, key=lambda c: -c["score"]):
+        with _prx_lock:
+            opn = [t for t in _PRX["trades"] if t["status"] == "OPEN"]
+        if any(t["symbol"] == c["symbol"] and t["side"] == c["side"] for t in opn) or sum(1 for t in opn if t["side"] == c["side"]) >= cap:
+            continue
+        prx_open(m, c, t_hour, live.get(c["symbol"]))
+        opened += 1
+    with _prx_lock:
+        _PRX["scan"] = {"t": int(now), "hour": t_hour, "coins": coins, "events": events, "signals": len(cands), "opened": opened}
+        _PRX["last"] = [{"symbol": b[1], "side": b[2], "tf": b[3], "score": b[4], "pct": round(100 * b[0])} for b in best[:8]]
+    prx_save()
+
+
+def prx_open(m, c, t_hour, live_px=None):
+    rule = m["rule"]
+    s, sym, hrs = c["side"], c["symbol"], c["tf"]
+    direction = "LONG" if s > 0 else "SHORT"
+    risk = rule["stop_atr"] * c["atr"]
+    px = live_px or c["px"]
+    sl, tp = px - s * risk, px + s * rule["take_r"] * risk
+    hold = int(rule["hold_bars"])
+    tr = {"id": f"prx_{sym}_{s}_{hrs}_{t_hour}", "symbol": sym, "side": s, "tf": hrs, "direction": direction, "hour": t_hour,
+          "score": c["score"], "risk": risk, "entry": None, "sl": sl, "tp": tp, "px": px, "hold": hold, "take_r": float(rule["take_r"]),
+          "until": t_hour + hold * hrs * 3600, "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False}
+    if AUTOTRADE_ENABLED_PRV and live_px:
+        try:
+            res = execute_autotrade("prv", sym, direction, live_px, sl, tp, extra={"p/r": f"v2 {hrs}ч {c['score']}"},
+                                    risk_pct_override=MODULE_RISK_PCT.get("prv") or PRX_RISK_DEFAULT)
+            tr["real"] = (res or {}).get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+            tr["autotrade"] = {"status": (res or {}).get("status"), "detail": str((res or {}).get("detail") or "")[:200]}
+        except Exception as e:
+            log_error(f"p/r autotrade {sym}: {e}")
+    with _prx_lock:
+        if any(t["id"] == tr["id"] for t in _PRX["trades"]):
+            return
+        _PRX["trades"].append(tr)
+    if TELEGRAM_ALERTS_PRV:
+        pct = lambda p: (p - px) / px * 100
+        send_telegram(f"{'🟢' if s > 0 else '🔴'} {sym.replace('_USDT', '')} {direction} · 🔄 Peak Reversal ({hrs}ч)\n"
+                      f"вход по рынку ~{px:.6g} · стоп {sl:.6g} ({pct(sl):+.1f}%) · тейк {tp:.6g} ({pct(tp):+.1f}%) · держать до {hold * hrs} ч\n"
+                      f"оценка модели {c['score']} · " + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"), category="prv")
+
+
+def prx_settle(now=None):
+    """the open trades on their chart's closed candles exactly as the research labels: entry at the signal's next
+    bar open, stop first, then the take, out at the close of the hold's last bar; fees and funding"""
+    now = now or time.time()
+    changed = False
+    with _prx_lock:
+        opn = [t for t in _PRX["trades"] if t["status"] == "OPEN"]
+    for t in opn:
+        try:
+            hrs = int(t["tf"]); sec = hrs * 3600
+            cs = [c for c in (get_candles_range(t["symbol"], "1h" if hrs == 1 else "4h", t["hour"], int(now)) or [])
+                  if c["time"] + sec <= now and c["time"] >= t["hour"]]
+            if not cs or cs[0]["time"] != t["hour"]:
+                if now > t["until"] + 6 * 3600:
+                    with _prx_lock:
+                        t.update({"status": "CLOSED", "result": "NO_DATA", "r": None, "t_out": int(now)})
+                    changed = True
+                continue
+            s, risk, hold = t["side"], t["risk"], int(t["hold"])
+            if t.get("entry") is None:
+                e = cs[0]["open"]
+                with _prx_lock:
+                    t.update({"entry": e, "sl": e - s * risk, "tp": e + s * t["take_r"] * risk})
+                changed = True
+            e, sl, tp = t["entry"], t["sl"], t["tp"]
+            res = None
+            for k, c in enumerate(cs[:hold]):
+                if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
+                    res = ("LOSS", sl, k)
+                    break
+                if (c["high"] >= tp) if s > 0 else (c["low"] <= tp):
+                    res = ("WIN", tp, k)
+                    break
+            if not res and len(cs) >= hold:
+                res = ("TIME_EXIT", cs[hold - 1]["close"], hold - 1)
+            if not res:
+                continue
+            kind, ex, k = res
+            r = (s * (ex - e) - e * PRX_FEE - e * PRX_FUND * (k + 1) * hrs / 24) / risk
+            if kind == "TIME_EXIT" and t.get("real") and AUTOTRADE_ENABLED_PRV:
+                log_error(f"p/r time exit {t['symbol']}: {close_position_for_mode('prv', t['symbol'], t['direction'])}")
+            with _prx_lock:
+                t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + sec), "r": round(r, 3)})
+            changed = True
+            notify_trade_result("prv", t["symbol"], t["direction"], e, ex, kind, round(r, 3), real=bool(t.get("real")), note=f"P/R {hrs}ч")
+        except Exception as e_:
+            log_error(f"p/r trade {t.get('symbol')}: {e_}")
+    if changed:
+        prx_save()
+
+
+def prx_loop():
+    time.sleep(150)
+    prx_load()
+    last_hour = (_PRX.get("scan") or {}).get("hour")
+    while True:
+        heartbeat("prx_loop")
+        try:
+            if PRV_ENABLED:
+                now = time.time()
+                h = int(now // 3600 * 3600)
+                if h != last_hour and now - h >= 40:
+                    prx_settle(now)
+                    if now - h < 20 * 60:
+                        prx_scan_once()
+                    last_hour = h
+        except Exception as e:
+            log_error(f"prx_loop: {e}")
+            with _prx_lock:
+                _PRX["err"] = str(e)[:200]
+        time.sleep(30)
+
+
+def prx_stats():
+    m = _PRX.get("model") or {}
+    with _prx_lock:
+        trades = list(_PRX["trades"])
+        scan, err, last = _PRX.get("scan"), _PRX.get("err"), list(_PRX.get("last") or [])
+    fin = [t for t in trades if t["status"] == "CLOSED" and t.get("r") is not None]
+    rs = [t["r"] for t in fin]
+    t0 = min((t["hour"] for t in trades), default=None)
+    weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
+    return {"on": PRV_ENABLED, "auto": AUTOTRADE_ENABLED_PRV, "tg": TELEGRAM_ALERTS_PRV,
+            "risk": MODULE_RISK_PCT.get("prv") or PRX_RISK_DEFAULT,
+            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap")} if m else None,
+            "err": err, "scan": scan, "near": last,
+            "open": [t for t in trades if t["status"] == "OPEN"][-30:],
+            "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
+            "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
+            "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "hour", "r", "result", "real")} for t in sorted(fin, key=lambda t: -t["hour"])[:30]]}
+
+
+@app.route("/api/prx/status")
+def api_prx_status():
+    try:
+        return jsonify(prx_stats())
+    except Exception as e:
+        log_error(f"prx status: {e}")
+        return jsonify({"err": f"статистика не посчиталась: {e}"})
+
+
 @app.route("/api/zones/oc/retrain", methods=["POST"])
 def api_oc_retrain():
     def run():
@@ -34020,7 +34349,7 @@ INDEX_HTML = """<!doctype html>
   <div id="hdrActions" style="display:none;">
     <div class="hdrRow" style="display:none;"><span class="hdrLbl">Neuro</span><button id="resetNeuroBtn" class="btnDanger">🗑 Очистить</button><button id="restartNeuroBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">S/R Zones</span><button id="resetSnrBtn" class="btnDanger">🗑 Очистить</button><button id="restartSnrBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
-    <div class="hdrRow"><span class="hdrLbl">Peak Rev.</span><button id="resetPrvBtn" class="btnDanger">🗑 Очистить</button><button id="restartPrvBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
+    <div class="hdrRow" style="display:none;"><span class="hdrLbl">Peak Rev.</span><button id="resetPrvBtn" class="btnDanger">🗑 Очистить</button><button id="restartPrvBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">Симулятор</span><button id="resetSimulatorBtn" class="btnDanger">🗑 Сбросить</button></div>
     <div class="hdrRow"><span class="hdrLbl">Авто-тюнинг</span><button id="resetRiskAutotuneBtn" class="btnDanger">🗑 Сбросить</button></div>
     <div class="hdrRow"><span class="hdrLbl">Ошибки</span><button id="clearErrorsBtn" class="btnDanger">🗑 Очистить</button></div>
@@ -34240,26 +34569,26 @@ INDEX_HTML = """<!doctype html>
     <details class="settingsGroup" style="--mod-color:#ffa726;"><summary class="settingsGroupTitle">Peak Reversal (Keltner Channel)</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
-          <div class="label">Работа (бэктест + живые сигналы)</div>
-          <div class="sub">порт индикатора Peak Reversal v3 (Keltner Channel) — реверсия от касания внутренней полосы к средней, вход/стоп/тейк подбираются перебором по типу MA/длине/множителю полосы/RR/таймфрейму с проверкой на train/test</div>
+          <div class="label">Работа (каждый час — 120 монет)</div>
+          <div class="sub">канал Кельтнера (EMA20) на 1ч и 4ч: модель, обученная на 6 годах истории 127 монет, берёт лучший ~1% выходов за полосу; стоп 1.5 ATR, тейк 3R, до 48 свечей</div>
         </div>
         <label class="switch"><input type="checkbox" id="setPrv"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow">
+      <div class="settingRow subRow" style="display:none;">
         <div>
           <div class="label">↳ Сколько монет держать в топе</div>
           <div class="sub">вселенная — топ 30 по ликвидности; здесь сколько лучших по TEST avg P&L остаются активными (торгуются)</div>
         </div>
         <input type="number" id="setPrvTopN" min="1" max="30" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
-      <div class="settingRow subRow">
+      <div class="settingRow subRow" style="display:none;">
         <div>
           <div class="label">↳ Сколько монет отображать</div>
           <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, остальные показываются серым как справочные</div>
         </div>
         <input type="number" id="setPrvDisplayN" min="1" max="30" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
-      <div class="settingRow">
+      <div class="settingRow" style="display:none;">
         <div>
           <div class="label">↳ Автоторговля: только лучшая карточка</div>
           <div class="sub">торговать только ОДНУ монету — первую карточку (лучший средний R на проверочной части после комиссий). Остальные активные монеты продолжают давать сигналы и уведомления, но автоторговля по ним не открывает сделки</div>
@@ -34347,7 +34676,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ Алерты Peak Reversal</div>
-          <div class="sub">новые живые сигналы реверсии от канала Кельтнера</div>
+          <div class="sub">новые сигналы Peak Reversal: монета, сторона, стоп и тейк</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramPrv"><span class="switchSlider"></span></label>
       </div>
@@ -34449,7 +34778,7 @@ INDEX_HTML = """<!doctype html>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro 0.5" title="Нейро: пусто — 0.5% (не общий %)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSnr" min="0.1" max="100" step="0.5" placeholder="S/R" title="S/R Zones" style="display:none;width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R" title="Peak Reversal" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R 0.5" title="Peak Reversal: пусто — 0.5% (не общий %)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctEmw" min="0.1" max="100" step="0.5" placeholder="EMA 0.5" title="EMA — касания: пусто — 0.5% (не общий %)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctZones" min="0.1" max="100" step="0.5" placeholder="Зоны" title="Зоны" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctZm" min="0.1" max="100" step="0.1" placeholder="🎯 0.5" title="🎯 Сильные зоны: пусто — 0.5% (не общий %!)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
@@ -34486,7 +34815,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ Peak Reversal</div>
-          <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча и размера позиции, что и у остальных режимов</div>
+          <div class="sub">вход по рынку в начале часа, стоп 1.5 ATR и тейк 3R сразу на бирже, выход через 48 свечей; риск — поле «P/R» ниже (пусто = 0.5%, не общий %)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradePrv"><span class="switchSlider"></span></label>
       </div>
@@ -37517,7 +37846,54 @@ function stratNewBadge(c, isActive) {   // v0.99.557 — why a passing coin isn'
   return `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-xs);"><span style="font-size:var(--fs-xs);">${txt}</span></div>`;
 }
 
-async function refreshPrv() {
+async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, the yearly check, the last scan, the trades
+  const panel = document.getElementById('prvPanel');
+  let d;
+  try { d = await (await fetch('/api/prx/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
+  const card = (title, body) => `<div class="zcard"><div class="zh">${title}</div>${body}</div>`;
+  const tile = (l, v, n) => `<div class="ztile"><div class="zl">${l}</div><div class="zv">${v}</div>${n ? `<div class="zn">${n}</div>` : ''}</div>`;
+  const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  const coin = s => (s || '').replace('_USDT', '');
+  const hm = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
+  const m = d.model, rs = (m && m.research) || {}, rule = (m && m.rule) || {};
+  const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
+  let h = '';
+  // 1. what it is and how it did on the years it never saw
+  let top = `<div class="dim">Канал Кельтнера (EMA20 ± ATR) на 1ч и 4ч у 120 ликвидных монет. Сам выход за полосу на истории убыточен (проверено 4 608 вариантов правила, фильтры и подбор под монету — всё в минусе), поэтому сигнал даёт модель: она смотрит, как цена вышла за полосу, и ещё 89 параметров рынка, и берёт только лучший ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 1}% выходов.</div>`;
+  if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
+  else {
+    const ys = rs.years || {};
+    const all = Object.values(ys).filter(x => x && x.n);
+    const n = all.reduce((a, x) => a + x.n, 0), avg = n ? all.reduce((a, x) => a + x.avg * x.n, 0) / n : null;
+    const wk = all.length ? all.reduce((a, x) => a + x.wk, 0) / all.length : null, dd = Math.max(0, ...all.map(x => x.dd || 0));
+    top += `<div class="zsub">Проверка на истории 127 монет — каждый год модель не видела. Результат на сделку:</div>
+      ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
+      <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>до <b>${rule.hold_bars || 48}</b> свечей</span><span>просадка до <b>${dd}R</b></span></div>
+      <div class="zsub">Вход — по рынку после закрытия свечи, стоп — <b>${rule.stop_atr} ATR</b> её графика, тейк — <b>${rule.take_r} риска</b>, через ${rule.hold_bars} свечей выход (1ч — 2 дня, 4ч — 8 дней). Не больше ${m.side_cap || 12} сделок в одну сторону.</div>
+      ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «P/R» в настройках риска (пусто = ${d.risk}%). Сделок бывает много одновременно — держите риск маленьким.</div>`}`;
+  }
+  h += card(`🔄 Peak Reversal ${pill}`, top);
+  // 2. the last scan
+  const sc = d.scan, near = d.near || [];
+  const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;">
+      <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.tf}ч · ${a.pct}%</span></span>`;
+  h += card('🔎 Последний час', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, `монет · выходов за полосу ${sc.events}`)}${tile('сигналов', sc.signals, '')}${tile('открыто', sc.opened, '')}</div>
+    ${near.length ? `<div class="zsub" style="margin-top:8px;">ближе всех к порогу (100% — сигнал):</div><div>${near.map(chip).join('')}</div>` : ''}
+    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · следующий пересчёт в начале часа</div>`
+    : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
+  // 3. the trades
+  const op = d.open || [];
+  const row = t => `<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);">
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim"> · ${t.tf}ч${t.real ? ' · 💰' : ''}</span></span>
+      <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry != null ? t.entry : t.px)} · до ${hm(t.until)}</span></div>`;
+  h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
+    ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map(row).join('')}</div>` : ''}
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${zBars(d.last.map(t => ({label: `${coin(t.symbol)} ${t.side > 0 ? '↑' : '↓'}`, sub: `${t.tf}ч · ${hm(t.hour)}`, v: t.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}`);
+  h += `<details class="zcard"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Индикатор — канал Кельтнера: средняя EMA20 и полосы ±ATR. Событие — свеча с тенью дальше 1.5 ATR от средней или закрытие, вернувшееся внутрь после закрытия за полосой. Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на 2.4 млн таких событий 127 монет Binance за 6 лет: для каждого — чем кончилась бы сделка со стопом ${rule.stop_atr || 1.5} ATR и тейком ${rule.take_r || 3}R за ${rule.hold_bars || 48} свечей. Порог выбран честно: модель учили на прошлых годах и проверяли на следующем; 2025–26 — финальная проверка. В начале каждого часа бот считает то же самое тем же кодом по только что закрытой свече 1ч (и 4ч, когда она закрылась) и открывает сделку, если оценка выше порога (по монете и стороне — одна сделка). Учёт — по свечам своего графика, как в исследовании: вход по открытию следующей свечи, стоп раньше тейка; комиссии и фандинг учтены. Прежний подбор параметров под каждую монету убран: на истории он был в минусе каждый год.</div></details>`;
+  setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
+}
+
+async function refreshPrvOld() {   // v0.99.624 — the old per-coin P/R, not shown
   const panel = document.getElementById('prvPanel');
   try {
     const data = await (await fetch('/api/prv/status')).json();
@@ -40281,10 +40657,9 @@ if __name__ == "__main__":
     threading.Thread(target=nx_loop, daemon=True).start()
     threading.Thread(target=snr_backtest_loop, daemon=True).start()
     threading.Thread(target=snr_filter_loop, daemon=True).start()   # v0.99.337
-    threading.Thread(target=prv_filter_loop, daemon=True).start()   # v0.99.361
     threading.Thread(target=snr_live_loop, daemon=True).start()
-    threading.Thread(target=prv_backtest_loop, daemon=True).start()
-    threading.Thread(target=prv_live_loop, daemon=True).start()
+    # v0.99.624 — the old per-coin Peak Reversal (backtest / live / filter loops) is replaced by the model (prx_loop)
+    threading.Thread(target=prx_loop, daemon=True).start()
     threading.Thread(target=entry_retry_loop, daemon=True).start()   # v0.99.566
     # v0.99.618 — the old W/M touch alerts and their statistics are replaced by «EMA — касания» (emx_loop)
     threading.Thread(target=emx_loop, daemon=True).start()

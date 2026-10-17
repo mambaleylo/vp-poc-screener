@@ -19864,3 +19864,14 @@ v0.99.623 - Neuro: take 3R, out after 48 h (the take sweep). Take 3 / 4 / 6 R ×
          2025–26 (unseen) +0.33R at 3.8/wk vs +0.10R of the old 2R / 12 h rule; 4R and 6R lost in 2025–26.
          The model is re-exported (version 2, downloaded on start); each trade keeps the hold and take it
          opened with (the open 12 h trades finish as before). Checked: 60/60 feature rows, 120/120 trades.
+v0.99.624 - Peak Reversal rebuilt from the audit (the user: "сделай p/r"). The old per-coin search (216 rule
+         combos per coin, z-tests) lost on Binance history of 127 coins in every year 2021–2026, as did all
+         4 608 rule variants of the band touch and 13 filters. Now a model over every EMA20 Keltner channel
+         event (1h and 4h: a wick 1.5 ATR past the basis or a close back inside after a close beyond) with 13
+         band features + the 89 Neuro features, per side; rule stop 1.5 ATR, take 3R, out after 48 bars, the
+         best 1% per side, at most 12 per side: 2022 +0.23R, 2023 +0.19R, 2024 +0.35R, 2025–26 (unseen)
+         +0.13R at ~2.4/wk. Every hour the bot checks the just-closed 1h bar (and the 4h bar when it closed)
+         of 120 liquid coins with the same code (checked: 72/72 events, 60/60 trades), signals in Telegram,
+         trades with the P/R switch (risk: the P/R field, 0.5% when empty) and keeps the virtual record on the
+         chart's candles exactly as the research. The old loops no longer run; the tab is new (yearly check,
+         the last hour, the trades). Scripts: tools/prv_audit.
