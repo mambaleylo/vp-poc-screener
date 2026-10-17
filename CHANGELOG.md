@@ -19903,3 +19903,11 @@ v0.99.626 - 📈 Range breakout: the 12h chart and the «half at +2R» mode (the
          +0.05R). With autotrade the bot closes half at market and moves the exchange stop. The tab shows both
          charts for the current mode and the other mode for comparison. Checked: the bot's signals and trade
          records with both exits = the research's (day 79/79 and 148/148, 12h 241/241 and 444/444).
+
+v0.99.627 - Zones: a result post (the ADA screenshot with the TradingView price-range label «0,0175 (8,13%) 175»)
+         came out as new zones again — the user: "опять отработанную сделку не распознала". The label is told
+         from a zone by its text, and the OCR read it as «(0.0175 6,135) 175» (the "%" as a digit), so it was
+         taken for a short zone. A small wide box is now a result label also when its move and its ticks are
+         the same digits (0,0175 / 175) or when it has two prices and a bracket (a zone has no text), and a box
+         missed on the first read is read once more at twice the size. On this screenshot shrunk to 700–1230 px
+         and saved at JPEG 60–90 every copy is now a result post (800 px failed before).

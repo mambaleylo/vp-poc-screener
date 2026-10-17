@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.626"
+APP_VERSION = "0.99.627"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23644,17 +23644,29 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
         # v0.99.515 — the label text can come out dark in JPEG (no white pixels):
         # every small wide rect is read, a price-range label is recognised by its text
         if small_sz and w_ >= 2.0 * h_ and result_label is None:
-            txt = ""
-            try:
-                from PIL import ImageOps as _IO
-                crop = im.crop((max(0, r["x0"] - 2), max(0, r["y0"] - 2), min(W, r["x1"] + 2), min(H, r["y1"] + 2)))
-                crop = _IO.invert(crop.convert("L")).resize((crop.width * 3, crop.height * 3))
-                txt = _zocr_tesseract(crop, 7)
-            except Exception:
+            # v0.99.627 — a small chart (~800 px) read the "%" as a digit: "(0.0175 6,135) 175" (ADA):
+            # the label's own signature counts too — the move "0,0175" and the ticks "175" at its end are
+            # the same digits; two prices and a bracket are enough (a zone has no text); a missed label is
+            # read once more, twice as large
+            def _is_label(t_):
+                m_rl = re.search(r"(-?\d+[.,]\d+)\D{1,4}\d+[.,]?\d*\D{0,4}\s(\d{1,9})\b", t_)
+                return "%" in t_ or bool(re.search(r"\(\s*-?\d+[.,]?\d*\s*[%»9]?\s*\)", t_)) or \
+                    ("(" in t_ and bool(m_rl) and re.sub(r"[-.,]", "", m_rl.group(1)).lstrip("0") == m_rl.group(2)) or \
+                    (bool(re.search(r"[()]", t_)) and len(re.findall(r"\d+[.,]\d+", t_)) >= 2)
+            for zoom in (3, 6):
                 txt = ""
-            if "%" in txt or re.search(r"\(\s*-?\d+[.,]?\d*\s*[%»9]?\s*\)", txt):
-                result_label = txt.strip()
-                small = True
+                try:
+                    from PIL import ImageOps as _IO
+                    crop = im.crop((max(0, r["x0"] - 2), max(0, r["y0"] - 2), min(W, r["x1"] + 2), min(H, r["y1"] + 2)))
+                    crop = _IO.invert(crop.convert("L"))
+                    crop = crop.resize((crop.width * zoom, crop.height * zoom), *(() if zoom == 3 else (Image.LANCZOS,)))
+                    txt = _zocr_tesseract(crop, 7)
+                except Exception:
+                    txt = ""
+                if _is_label(txt):
+                    result_label = txt.strip()
+                    small = True
+                    break
         if small or w_ < 0.06 * plot_x1 or r.get("label_only"):
             continue   # a label / a marker, not a zone
         keep.append(r)
