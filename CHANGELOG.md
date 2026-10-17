@@ -19875,3 +19875,19 @@ v0.99.624 - Peak Reversal rebuilt from the audit (the user: "сделай p/r").
          trades with the P/R switch (risk: the P/R field, 0.5% when empty) and keeps the virtual record on the
          chart's candles exactly as the research. The old loops no longer run; the tab is new (yearly check,
          the last hour, the trades). Scripts: tools/prv_audit.
+v0.99.625 - 📈 Range breakout — a new module from the high-RR hunt (the user: "подними все архивные
+         индикаторы… заставь хоть один выдавать отличные сигналы со средним R от 1 на сделку, придумай
+         новый"). On Binance history of 127 coins 2021–2026 the project's old indicators (Trend / Donchian,
+         squeeze, Sweep, Mirror retest, AMD, MR4, big candle, EMA pullback, range breakout) were run on 1h /
+         4h / 1d with fixed takes 3–20R and trailing exits, raw, with a model and with market / trend gates.
+         Most sit near zero; trend following on the daily chart made +1…+1.6R a trade in 2021–23 and lost it
+         in 2024–26. One rule held in every year: a 20-day range narrower than 2.5 × ATR100, the daily close out
+         of it in the direction of the coin's own EMA200, stop 1.5 ATR, no take — out at the daily close beyond
+         the 20-day low / high; at most 6 at once per side, the strongest breakout first. Picked on 2021–23:
+         2021 +3.58R, 2022 +0.85R, 2023 +1.03R, 2024 +0.94R, 2025–26 +0.93R a trade, ~1 trade a week, WR ~30%,
+         drawdown up to 24R, up to 22 stops in a row (the profit is rare +20…+70R trends). Neighbouring settings
+         are positive every year too. The bot checks 120 liquid coins after each daily close, signals in
+         Telegram, trades with its own switch (stop on the exchange, a far take only as a guard; the bot closes
+         at market when the trend ends; risk: the 📈 field, 0.5% when empty), keeps the virtual record on the
+         daily candles exactly as the research (checked: 98/98 signals, 97/97 trades) and shows the coins in a
+         squeeze now. New tab «📈 Пробой». Scripts: tools/rr_hunt.

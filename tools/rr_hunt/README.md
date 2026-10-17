@@ -1,0 +1,17 @@
+# High-RR hunt — the archived indicators re-tested, and 📈 range breakout
+
+Binance 1h history of 127 coins 2020–2026 (`tools/zones_model/dl.py 1h`), funding (`tools/neuro_model/dl_fund.py`).
+
+1. `python3 ev_engine.py` — the project's old indicators as events on 1h / 4h / 1d: Donchian 20 / 55 (Trend),
+   squeeze, sweep (Sweep / LSW), retest of a broken level (Mirror), EMA pullback, range breakout, AMD, MR4
+   extremes, big candle; each with stops 1 / 1.5 / 3 ATR × fixed takes 3 / 5 / 8 / 12 / 20R, chandelier 3 / 5 / 8
+   ATR and Donchian 10 / 20 / 50 exits. `ev_tab.py` — raw table; `ev_wf.py` — a model per side (noisy on trend
+   trades); `ev_regime.py`, `ev_gates.py` — market / trend gates without a model.
+2. `python3 rb_daily.py` + `rb_tab.py` / `rb_cap.py` / `rb_order.py` — the daily range breakout in depth (range
+   10–40 days, compression 2–6 × ATR100, gates, stops, takes / trailing exits, the cap on positions, random and
+   ranked order among same-day signals).
+3. The rule (picked on 2021–23): 20-day range < 2.5 × ATR100, daily close out of it in the direction of the coin's
+   EMA200, stop 1.5 ATR, out at the daily close beyond the 20-day low / high, at most 6 per side, the strongest
+   breakout first: 2021 +3.58R, 2022 +0.85R, 2023 +1.03R, 2024 +0.94R, 2025–26 +0.93R (~1/wk, WR ~30%,
+   drawdown ≤ 24R, up to 22 stops in a row). `rb_final.py` writes the stats the bot shows.
+4. `t_rbx_e2e.py` — the bot's signal (98/98, 320/320 random days) and trade record (97/97) = the research's.
