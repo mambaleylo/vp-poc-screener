@@ -19891,3 +19891,15 @@ v0.99.625 - 📈 Range breakout — a new module from the high-RR hunt (the user
          at market when the trend ends; risk: the 📈 field, 0.5% when empty), keeps the virtual record on the
          daily candles exactly as the research (checked: 98/98 signals, 97/97 trades) and shows the coins in a
          squeeze now. New tab «📈 Пробой». Scripts: tools/rr_hunt.
+
+v0.99.626 - 📈 Range breakout: the 12h chart and the «half at +2R» mode (the user asked for a lower timeframe and
+         Neuro filters for a higher win rate, then chose both options). 4h and 8h breakouts are not stable year to
+         year; Neuro score and feature filters did not raise the win rate. 12h holds: a 30-bar range narrower than
+         4 × ATR100, the same own-EMA200 side, stop 1.5 ATR, out at the 12h close beyond the 20-bar low / high —
+         +0.73R a trade, WR 27%, ~2.4 trades a week (2021 +0.79, 2022 +0.41, 2023 +0.52, 2024 +1.11, 2025–26
+         +0.69R); the bot now scans it after every 12h close next to the daily chart (6 slots per side each).
+         New setting «↳ Половина на +2R»: half of the position off at +2R, the stop to the entry, the rest by
+         the trend — day +0.83R a trade at WR 44% (instead of +1.4R at 34%), 12h +0.34R at 37% (2025–26 only
+         +0.05R). With autotrade the bot closes half at market and moves the exchange stop. The tab shows both
+         charts for the current mode and the other mode for comparison. Checked: the bot's signals and trade
+         records with both exits = the research's (day 79/79 and 148/148, 12h 241/241 and 444/444).
