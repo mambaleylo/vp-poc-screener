@@ -65,7 +65,7 @@ for sym in ("SOLUSDT", "LINKUSDT", "DOGEUSDT", "AVAXUSDT", "ETHUSDT"):
             atr = z["X"][k][vp.NX_NAMES.index("atr_pct")] / 100 * h1_of(sym)[int(z["i"][k])]["close"]
             vp._NX["trades"] = []
             vp.nx_open(m, {"symbol": sym.replace("USDT", "_USDT"), "side": s, "score": 0, "atr": float(atr), "px": 1.0}, h)
-            vp.nx_settle(now=h + 20 * 3600)
+            vp.nx_settle(now=h + (R["hold_h"] + 6) * 3600)
             tr = vp._NX["trades"][0]
             if tr["r"] is not None and abs(tr["r"] - lab) < 0.01:
                 ok2 += 1

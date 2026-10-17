@@ -19859,3 +19859,8 @@ v0.99.622 - Strong zones: take 4R (the take sweep, the user: "особенно �
          and was confirmed with 3 models per fold: 2022 +0.46R, 2023 +0.27R, 2024 +0.22R, 2025–26 (unseen)
          +0.17R at 7.7/wk, +383R over the four years vs +279R. The model is re-exported for it (version 2,
          downloaded on start); zones already open keep their own take. «Чего ожидать» uses the new trades.
+v0.99.623 - Neuro: take 3R, out after 48 h (the take sweep). Take 3 / 4 / 6 R × hold 12 / 48 / 120 h in the same
+         walk-forward; stop 1 ATR, take 3R, 48 h, top 0.5% per side: 2022 +0.35R, 2023 +0.42R, 2024 +0.29R,
+         2025–26 (unseen) +0.33R at 3.8/wk vs +0.10R of the old 2R / 12 h rule; 4R and 6R lost in 2025–26.
+         The model is re-exported (version 2, downloaded on start); each trade keeps the hold and take it
+         opened with (the open 12 h trades finish as before). Checked: 60/60 feature rows, 120/120 trades.

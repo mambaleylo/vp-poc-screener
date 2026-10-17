@@ -17,3 +17,9 @@ Uses the Binance 1h history of `tools/zones_model` (`dl.py 1h`, 127 coins, 2020�
 
 Chosen rule (best over 2022–24): stop 1 ATR, take 2R, out after 12 h, top 0.3% per side:
 2022 +0.55R (3/wk), 2023 +0.49R (1.4/wk), 2024 +0.28R (9/wk), 2025–26 (unseen) +0.10R (4.5/wk), dd up to 60R.
+
+v0.99.623 — the take sweep (the user: "полноценная проверка разных тейков"): `nx_lab3.py` adds take 3 / 4 / 6 R ×
+hold 12 / 48 / 120 h labels; `Y3=3 FINAL=1 python3 nx_wf3.py 1.0_3.0_48 1.0_4.0_48 1.0_6.0_120`. Stop 1 ATR, take
+3R, out after 48 h, top 0.5%: 2022 +0.35R, 2023 +0.42R, 2024 +0.29R, 2025–26 +0.33R (3.8/wk) vs +0.10R of the
+old 2R / 12 h; 4R and 6R lost in 2025–26. Export: `Y3=3 RULE=1.0_3.0_48 Q=0.995 EXPORT=1 python3 nx_final3.py`
+(set "ver": 2). `t_nx_e2e.py`: 60/60 rows, 120/120 trades.

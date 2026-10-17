@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.622"
+APP_VERSION = "0.99.623"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30486,7 +30486,7 @@ def api_emx_status():
 # the 1h candles exactly as the research labels (stop first, then the take, the 12th close).
 NX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_neuro_model.json")
 NX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_neuro_model.json"
-NX_MODEL_VER = 1
+NX_MODEL_VER = 2   # v0.99.623 — 2: take 3R, out after 48 h (the take sweep)
 NX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_nx_state.json")
 NX_TOP = int(os.environ.get("VP_NX_TOP", "120"))
 NX_RISK_DEFAULT = 0.5      # % when Neuro's own risk field is empty — many trades at once
@@ -31038,6 +31038,7 @@ def nx_open(m, c, t_hour, live_px=None):
     sl, tp = px - s * risk, px + s * rule["take_r"] * risk
     tr = {"id": f"nx_{sym}_{s}_{t_hour}", "symbol": sym, "side": s, "direction": direction, "hour": t_hour, "score": c["score"],
           "risk": risk, "entry": None, "sl": sl, "tp": tp, "px": px, "until": t_hour + int(rule["hold_h"]) * 3600,
+          "hold": int(rule["hold_h"]), "take_r": float(rule["take_r"]),
           "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False}
     if AUTOTRADE_ENABLED_NEURO and live_px:
         try:
@@ -31060,14 +31061,14 @@ def nx_open(m, c, t_hour, live_px=None):
 
 def nx_settle(now=None):
     """the open trades walked on the closed 1h candles exactly as the research labels: entry at the signal
-    hour's open, stop first, then the take, out at the close of the 12th hour; fees and funding"""
+    hour's open, stop first, then the take, out at the close of the hold's last hour; fees and funding"""
     now = now or time.time()
     m = _NX.get("model") or {}
-    hold = int((m.get("rule") or {}).get("hold_h") or 12)
-    take_r = float((m.get("rule") or {}).get("take_r") or 2.0)
     changed = False
     for t in _nx_open_count():
         try:
+            hold = int(t.get("hold") or 12)          # v0.99.623 — the rule the trade opened with (before: 12 h, 2R)
+            take_r = float(t.get("take_r") or 2.0)
             cs = [c for c in (get_candles_range(t["symbol"], "1h", t["hour"], int(now)) or []) if c["time"] + 3600 <= now and c["time"] >= t["hour"]]
             if not cs or cs[0]["time"] != t["hour"]:
                 if now > t["until"] + 6 * 3600:
@@ -34464,7 +34465,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ Нейро</div>
-          <div class="sub">вход по рынку в начале часа, стоп и тейк сразу на бирже, выход через 12 ч; риск — поле «Neuro» ниже (пусто = 0.5%, не общий %): сделок бывает много одновременно</div>
+          <div class="sub">вход по рынку в начале часа, стоп и тейк сразу на бирже (стоп 1 ATR, тейк 3R), выход через 48 ч; риск — поле «Neuro» ниже (пусто = 0.5%, не общий %): сделок бывает много одновременно</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeNeuro"><span class="switchSlider"></span></label>
       </div>
