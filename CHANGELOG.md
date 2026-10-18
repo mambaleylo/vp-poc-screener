@@ -19945,3 +19945,7 @@ v0.99.631 - 🪞 Hedge mirror: a short recommendation from the first account's l
          (and in how many of the 20 it was positive), and the «Размер зеркала» with the best growth of the second
          balance (Kelly) and half of it as the safer one; with no positive size (the losses are mostly fees) it
          says the mirror is not worth switching on. Fetched in the background every 10 minutes. Tests: 33/33.
+
+v0.99.632 - 🪞 Hedge mirror: the recommendation shows only the numbers (the user: no plus / minus amounts) — the safer
+         «Размер зеркала», the maximum one, and «не меньше ×» when the current minimum is above the best size;
+         with no good size: «зеркало не рекомендуется».

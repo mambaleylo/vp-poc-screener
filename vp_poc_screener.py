@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.631"
+APP_VERSION = "0.99.632"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -38865,12 +38865,10 @@ async function refreshHdg() {   // v0.99.628 — 🪞 hedge mirror
     ${c.on && !d.err && d.t ? `<div class="dim" style="font-size:var(--fs-xs);">последняя проверка ${dd(d.t)}</div>` : ''}`);
   const rc = d.reco;
   if (c.dst && rc) {
-    const $ = v => `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${(+v).toFixed(2)}$</span>`;
     let t;
     if (rc.err) t = `<span class="dim">${rc.err}</span>`;
-    else if (!rc.best_k) t = `по последним ${rc.n} сделкам первого счёта зеркало было бы в минусе (${$(rc.mirror_now)} при нынешних настройках) — твой слив там в основном комиссии (${$(rc.fees)} из ${$(rc.own)}), включать не стоит`;
-    else t = `по последним ${rc.n} сделкам: твой итог ${$(rc.own)} (комиссии ${$(rc.fees)}), зеркало при нынешних настройках дало бы ${$(rc.mirror_now)} (в плюсе ${rc.pos} из ${rc.n}).
-      <b>Лучший рост второго счёта — «Размер зеркала» ${rc.best_mult}</b> (+${rc.growth_best}%), безопаснее — <b>${rc.half_mult}</b>: 20 сделок — мало, это ориентир${rc.best_k < (c.min_x ?? 2) ? `; минимум ×${c.min_x ?? 2} от сделки выше лучшего — его стоит снизить до ${(rc.best_k / 2).toFixed(1)}` : ''}`;
+    else if (!rc.best_k) t = `по последним ${rc.n} сделкам: зеркало не рекомендуется`;
+    else t = `по последним ${rc.n} сделкам: «Размер зеркала» <b>${rc.half_mult}</b> (максимум ${rc.best_mult})${rc.best_k < (c.min_x ?? 2) ? ` · «не меньше ×» <b>${(rc.best_k / 2).toFixed(1)}</b>` : ''}`;
     h += `<div class="zcard" style="font-size:var(--fs-sm);">📊 ${t}</div>`;
   }
   const op = d.open || [];
