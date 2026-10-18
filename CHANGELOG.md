@@ -19924,3 +19924,6 @@ v0.99.628 - 🪞 Hedge mirror — a new tab (the user asked for it). The user pi
          are not copied, positions open before switching on are left alone, a coin the second account already
          holds is not touched, nothing is sent in the dry-run mode. Checked every 5 s; the state survives restarts
          (vp_hdg_state.json). Tested on a fake two-account exchange (tools/hedge/t_hdg.py, 22/22).
+
+v0.99.629 - 🪞 Hedge mirror: the account pickers show each account's futures balance (wallet + unrealised PnL) next
+         to its name, so the user can tell the saved keys apart. Fetched in the background at most once a minute.

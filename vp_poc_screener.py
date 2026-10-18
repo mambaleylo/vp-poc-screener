@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.628"
+APP_VERSION = "0.99.629"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31884,6 +31884,31 @@ def hdg_accounts():
     return out
 
 
+_hdg_bal = {"t": 0, "v": {}, "busy": False}
+
+
+def hdg_balances():
+    """each keyed account's futures balance for the account pickers — refreshed in the background at most once a
+    minute (the page asks every few seconds)"""
+    if time.time() - _hdg_bal["t"] > 60 and not _hdg_bal["busy"]:
+        _hdg_bal["busy"] = True
+
+        def run():
+            v = {}
+            for a in hdg_accounts():
+                if not a["ok"]:
+                    continue
+                try:
+                    with hdg_acc(a["id"]):
+                        v[a["id"]] = round(hdg_equity(), 2)
+                except Exception as e:
+                    v[a["id"]] = None
+                    log_error(f"hdg balance {a['id']}: {e}")
+            _hdg_bal.update({"v": v, "t": time.time(), "busy": False})
+        threading.Thread(target=run, daemon=True).start()
+    return dict(_hdg_bal["v"])
+
+
 def hdg_acc_label(a):
     return next((x["label"] for x in hdg_accounts() if x["id"] == a), str(a))
 
@@ -32250,7 +32275,9 @@ def hdg_status():
         cfg, pairs, log, err, t, armed = dict(_HDG["cfg"]), dict(_HDG["pairs"]), list(_HDG["log"]), _HDG["err"], _HDG["t"], _HDG["armed"]
     opn = [dict(p, key=k) for k, p in pairs.items() if p.get("status") == "open"]
     done = sorted((dict(p, key=k) for k, p in pairs.items() if p.get("status") != "open"), key=lambda p: -(p.get("t_close") or 0))[:20]
-    return {"cfg": cfg, "accounts": hdg_accounts(), "open": opn, "done": done, "log": log[-30:][::-1], "err": err, "t": t,
+    bal = hdg_balances()
+    accs = [dict(a, bal=bal.get(a["id"])) for a in hdg_accounts()]
+    return {"cfg": cfg, "accounts": accs, "open": opn, "done": done, "log": log[-30:][::-1], "err": err, "t": t,
             "armed": armed, "dry": AUTOTRADE_DRY_RUN, "buf_pct": HDG_LIQ_BUF_PCT, "poll": HDG_POLL_SEC}
 
 
@@ -38715,7 +38742,8 @@ async function refreshHdg() {   // v0.99.628 — 🪞 hedge mirror
   const side = s => s === 'long' ? '<span class="win">лонг</span>' : '<span class="loss">шорт</span>';
   const px = v => v == null ? '—' : (+v).toPrecision(6).replace(/\.?0+$/, '');
   const c = d.cfg || {}, accs = d.accounts || [];
-  const opt = (sel) => accs.map(a => `<option value="${a.id}" ${a.id === sel ? 'selected' : ''} ${a.ok ? '' : 'disabled'}>${a.label}${a.ok ? '' : ' — нет ключей'}</option>`).join('');
+  const bal = a => a.bal == null ? '' : ' — ' + (+a.bal).toLocaleString('ru-RU', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + '$';
+  const opt = (sel) => accs.map(a => `<option value="${a.id}" ${a.id === sel ? 'selected' : ''} ${a.ok ? '' : 'disabled'}>${a.label}${a.ok ? bal(a) : ' — нет ключей'}</option>`).join('');
   const selSt = 'background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);max-width:100%;';
   const pill = !c.on ? '<span class="pill">выключено</span>' : (d.err ? '<span class="pill neg">ошибка</span>' : '<span class="pill pos">следит</span>');
   let h = `<div class="dim">Каждая <b>новая</b> позиция на первом счёте → на втором открывается такая же монета в <b>обратную</b> сторону,
