@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.634"
+APP_VERSION = "0.99.635"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -38887,8 +38887,8 @@ async function refreshHdg() {   // v0.99.628 — 🪞 hedge mirror
     const base = `по последним ${rc.n} сделкам с PnL от ${rc.min_pnl ?? 5}$ по модулю`;
     if (rc.err) t = `<span class="dim">${rc.err}</span>`;
     else if (rc.n < 10) t = `${base}: осталось ${rc.n} — мало для вывода`;
-    else if (!rc.best_k || rc.best_k < 1) t = `${base}: <b>зеркало не рекомендуется</b> — перевеса почти нет (выгодно было бы только зеркало меньше твоей сделки)`;
-    else t = `${base}: «Размер зеркала» <b>${rc.half_mult}</b> (максимум ${rc.best_mult})${rc.best_k < (c.min_x ?? 2) ? ` · «не меньше ×» <b>${Math.max(1, rc.best_k / 2).toFixed(1)}</b>` : ''}`;
+    else if (!rc.best_k) t = `${base}: <b>зеркало не рекомендуется</b> — на этих сделках второй счёт не рос бы ни при каком размере`;
+    else t = `${base}: «Размер зеркала» <b>${rc.half_mult}</b> (максимум ${rc.best_mult})${rc.best_k < (c.min_x ?? 2) ? ` · «не меньше ×» <b>${(rc.best_k / 2).toFixed(1)}</b> — больше не даёт размер второго счёта` : ''}`;
     h += `<div class="zcard" style="font-size:var(--fs-sm);">📊 ${t}</div>`;
   }
   const op = d.open || [];

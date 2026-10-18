@@ -19960,3 +19960,11 @@ v0.99.633 - 🪞 Hedge mirror: the recommendation now takes the first account's 
 v0.99.634 - 🪞 Hedge mirror: the recommendation takes only the positions closed at +5$ or more / -5$ or less (the user:
          the 0.3% move filter still left the impulsive ones in) — the last 50 such of the last 200 closed; the price
          move filter is gone. Tests: 36/36.
+
+v0.99.635 - 🪞 Hedge mirror: «зеркало не рекомендуется» only when the second account would not grow at any size. The
+         rule «the best mirror is under 1x the user's trade in dollars -> not recommended» was wrong for the user:
+         the second account is small (~82$) next to the first account's trades (one +29$ win of the user = -58$ for
+         a 2x mirror = 71% of it), so the size with the best growth is under 1x in dollars while the mirror still
+         grows the account — it hid a working recommendation. Now the size is shown, and when it is below the
+         «не меньше ×» minimum the block says the second account's size is what holds it back. The first
+         account's own loss was never part of the calculation (the user asked).
