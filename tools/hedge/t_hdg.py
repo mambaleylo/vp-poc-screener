@@ -16,16 +16,17 @@ V._dual_mode_cache_by_acc.clear()
 ids = itertools.count(100)
 EX = {"default": {"pos": {}, "ord": {}, "lev": {}}, "zones": {"pos": {}, "ord": {}, "lev": {}}}
 BAL = {"default": 1000.0, "zones": 1500.0}
-PRICE = {"BTC_USDT": 50000.0, "ETH_USDT": 100.0, "SOL_USDT": 20.0}
+PRICE = {"BTC_USDT": 500.0, "ETH_USDT": 100.0, "SOL_USDT": 20.0, "ADA_USDT": 1.0, "XRP_USDT": 1.0, "DOGE_USDT": 1.0}
 def liq_of(c, size, lev, entry):
     lev = float(lev or 10)
     return round(entry * (1 - 0.9 / lev), 4) if size > 0 else round(entry * (1 + 0.9 / lev), 4)
 def fake(method, path, query_string="", body=None, **k):
     acc = V.current_account_id(); ex = EX[acc]
     if path == "/futures/usdt/accounts":
-        return {"in_dual_mode": False, "total": str(BAL[acc]), "unrealised_pnl": "0"}
+        used = sum(abs(q["size"]) * float(q["entry_price"]) / float(q["leverage"] or 10) for q in ex["pos"].values())
+        return {"in_dual_mode": False, "available": str(BAL[acc] - used), "total": str(BAL[acc]), "unrealised_pnl": "0"}
     if path == "/futures/usdt/positions" and method == "GET":
-        return [dict(contract=c, **p) for c, p in ex["pos"].items()]
+        return [dict(contract=c, margin=str(abs(p["size"]) * float(p["entry_price"]) / float(p["leverage"] or 10)), **p) for c, p in ex["pos"].items()]
     if path == "/futures/usdt/price_orders" and method == "GET":
         return list(ex["ord"].values())
     if path.startswith("/futures/usdt/price_orders/") and method == "DELETE":
@@ -59,7 +60,7 @@ def src_open(c, size, lev="10", orders=()):
                                                      "trigger": {"price": str(price), "rule": rule, "price_type": 0}, "order_type": ""}
 def dst_orders(c):
     return sorted((float(o["trigger"]["price"]), o["trigger"]["rule"], o["trigger"]["price_type"]) for o in EX["zones"]["ord"].values() if o["initial"]["contract"] == c)
-V._HDG["cfg"] = {"on": False, "src": "default", "dst": "zones", "mult": 2.0, "tg": True}
+V._HDG["cfg"] = {"on": False, "src": "default", "dst": "zones", "mult": 2.0, "min_x": 2.0, "cap_pct": 50.0, "tg": True}
 V._HDG["loaded"] = True
 # 1. a position already open when switched on is left alone
 src_open("BTC_USDT", 3)
@@ -123,11 +124,35 @@ EX["zones"]["pos"]["ETH_USDT"] = {"size": 5, "entry_price": "100", "leverage": "
 src_open("ETH_USDT", 3); V.hdg_tick()
 check("foreign position untouched", EX["zones"]["pos"]["ETH_USDT"]["size"] == 5)
 check("error recorded", V._HDG["pairs"]["ETH_USDT|long"]["status"] == "error")
+# 8b. the floor: a small second balance -> at least 2x the source's margin in dollars
+for k in [k for k in list(EX["default"]["pos"]) if k != "SOL_USDT"]:
+    EX["default"]["pos"].pop(k)
+V.hdg_tick()
+BAL["zones"] = 600.0
+src_open("ADA_USDT", 100)          # margin 10$ = 1% of 1000; x2 share = 2% of 600 = 12$ < 2 x 10$ -> 20$ = 200 contracts
+V.hdg_tick()
+check("floor x2 in dollars", EX["zones"]["pos"].get("ADA_USDT", {}).get("size") == -200)
+check("floor noted", any("поднято до ×2" in t for t in TG))
+# 8c. the cap: 5% of 600 = 30$ for all mirrors; SOL 12 contr. = 48$ already -> no room
+V._HDG["cfg"]["cap_pct"] = 5.0
+src_open("XRP_USDT", 100); V.hdg_tick()
+check("no room -> not opened", "XRP_USDT" not in EX["zones"]["pos"] and any("нет места" in t for t in TG))
+EX["default"]["pos"].pop("SOL_USDT"); EX["default"]["pos"].pop("ADA_USDT"); V.hdg_tick()
+V._HDG["pairs"].pop("XRP_USDT|long", None); EX["default"]["pos"].pop("XRP_USDT"); V.hdg_tick()
+src_open("XRP_USDT", 100); V.hdg_tick()          # 20$ (floor) within 30$
+src_open("DOGE_USDT", 200); V.hdg_tick()         # floor 40$, room 10$ -> capped to 10$ = 100 contracts
+check("within the cap", EX["zones"]["pos"].get("XRP_USDT", {}).get("size") == -200)
+check("capped", EX["zones"]["pos"].get("DOGE_USDT", {}).get("size") == -100 and V._HDG["pairs"]["DOGE_USDT|long"]["capped"])
+check("cap noted", any("урезано лимитом 5%" in t for t in TG))
+V._HDG["cfg"]["cap_pct"] = 50.0
 # 9. switching accounts refused while mirrors are open; history; status JSON
 r = c.post("/api/hdg/config", json={"dst": "neuro"})
 check("account change refused while open", r.status_code == 400)
 st = c.get("/api/hdg/status").get_json()
 check("status", len(st["open"]) == 2 and st["cfg"]["on"])
+r = c.post("/api/hdg/config", json={"min_x": 3, "cap_pct": 40}).get_json()
+check("config min_x / cap", r["ok"] and r["cfg"]["min_x"] == 3 and r["cfg"]["cap_pct"] == 40)
+check("bad cap refused", c.post("/api/hdg/config", json={"cap_pct": 0}).status_code == 400)
 # 10. a state reload keeps the pairs (restart)
 V.hdg_save(); saved = dict(V._HDG["pairs"]); V._HDG["pairs"] = {}; V.hdg_load()
 check("state survives a restart", set(V._HDG["pairs"]) == set(saved))

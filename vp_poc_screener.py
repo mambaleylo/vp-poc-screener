@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.629"
+APP_VERSION = "0.99.630"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31872,7 +31872,7 @@ HDG_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_hd
 HDG_POLL_SEC = 5
 HDG_LIQ_BUF_PCT = 0.1    # the stop before the liquidation: 0.1% of the price (at least 3 ticks) — the user: "максимально близко"
 _hdg_lock = threading.RLock()
-_HDG = {"cfg": {"on": False, "src": "default", "dst": None, "mult": 2.0, "tg": True}, "armed": False, "ignored": [],
+_HDG = {"cfg": {"on": False, "src": "default", "dst": None, "mult": 2.0, "min_x": 2.0, "cap_pct": 50.0, "tg": True}, "armed": False, "ignored": [],
         "pairs": {}, "log": [], "err": None, "t": None, "loaded": False}
 
 
@@ -31993,9 +31993,9 @@ def _hdg_liq_buf(price, tick):
 
 
 def hdg_equity():
-    """the account's futures equity: the wallet + the open positions' unrealised PnL"""
-    a = gate_signed_request("GET", "/futures/usdt/accounts", retry_on_timeout=True) or {}
-    return float(a.get("total") or 0) + float(a.get("unrealised_pnl") or 0)
+    """the account's capital as the autotrade sizes by it: free + the open positions' margin (falls back to the
+    Unified account's equity — the classic futures endpoint reads 0 there)"""
+    return get_futures_total_equity()
 
 
 def hdg_set_leverage(contract, lev, cll):
@@ -32017,36 +32017,50 @@ def _hdg_dst_pos(dst_positions, contract, side):
 
 
 def hdg_open(key, p, cfg):
-    """the mirror of a new source position: opposite side, the same leverage, MULT x the source's share of its
-    deposit (the position's notional / the account's equity) — of the target account's own deposit"""
+    """the mirror of a new source position: opposite side, the same leverage; its margin = MULT x the source's share
+    of its balance (of the target's balance), at least MIN_X x the source's margin in dollars, and all the mirrors
+    together at most CAP_PCT % of the target's balance (the cap wins)"""
     contract, sside = p["contract"], _hdg_side(p)
     dside = "short" if sside == "long" else "long"
     ddir = "SHORT" if dside == "short" else "LONG"
     n_src = abs(float(p.get("size", 0) or 0))
-    mult = float(cfg.get("mult") or 2)
+    mult, min_x, cap_pct = float(cfg.get("mult") or 2), float(cfg.get("min_x") or 0), float(cfg.get("cap_pct") or 100)
     lev, cll = str(p.get("leverage") or "0"), p.get("cross_leverage_limit")
     price = float(p.get("mark_price") or 0) or float(p.get("entry_price") or 0)
+    L = float(lev) if float(lev or 0) > 0 else (float(cll or 0) or 1.0)   # margin = notional / leverage (the same on both)
     with hdg_acc(cfg["src"]), live_http():
         eq_src = hdg_equity()
+    qm = get_contract_spec(contract).get("quanto_multiplier") or 1
+    coin = contract.replace("_USDT", "")
+    pair = {"contract": contract, "src_side": sside, "src_size": n_src, "src_entry": float(p.get("entry_price") or 0) or None,
+            "lev": lev, "cll": cll, "dst_side": dside, "dst_entry": None, "liq": None, "status": "open",
+            "t_open": int(time.time()), "orders": {}, "liq_stop": None, "notes": []}
     with hdg_acc(cfg["dst"]), live_http():
         eq_dst = hdg_equity()
-    qm = get_contract_spec(contract).get("quanto_multiplier") or 1
-    if eq_src <= 0 or eq_dst <= 0 or price <= 0:
-        raise RuntimeError(f"нет баланса / цены (первый {eq_src:.2f}$, второй {eq_dst:.2f}$)")
-    share = n_src * qm * price / eq_src                      # the source position's notional, in its deposits
-    n = int(round(share * mult * eq_dst / (qm * price)))
-    L = float(lev) if float(lev or 0) > 0 else (float(cll or 0) or 1.0)   # the margin = notional / leverage (the same on both)
-    pair = {"contract": contract, "src_side": sside, "src_size": n_src, "src_entry": float(p.get("entry_price") or 0) or None,
-            "share": round(share / L * 100, 2), "dst_share": round(share * mult / L * 100, 2), "eq_src": round(eq_src, 2), "eq_dst": round(eq_dst, 2),
-            "lev": lev, "cll": cll, "dst_side": dside, "dst_size": n, "dst_entry": None, "liq": None, "status": "open",
-            "t_open": int(time.time()), "orders": {}, "liq_stop": None, "notes": []}
-    coin = contract.replace("_USDT", "")
-    with hdg_acc(cfg["dst"]), live_http():
+        if eq_src <= 0 or eq_dst <= 0 or price <= 0:
+            raise RuntimeError(f"нет баланса / цены (первый {eq_src:.2f}$, второй {eq_dst:.2f}$)")
+        dst_positions = get_open_positions()
+        if any(q.get("contract") == contract for q in dst_positions):
+            raise RuntimeError("на втором счёте уже есть позиция по этой монете — не трогаю её")
+        src_margin = n_src * qm * price / L
+        want = src_margin / eq_src * mult * eq_dst            # the same share of the balance x MULT
+        margin = max(want, min_x * src_margin)
+        with _hdg_lock:
+            mine = {(q["contract"], q["dst_side"]) for q in _HDG["pairs"].values() if q.get("status") == "open"}
+        used = sum(float(q.get("margin") or 0) for q in dst_positions if (q.get("contract"), _hdg_side(q)) in mine)
+        room = cap_pct / 100 * eq_dst - used
+        capped = margin > room
+        if capped:
+            margin = room
+        n = int(margin * L / (qm * price))                   # down: never above the cap
         spec = get_contract_spec(contract)
         if n < (spec.get("order_size_min") or 1):
-            raise RuntimeError(f"зеркало {share * mult / L * 100:.1f}% баланса второго счёта ({eq_dst:.0f}$) — меньше минимального ордера")
-        if any(q.get("contract") == contract for q in get_open_positions()):
-            raise RuntimeError("на втором счёте уже есть позиция по этой монете — не трогаю её")
+            raise RuntimeError(f"на втором счёте нет места: лимит {cap_pct:g}% баланса ({eq_dst:.2f}$) уже занят другими зеркалами ({used:.2f}$)"
+                               if room <= 0 else f"зеркало {margin:.2f}$ меньше минимального ордера")
+        margin = n * qm * price / L
+        pair.update({"src_margin": round(src_margin, 2), "dst_margin": round(margin, 2), "dst_size": n, "capped": capped,
+                     "share": round(src_margin / eq_src * 100, 2), "dst_share": round(margin / eq_dst * 100, 2),
+                     "eq_src": round(eq_src, 2), "eq_dst": round(eq_dst, 2)})
         try:
             hdg_set_leverage(contract, int(float(lev)), cll)
         except Exception as e:
@@ -32070,9 +32084,14 @@ def hdg_open(key, p, cfg):
         else:
             pair["dst_entry"] = float((res or {}).get("fill_price") or 0) or None
     lev_txt = f"x{lev}" if lev not in ("0", "0.0") else f"кросс x{cll}"
-    hdg_event(f"{coin}: на первом счёте {'лонг' if sside == 'long' else 'шорт'} на {share / L * 100:.1f}% баланса — открыл зеркало "
-              f"{'шорт' if dside == 'short' else 'лонг'} на {share * mult / L * 100:.1f}% баланса второго счёта ({pair['dst_size']:g} контр., {lev_txt})" +
-              (f" по ~{pair['dst_entry']:.6g}" if pair["dst_entry"] else "") + (f" · {pair['notes'][0]}" if pair["notes"] else ""))
+    why = ""
+    if capped:
+        why = f" · урезано лимитом {cap_pct:g}% баланса второго счёта" + (f" — меньше ×{min_x:g} от сделки" if margin < min_x * src_margin - 1e-9 else "")
+    elif want < min_x * src_margin:
+        why = f" · поднято до ×{min_x:g} от сделки (по доле баланса было бы {want:.2f}$)"
+    hdg_event(f"{coin}: на первом счёте {'лонг' if sside == 'long' else 'шорт'} {src_margin:.2f}$ ({pair['share']:g}% баланса) — открыл зеркало "
+              f"{'шорт' if dside == 'short' else 'лонг'} {margin:.2f}$ ({pair['dst_share']:g}% баланса второго счёта, {n:g} контр., {lev_txt})" +
+              (f" по ~{pair['dst_entry']:.6g}" if pair["dst_entry"] else "") + why + (f" · {pair['notes'][0]}" if pair["notes"] else ""))
     return pair
 
 
@@ -32312,6 +32331,15 @@ def api_hdg_config():
             cfg["mult"] = v
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "множитель — число от 0.1 до 10"}), 400
+    for k, lo, hi, nm in (("min_x", 0, 20, "минимум ×"), ("cap_pct", 1, 100, "потолок %")):
+        if k in b:
+            try:
+                v = float(b[k])
+                if not lo <= v <= hi:
+                    raise ValueError
+                cfg[k] = v
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": f"{nm} — число от {lo} до {hi}"}), 400
     if "tg" in b:
         cfg["tg"] = bool(b["tg"])
     if "on" in b:
@@ -34823,6 +34851,7 @@ INDEX_HTML = """<!doctype html>
   html { -webkit-text-size-adjust:100%; }
   body { margin:0; background:var(--bg); color:var(--tx); font-family:var(--font); font-size:13px; line-height:1.38; }
   body.hints-hidden .hint-block { display:none !important; }
+  body.hints-hidden .hintx { display:none !important; }   /* v0.99.630 — the tabs' descriptions under the 💡 button */
   div.hint-block { background:var(--inset); border:1px solid var(--line); border-radius:var(--r); padding:10px 12px; color:var(--tx-2); font-size:var(--fs-sm) !important; line-height:1.5; }
   div.hint-block ul { margin:6px 0; padding-left:18px; }
   b, strong { font-weight:600; }
@@ -36817,7 +36846,7 @@ async function refreshNeuro() {   // v0.99.619 — Neuro v3: the model, the year
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
   let h = '';
   // 1. what it is and how it did on the years it never saw
-  let top = `<div class="dim">Одна модель на все монеты: каждый час смотрит ${d.n_feats || 89} параметров только что закрытой часовой свечи у 120 ликвидных монет — EMA, MACD, Supertrend, Ишимоку, ADX, RSI, стохастик, CCI, объёмы, свечи, 4ч / день / неделя, BTC и ETH, фандинг, час и день недели. Сигнал — только у лучших ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 0.3}% часов.</div>`;
+  let top = `<div class="dim hintx">Одна модель на все монеты: каждый час смотрит ${d.n_feats || 89} параметров только что закрытой часовой свечи у 120 ликвидных монет — EMA, MACD, Supertrend, Ишимоку, ADX, RSI, стохастик, CCI, объёмы, свечи, 4ч / день / неделя, BTC и ETH, фандинг, час и день недели. Сигнал — только у лучших ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 0.3}% часов.</div>`;
   if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
   else {
     const ys = rs.years || {};
@@ -36847,7 +36876,7 @@ async function refreshNeuro() {   // v0.99.619 — Neuro v3: the model, the year
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
     ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map(row).join('')}</div>` : ''}
     ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${zBars(d.last.map(t => ({label: `${coin(t.symbol)} ${t.side > 0 ? '↑' : '↓'}`, sub: hm(t.hour), v: t.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}`);
-  h += `<details class="zcard"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на 6 годах часовых свечей 127 монет Binance: для каждого часа — чем кончилась бы сделка со стопом ${rule.stop_atr || 1} ATR и тейком ${rule.take_r || 2}R за ${rule.hold_h || 12} ч. Порог выбран честно: модель учили на прошлых годах и проверяли на следующем, которого она не видела; 2025–26 — финальная проверка. В начале каждого часа бот считает те же параметры тем же кодом, что и в исследовании, и открывает сделки у часов с оценкой выше порога (по монете и стороне — одна сделка). Учёт сделок — по часовым свечам, как в исследовании: вход по открытию часа, стоп раньше тейка, выход по закрытию ${rule.hold_h || 12}-го часа; комиссии и фандинг учтены. Отбор монет по прошлой доходности Нейро не помогает (проверено) — модель сама учитывает, что за монета и какой рынок.</div></details>`;
+  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на 6 годах часовых свечей 127 монет Binance: для каждого часа — чем кончилась бы сделка со стопом ${rule.stop_atr || 1} ATR и тейком ${rule.take_r || 2}R за ${rule.hold_h || 12} ч. Порог выбран честно: модель учили на прошлых годах и проверяли на следующем, которого она не видела; 2025–26 — финальная проверка. В начале каждого часа бот считает те же параметры тем же кодом, что и в исследовании, и открывает сделки у часов с оценкой выше порога (по монете и стороне — одна сделка). Учёт сделок — по часовым свечам, как в исследовании: вход по открытию часа, стоп раньше тейка, выход по закрытию ${rule.hold_h || 12}-го часа; комиссии и фандинг учтены. Отбор монет по прошлой доходности Нейро не помогает (проверено) — модель сама учитывает, что за монета и какой рынок.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
 
@@ -37799,7 +37828,7 @@ function ownHtml(d, ownZ) {   // v0.99.615 — tiles and bars on top, the text u
              {label: '🔎 мы', sub: `входов ${c.ours.entries}, WR ${c.ours.wr == null ? '—' : c.ours.wr + '%'}`, v: c.ours.avg_r, hi: true}], v => sgR(+v.toFixed(3)))}` : '';
   return `<div class="zcard" style="font-size:var(--fs-sm);">
     <div class="zh">🔎 Наш поиск зон ${o.scan_on ? `<span class="pill${d.autotrade_own ? ' pos' : ''}">${d.autotrade_own ? 'торгует' : 'наблюдение'}</span>` : '<span class="pill neg">выключен в настройках</span>'}</div>
-    <div class="dim">Бот сам ищет зоны по свечам и учится находить такие же, как у автора: перед каждым постом проверяет, были ли зоны автора среди трёх его лучших.</div>
+    <div class="dim hintx">Бот сам ищет зоны по свечам и учится находить такие же, как у автора: перед каждым постом проверяет, были ли зоны автора среди трёх его лучших.</div>
     <div class="ztiles z3" style="margin-top:8px;">
       ${tile('обучение', o.model ? '<span class="win">готово</span>' : `${o.pos || 0}/${need}`, (o.model ? `на ${o.model.n} примерах` : 'совпавших зон') + bar(learnPct, 'var(--acc)'))}
       ${tile('нашёл сам', o.recall == null ? '—' : o.recall + '%', `${o.hits || 0} из ${o.exams || 0} зон автора` + (o.recall != null ? bar(o.recall, 'var(--pos)') : ''))}
@@ -37827,7 +37856,7 @@ function ocHtml(d, ocZ) {   // v0.99.528 — v2: more features, trees, a 3-way h
   const dt = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
   const tile = (l, v, n) => `<div class="ztile"><div class="zl">${l}</div><div class="zv">${v}</div>${n ? `<div class="zn">${n}</div>` : ''}</div>`;
   const lt = o.last_try;
-  let body = `<div class="dim">Бот сам ищет зоны по свечам ${ev && ev.coins ? ev.coins : 40} монет и учится отбирать те, от которых цена реально отыгрывала по правилам лесенки автора. Цель — превзойти автора. Только наблюдение: без ордеров и сообщений.</div>`;
+  let body = `<div class="dim hintx">Бот сам ищет зоны по свечам ${ev && ev.coins ? ev.coins : 40} монет и учится отбирать те, от которых цена реально отыгрывала по правилам лесенки автора. Цель — превзойти автора. Только наблюдение: без ордеров и сообщений.</div>`;
   if (a.running) body += `<div style="margin-top:8px;"><span class="zspin">🔄</span> <b>${a.stage || 'работаю'}</b>${a.total ? ` — ${a.done || 0} из ${a.total}` : ''}<div class="dim">собираю историю и переобучаю — на телефоне до часа; дальше раз в сутки</div></div>`;
   else if (a.error) body += `<div class="zbanner neg">Ошибка обучения: ${a.error}</div>`;
   else if (o.loaded === false) body += `<div class="dim" style="margin-top:8px;">загружаю сохранённую модель…</div>`;
@@ -37889,7 +37918,7 @@ function _zmHtml(d, zmZ) {
   const tile = (l, v, n) => `<div class="ztile"><div class="zl">${l}</div><div class="zv">${v}</div>${n ? `<div class="zn">${n}</div>` : ''}</div>`;
   const pill = !o.on ? '<span class="pill neg">выключено</span>' : (o.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">наблюдение</span>');
   const act = zmZ.filter(z => z.status === 'watch' || z.status === 'in_trade');
-  let body = `<div class="dim">Зоны, которые на истории чаще давали отскок: модель обучена на 6 годах часовых свечей 127 монет Binance (около миллиона зон, каждая проверена лесенкой). Берёт ~${m && m.q ? Math.round((1 - m.q) * 100) : 5}% лучших.</div>`;
+  let body = `<div class="dim hintx">Зоны, которые на истории чаще давали отскок: модель обучена на 6 годах часовых свечей 127 монет Binance (около миллиона зон, каждая проверена лесенкой). Берёт ~${m && m.q ? Math.round((1 - m.q) * 100) : 5}% лучших.</div>`;
   if (!m) body += `<div class="zbanner ${o.err ? 'neg' : 'warn'}">${o.err ? 'Модель не загрузилась: ' + o.err : 'Модель загружается…'}</div>`;
   else {
     const ys = rs.years || {};
@@ -38655,7 +38684,7 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
   let h = '';
   // 1. what it is and how it did on the years it never saw
-  let top = `<div class="dim">Касания EMA 20–200 на 4ч, дне, неделе и месяце у 120 ликвидных монет. Модель, обученная на 6 годах истории 127 монет (1.16 млн касаний), берёт ~${m && m.q ? Math.round((1 - m.q) * 100) : 3}% лучших.</div>`;
+  let top = `<div class="dim hintx">Касания EMA 20–200 на 4ч, дне, неделе и месяце у 120 ликвидных монет. Модель, обученная на 6 годах истории 127 монет (1.16 млн касаний), берёт ~${m && m.q ? Math.round((1 - m.q) * 100) : 3}% лучших.</div>`;
   if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
   else {
     const ys = rs.years || {};
@@ -38687,7 +38716,7 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
     ${d.sel && d.sel.n_all > (d.n || 0) ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">выше — монеты в отборе; все монеты вместе: ${d.sel.n_all} сделок, ${sgR(d.sel.avg_all)} в среднем</div>` : ''}
     ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map(row).join('')}</div>` : ''}
     ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${zBars(d.last.map(t => ({label: `${coin(t.symbol)} ${t.side > 0 ? '↑' : '↓'}`, sub: `EMA ${t.n} ${tfN[t.tf]} · ${hm(t.t_in)}${t.sel === false ? ' · вне отбора' : ''}`, v: t.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}`);
-  h += `<details class="zcard"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Каждый час бот считает уровни EMA формирующихся свечей (их значение известно с открытия свечи и не меняется) и оценивает, каким было бы касание в этот час: график и EMA, разгон к уровню, EMA вокруг, RSI трёх графиков, тренд дня и недели, BTC, сила монеты, другие EMA рядом. Уровни с оценкой выше порога «на прицеле»: цена проверяется каждые 30 с, при касании — сигнал в Telegram${d.auto ? ' и сделка' : ''}. Считается только первое касание EMA за свечу. Учёт сделок — по часовым свечам, как в исследовании: стоп раньше тейка, в час входа тейк не считается, выход через ${rule.hold_h || 24} ч; комиссии и фандинг учтены.</div></details>`;
+  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Каждый час бот считает уровни EMA формирующихся свечей (их значение известно с открытия свечи и не меняется) и оценивает, каким было бы касание в этот час: график и EMA, разгон к уровню, EMA вокруг, RSI трёх графиков, тренд дня и недели, BTC, сила монеты, другие EMA рядом. Уровни с оценкой выше порога «на прицеле»: цена проверяется каждые 30 с, при касании — сигнал в Telegram${d.auto ? ' и сделка' : ''}. Считается только первое касание EMA за свечу. Учёт сделок — по часовым свечам, как в исследовании: стоп раньше тейка, в час входа тейк не считается, выход через ${rule.hold_h || 24} ч; комиссии и фандинг учтены.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
 
@@ -38746,8 +38775,9 @@ async function refreshHdg() {   // v0.99.628 — 🪞 hedge mirror
   const opt = (sel) => accs.map(a => `<option value="${a.id}" ${a.id === sel ? 'selected' : ''} ${a.ok ? '' : 'disabled'}>${a.label}${a.ok ? bal(a) : ' — нет ключей'}</option>`).join('');
   const selSt = 'background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);max-width:100%;';
   const pill = !c.on ? '<span class="pill">выключено</span>' : (d.err ? '<span class="pill neg">ошибка</span>' : '<span class="pill pos">следит</span>');
-  let h = `<div class="dim">Каждая <b>новая</b> позиция на первом счёте → на втором открывается такая же монета в <b>обратную</b> сторону,
-    на ×${c.mult || 2} большую долю баланса (маржа 10$ из 100$ на первом = 10% → 20% → 30$ из 150$ на втором), плечо то же. Тейк первого счёта становится стопом зеркала, стоп — тейком (по той же цене).
+  let h = `<div class="dim hintx">Каждая <b>новая</b> позиция на первом счёте → на втором открывается такая же монета в <b>обратную</b> сторону,
+    на ×${c.mult || 2} большую долю баланса (маржа 10$ из 100$ на первом = 10% → 20% → 30$ из 150$ на втором), но не меньше ×${c.min_x ?? 2}
+    от суммы сделки и не больше ${c.cap_pct ?? 50}% баланса второго счёта на все зеркала вместе (потолок главнее). Плечо то же. Тейк первого счёта становится стопом зеркала, стоп — тейком (по той же цене).
     Стоп за ликвидацией ставится прямо перед ней (${d.buf_pct || 0.1}% цены), и приходит уведомление. Позиция на первом счёте закрылась
     (стоп, тейк или вручную) — зеркало закрывается по рынку, его ордера снимаются. Частичные закрытия и доборы не повторяются;
     позиции, открытые до включения, не трогаются.</div>`;
@@ -38758,6 +38788,10 @@ async function refreshHdg() {   // v0.99.628 — 🪞 hedge mirror
       <select id="hdgDst" style="${selSt}width:100%;margin-top:4px;"><option value="" ${c.dst ? '' : 'selected'} disabled>выберите</option>${opt(c.dst)}</select></div>
     <div class="settingRow"><div><div class="label">Размер зеркала</div><div class="sub">во сколько раз больше доля баланса (маржи), чем у позиции первого счёта</div></div>
       <input type="number" id="hdgMult" min="0.1" max="10" step="0.1" value="${c.mult || 2}" style="width:70px;${selSt}"></div>
+    <div class="settingRow subRow"><div><div class="label">↳ не меньше ×, от суммы сделки</div><div class="sub">маржа зеркала в долларах — минимум во столько раз больше маржи сделки первого счёта (0 — без минимума)</div></div>
+      <input type="number" id="hdgMinX" min="0" max="20" step="0.5" value="${c.min_x ?? 2}" style="width:70px;${selSt}"></div>
+    <div class="settingRow subRow"><div><div class="label">↳ потолок, % баланса второго счёта</div><div class="sub">все зеркала вместе — не больше этой доли баланса; если не влезает — урезаю и пишу об этом</div></div>
+      <input type="number" id="hdgCap" min="1" max="100" step="1" value="${c.cap_pct ?? 50}" style="width:70px;${selSt}"></div>
     <div class="settingRow"><div><div class="label">Включено</div><div class="sub">проверка каждые ${d.poll || 5} с</div></div>
       <label class="switch"><input type="checkbox" id="hdgOn" ${c.on ? 'checked' : ''}><span class="switchSlider"></span></label></div>
     <div class="settingRow subRow"><div><div class="label">↳ уведомления в Telegram</div></div>
@@ -38770,7 +38804,7 @@ async function refreshHdg() {   // v0.99.628 — 🪞 hedge mirror
       const st = ords.filter(o => o.kind === 'stop'), tk = ords.filter(o => o.kind === 'take');
       const lev = (p.lev && p.lev !== '0') ? `x${p.lev}` : `кросс x${p.cll || '?'}`;
       return `<div class="zrow" style="padding:6px 0;border-bottom:1px solid var(--line);">
-        <b>${coin(p.contract)}</b> · первый: ${side(p.src_side)} ${p.share != null ? p.share + '% баланса' : p.src_size} → зеркало: ${side(p.dst_side)} ${p.dst_share != null ? p.dst_share + '% баланса' : ''} (${p.dst_size} контр.) ${lev}${p.dst_entry ? ' по ' + px(p.dst_entry) : ''}
+        <b>${coin(p.contract)}</b> · первый: ${side(p.src_side)} ${p.src_margin != null ? p.src_margin + '$ (' + p.share + '%)' : p.src_size} → зеркало: ${side(p.dst_side)} ${p.dst_margin != null ? p.dst_margin + '$ (' + p.dst_share + '%)' : ''}${p.capped ? ' ⚠ урезано потолком' : ''} · ${p.dst_size} контр. ${lev}${p.dst_entry ? ' по ' + px(p.dst_entry) : ''}
         <div class="dim" style="font-size:var(--fs-sm);">стоп: ${st.length ? st.map(o => px(o.price) + (o.clamped ? ' ⚠ перед ликвидацией' : '')).join(', ') : (p.liq_stop ? px(p.liq_stop.price) + ' ⚠ перед ликвидацией' : '—')}
           · тейк: ${tk.length ? tk.map(o => px(o.price)).join(', ') : '—'} · ликвидация: ${px(p.liq)}${(p.notes || []).length ? ' · ' + p.notes.join('; ') : ''}</div></div>`;
     }).join('') : '<div class="dim">нет — ждём новую позицию на первом счёте</div>');
@@ -38794,6 +38828,8 @@ async function refreshHdg() {   // v0.99.628 — 🪞 hedge mirror
   document.getElementById('hdgSrc').onchange = e => post({src: e.target.value});
   document.getElementById('hdgDst').onchange = e => post({dst: e.target.value});
   document.getElementById('hdgMult').onchange = e => post({mult: e.target.value});
+  document.getElementById('hdgMinX').onchange = e => post({min_x: e.target.value});
+  document.getElementById('hdgCap').onchange = e => post({cap_pct: e.target.value});
   document.getElementById('hdgOn').onchange = e => {
     if (e.target.checked && !confirm(`Включить зеркало? Каждая новая позиция на счёте «${(accs.find(a => a.id === c.src) || {}).label}» будет открывать обратную ×${c.mult || 2} на «${(accs.find(a => a.id === c.dst) || {}).label || '?'}» реальными деньгами.`)) { e.target.checked = false; return; }
     post({on: e.target.checked});
@@ -38817,7 +38853,7 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
             wk: all.length ? all.reduce((a, x) => a + x.wk, 0) / all.length : null, dd: Math.max(0, ...all.map(x => x.dd || 0)),
             days: n ? all.reduce((a, x) => a + (x.days || 0) * x.n, 0) / n : null, streak: (R[key] || {}).max_losing_streak}; };
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
-  let top = `<div class="dim">Монета идёт в узком коридоре (день — ${(ch['1d'] || {}).n || 20} свечей, 12ч — ${(ch['12h'] || {}).n || 30}), потом свеча закрывается за ним — в сторону её собственного тренда (EMA200). Вход сразу после закрытия, стоп ${d.stop_atr || 1.5} ATR. ${d.half ? `<b>Режим «половина на +${d.half_r}R»</b>: на +${d.half_r}R половина закрывается, стоп переносится в безубыток, остаток идёт по тренду.` : 'Тейка нет: сделка держится, пока тренд жив.'} Выход — свеча закрылась за ${d.dc || 20}-свечным минимумом (для шорта — максимумом).</div>
+  let top = `<div class="dim hintx">Монета идёт в узком коридоре (день — ${(ch['1d'] || {}).n || 20} свечей, 12ч — ${(ch['12h'] || {}).n || 30}), потом свеча закрывается за ним — в сторону её собственного тренда (EMA200). Вход сразу после закрытия, стоп ${d.stop_atr || 1.5} ATR. ${d.half ? `<b>Режим «половина на +${d.half_r}R»</b>: на +${d.half_r}R половина закрывается, стоп переносится в безубыток, остаток идёт по тренду.` : 'Тейка нет: сделка держится, пока тренд жив.'} Выход — свеча закрылась за ${d.dc || 20}-свечным минимумом (для шорта — максимумом).</div>
     <div class="zsub">Проверка на истории 127 монет Binance, 2021–2026; правило выбрано по 2021–23, 2024 и 2025–26 — проверка. Результат на сделку в текущем режиме:</div>`;
   for (const [tf, hk] of [['1d', 24], ['12h', 12]]) {
     const s = sum(`${hk}_${mode}`), o = sum(`${hk}_${d.half ? 'dc20' : 'half2dc20'}`);
@@ -38825,7 +38861,7 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
       ${zBars(Object.keys(s.ys).sort().map(y => { const x = s.ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `${x.n} сделок · WR ${Math.round(x.wr)}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="dim" style="font-size:var(--fs-xs);">в другом режиме (${d.half ? 'весь выход по тренду' : `половина на +${d.half_r}R`}): ${sgR(o.avg == null ? null : +o.avg.toFixed(2))} на сделку, WR ${o.wr == null ? '—' : Math.round(o.wr)}%</div>`;
   }
-  top += `<div class="zbanner warn">Трендовая система: большинство сделок — стоп, бывают длинные серии стопов, а плюс дают редкие сделки на +20…+100R${d.half ? ' (в режиме половины их часть отдаётся за винрейт)' : ''}. Риск держите маленьким (поле «📈», пусто = ${d.risk}%) и не выключайте после серии стопов. 12ч слабее дня (${sgR(+(sum(`12_${mode}`).avg || 0).toFixed(2))} против ${sgR(+(sum(`24_${mode}`).avg || 0).toFixed(2))} на сделку) — зато сделок втрое больше.</div>`;
+  top += `<div class="zbanner warn hintx">Трендовая система: большинство сделок — стоп, бывают длинные серии стопов, а плюс дают редкие сделки на +20…+100R${d.half ? ' (в режиме половины их часть отдаётся за винрейт)' : ''}. Риск держите маленьким (поле «📈», пусто = ${d.risk}%) и не выключайте после серии стопов. 12ч слабее дня (${sgR(+(sum(`12_${mode}`).avg || 0).toFixed(2))} против ${sgR(+(sum(`24_${mode}`).avg || 0).toFixed(2))} на сделку) — зато сделок втрое больше.</div>`;
   let h = card(`📈 Пробой диапазона ${pill}`, top);
   const w = d.watch || [];
   const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;"><b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.chart === '12h' ? '12ч' : 'день'} · коридор ${a.rg} · до пробоя ${a.dist > 0 ? '+' : ''}${a.dist}%</span></span>`;
@@ -38847,7 +38883,7 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
       ${zBars(M.months.slice().reverse().map(x => ({label: mn[+x[0].slice(5) - 1] + ' ' + x[0].slice(2, 4), sub: `${x[1]} сделок`, v: x[2]})), v => sgR(+(+v).toFixed(1)))}
       <div class="zsub">В плюсе ${M.pos_months} месяцев из ${M.all_months}: большинство месяцев — мелкие стопы, год делают один-два месяца с большим трендом.</div></details>`;
   }
-  h += `<details class="zcard"><summary class="zh" style="margin:0;">ℹ️ Как нашёлся</summary><div class="zsub">Проверены все старые индикаторы проекта (Дончиан / Trend, сжатие, Sweep, ретест / Mirror, AMD, MR4, большая свеча, откат к EMA, пробой диапазона) на 1ч, 4ч, 8ч, 12ч и дне у 127 монет за 6 лет, с тейками 2–20R, трейлингами и выходом в безубыток. Устойчив только пробой узкого диапазона по тренду монеты, и только на дне и 12ч: на 4ч и 8ч ложных пробоев слишком много. Фильтр по оценке и признакам Нейро винрейт не поднял (тренд, который даст +50R, заранее не виден) — выше его делает только частичный тейк. Учёт сделок — по свечам своего графика, как в исследовании; комиссии и фандинг учтены.</div></details>`;
+  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как нашёлся</summary><div class="zsub">Проверены все старые индикаторы проекта (Дончиан / Trend, сжатие, Sweep, ретест / Mirror, AMD, MR4, большая свеча, откат к EMA, пробой диапазона) на 1ч, 4ч, 8ч, 12ч и дне у 127 монет за 6 лет, с тейками 2–20R, трейлингами и выходом в безубыток. Устойчив только пробой узкого диапазона по тренду монеты, и только на дне и 12ч: на 4ч и 8ч ложных пробоев слишком много. Фильтр по оценке и признакам Нейро винрейт не поднял (тренд, который даст +50R, заранее не виден) — выше его делает только частичный тейк. Учёт сделок — по свечам своего графика, как в исследовании; комиссии и фандинг учтены.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
 
@@ -38864,7 +38900,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
   let h = '';
   // 1. what it is and how it did on the years it never saw
-  let top = `<div class="dim">Канал Кельтнера (EMA20 ± ATR) на 1ч и 4ч у 120 ликвидных монет. Сам выход за полосу на истории убыточен (проверено 4 608 вариантов правила, фильтры и подбор под монету — всё в минусе), поэтому сигнал даёт модель: она смотрит, как цена вышла за полосу, и ещё 89 параметров рынка, и берёт только лучший ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 1}% выходов.</div>`;
+  let top = `<div class="dim hintx">Канал Кельтнера (EMA20 ± ATR) на 1ч и 4ч у 120 ликвидных монет. Сам выход за полосу на истории убыточен (проверено 4 608 вариантов правила, фильтры и подбор под монету — всё в минусе), поэтому сигнал даёт модель: она смотрит, как цена вышла за полосу, и ещё 89 параметров рынка, и берёт только лучший ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 1}% выходов.</div>`;
   if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
   else {
     const ys = rs.years || {};
@@ -38894,7 +38930,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
     ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map(row).join('')}</div>` : ''}
     ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${zBars(d.last.map(t => ({label: `${coin(t.symbol)} ${t.side > 0 ? '↑' : '↓'}`, sub: `${t.tf}ч · ${hm(t.hour)}`, v: t.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}`);
-  h += `<details class="zcard"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Индикатор — канал Кельтнера: средняя EMA20 и полосы ±ATR. Событие — свеча с тенью дальше 1.5 ATR от средней или закрытие, вернувшееся внутрь после закрытия за полосой. Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на 2.4 млн таких событий 127 монет Binance за 6 лет: для каждого — чем кончилась бы сделка со стопом ${rule.stop_atr || 1.5} ATR и тейком ${rule.take_r || 3}R за ${rule.hold_bars || 48} свечей. Порог выбран честно: модель учили на прошлых годах и проверяли на следующем; 2025–26 — финальная проверка. В начале каждого часа бот считает то же самое тем же кодом по только что закрытой свече 1ч (и 4ч, когда она закрылась) и открывает сделку, если оценка выше порога (по монете и стороне — одна сделка). Учёт — по свечам своего графика, как в исследовании: вход по открытию следующей свечи, стоп раньше тейка; комиссии и фандинг учтены. Прежний подбор параметров под каждую монету убран: на истории он был в минусе каждый год.</div></details>`;
+  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Индикатор — канал Кельтнера: средняя EMA20 и полосы ±ATR. Событие — свеча с тенью дальше 1.5 ATR от средней или закрытие, вернувшееся внутрь после закрытия за полосой. Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на 2.4 млн таких событий 127 монет Binance за 6 лет: для каждого — чем кончилась бы сделка со стопом ${rule.stop_atr || 1.5} ATR и тейком ${rule.take_r || 3}R за ${rule.hold_bars || 48} свечей. Порог выбран честно: модель учили на прошлых годах и проверяли на следующем; 2025–26 — финальная проверка. В начале каждого часа бот считает то же самое тем же кодом по только что закрытой свече 1ч (и 4ч, когда она закрылась) и открывает сделку, если оценка выше порога (по монете и стороне — одна сделка). Учёт — по свечам своего графика, как в исследовании: вход по открытию следующей свечи, стоп раньше тейка; комиссии и фандинг учтены. Прежний подбор параметров под каждую монету убран: на истории он был в минусе каждый год.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
 

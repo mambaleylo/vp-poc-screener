@@ -19927,3 +19927,14 @@ v0.99.628 - 🪞 Hedge mirror — a new tab (the user asked for it). The user pi
 
 v0.99.629 - 🪞 Hedge mirror: the account pickers show each account's futures balance (wallet + unrealised PnL) next
          to its name, so the user can tell the saved keys apart. Fetched in the background at most once a minute.
+
+v0.99.630 - 🪞 Hedge mirror: two new limits in the tab (the user agreed they make sense). The mirror's margin is the
+         first position's share of its balance x MULT, but at least MIN_X (2 by default) times the first
+         position's margin in dollars, and all the mirrors together at most CAP % (50 by default) of the second
+         account's balance; the cap wins — the mirror is cut and Telegram says so, no room at all -> not opened
+         with a note. The balances are now read the way the autotrade reads them (free + the positions' margin,
+         the Unified account's equity when the classic futures endpoint reads 0): the main account showed -4.07$,
+         only its open position's floating loss. The open mirrors show both margins in dollars and %.
+         All the tabs' descriptions (Neuro, P/R, EMA, 📈 Пробой, 🪞 Хедж, the zone finder texts, the «ℹ️ Как
+         работает» blocks, the breakout's trend-system note) now hide under the 💡 button like the older hints.
+         Test on the fake exchange: 30/30 (tools/hedge/t_hdg.py).
