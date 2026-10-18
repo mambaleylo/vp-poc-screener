@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.633"
+APP_VERSION = "0.99.634"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31910,8 +31910,9 @@ def hdg_balances():
 
 
 _hdg_reco = {"t": 0, "v": None, "busy": False, "key": None}
-HDG_RECO_N = 50          # the last closed positions taken
-HDG_RECO_MIN_MOVE = 0.3  # % of the price: a smaller move from the entry to the exit = an impulsive open / close, left out
+HDG_RECO_N = 50          # the last closed positions taken (of those that pass the filter)
+HDG_RECO_FETCH = 200     # how many closed positions are read to find them
+HDG_RECO_MIN_PNL = 5.0   # $: only the positions closed at +5$ or more / -5$ or less (the user: the small ones are impulsive)
 
 
 def hdg_move_pct(r):
@@ -31931,7 +31932,8 @@ def hdg_reco_calc(rows, eq_src, eq_dst, mult, min_x):
     balance (max sum of log(1 + k * y / balance), Kelly) and half of it (safer: 20 trades are few)"""
     f = lambda r, k: float(r.get(k) or 0)
     n_all = len(rows)
-    rows = [r for r in rows if (lambda m: m is None or abs(m) >= HDG_RECO_MIN_MOVE)(hdg_move_pct(r))]
+    rows = [r for r in rows if abs(f(r, "pnl")) >= HDG_RECO_MIN_PNL]
+    rows = sorted(rows, key=lambda r: float(r.get("time") or 0))[-HDG_RECO_N:]
     ys, own, fees = [], 0.0, 0.0
     for r in sorted(rows, key=lambda r: float(r.get("time") or 0)):
         if r.get("pnl_pnl") is not None:
@@ -31941,7 +31943,7 @@ def hdg_reco_calc(rows, eq_src, eq_dst, mult, min_x):
         ys.append(-move - fund + fee)         # the mirror of the same dollar size (fee < 0: paid again)
         own += f(r, "pnl"); fees += fee
     k_now = max(mult * eq_dst / eq_src, min_x)
-    out = {"n": len(ys), "n_all": n_all, "skipped": n_all - len(ys), "min_move": HDG_RECO_MIN_MOVE, "own": round(own, 2), "fees": round(fees, 2), "k_now": round(k_now, 2),
+    out = {"n": len(ys), "n_all": n_all, "skipped": n_all - len(ys), "min_pnl": HDG_RECO_MIN_PNL, "own": round(own, 2), "fees": round(fees, 2), "k_now": round(k_now, 2),
            "mirror_now": round(k_now * sum(ys), 2), "pos": sum(1 for y in ys if y > 0)}
     best_k, best_g = 0.0, 0.0
     for i in range(1, 401):
@@ -31962,7 +31964,7 @@ def hdg_reco_calc(rows, eq_src, eq_dst, mult, min_x):
 
 
 def hdg_reco():
-    """the recommendation from the first account's last 50 closed positions (the impulsive ones out) — refreshed in the
+    """the recommendation from the first account's last 50 closed positions with |PnL| >= 5$ — refreshed in the
     background every 10 min"""
     with _hdg_lock:
         cfg = dict(_HDG["cfg"])
@@ -31974,7 +31976,7 @@ def hdg_reco():
             v = None
             try:
                 with hdg_acc(cfg["src"]), live_http():
-                    rows = gate_signed_request("GET", "/futures/usdt/position_close", query_string=f"limit={HDG_RECO_N}", retry_on_timeout=True) or []
+                    rows = gate_signed_request("GET", "/futures/usdt/position_close", query_string=f"limit={HDG_RECO_FETCH}", retry_on_timeout=True) or []
                     eq_src = hdg_equity()
                 with hdg_acc(cfg["dst"]), live_http():
                     eq_dst = hdg_equity()
@@ -38882,7 +38884,7 @@ async function refreshHdg() {   // v0.99.628 — 🪞 hedge mirror
   const rc = d.reco;
   if (c.dst && rc) {
     let t;
-    const base = `по последним ${rc.n_all ?? rc.n} сделкам${rc.skipped ? ` (без ${rc.skipped} мелких — ход цены меньше ${rc.min_move}%)` : ''}`;
+    const base = `по последним ${rc.n} сделкам с PnL от ${rc.min_pnl ?? 5}$ по модулю`;
     if (rc.err) t = `<span class="dim">${rc.err}</span>`;
     else if (rc.n < 10) t = `${base}: осталось ${rc.n} — мало для вывода`;
     else if (!rc.best_k || rc.best_k < 1) t = `${base}: <b>зеркало не рекомендуется</b> — перевеса почти нет (выгодно было бы только зеркало меньше твоей сделки)`;

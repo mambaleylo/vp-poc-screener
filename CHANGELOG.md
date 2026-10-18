@@ -19956,3 +19956,7 @@ v0.99.633 - 🪞 Hedge mirror: the recommendation now takes the first account's 
          when the best mirror would be smaller than the user's own trade in dollars (it then only shrinks the
          user's own side, no reversal) it says plainly «зеркало не рекомендуется» instead of fractional sizes
          (the user's screenshot: «Размер зеркала 0.06 (максимум 0.11) · не меньше × 0.2»). Tests: 35/35.
+
+v0.99.634 - 🪞 Hedge mirror: the recommendation takes only the positions closed at +5$ or more / -5$ or less (the user:
+         the 0.3% move filter still left the impulsive ones in) — the last 50 such of the last 200 closed; the price
+         move filter is gone. Tests: 36/36.

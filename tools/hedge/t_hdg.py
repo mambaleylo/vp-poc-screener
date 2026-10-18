@@ -161,7 +161,7 @@ dirloss = [{"time": i, "pnl": "-9", "pnl_pnl": "-8", "pnl_fee": "-1", "pnl_fund"
 r1 = V.hdg_reco_calc(dirloss, 1000, 500, 2, 2)
 print("  direction losses:", r1)
 check("reco: direction losses -> mirror positive, a best size", r1["mirror_now"] > 0 and r1["best_k"] > 0 and r1["half_mult"] == min(round(r1["best_k"] / 2 * 2, 2), 10))
-feeloss = [{"time": i, "pnl": str(5 - 2 if i % 2 else -5 - 2), "pnl_pnl": "5" if i % 2 else "-5", "pnl_fee": "-2", "pnl_fund": "0"} for i in range(20)]
+feeloss = [{"time": i, "pnl": str(10 - 2 if i % 2 else -10 - 2), "pnl_pnl": "10" if i % 2 else "-10", "pnl_fee": "-2", "pnl_fund": "0"} for i in range(20)]
 r2 = V.hdg_reco_calc(feeloss, 1000, 500, 2, 2)
 print("  fee losses:", r2)
 check("reco: fee losses -> no good size", r2["best_k"] == 0 and r2["mirror_now"] < 0)
@@ -170,11 +170,12 @@ V._hdg_reco.update({"t": 0, "busy": False, "key": None}); V.hdg_reco(); _t.sleep
 rv = V.hdg_reco()
 print("  live reco:", rv)
 check("reco via the exchange", rv and rv.get("n") == 2)
-micro = [{"time": 500 + i, "side": "long", "long_price": "100", "short_price": "100.1", "pnl": "-2", "pnl_pnl": "1", "pnl_fee": "-3", "pnl_fund": "0"} for i in range(30)]
-big = [dict(r, side="long", long_price="100", short_price="99" if float(r["pnl_pnl"]) < 0 else "101") for r in dirloss]
-r3 = V.hdg_reco_calc(big + micro, 1000, 500, 2, 2)
-print("  with micro trades:", {k: r3[k] for k in ("n", "n_all", "skipped", "best_k")})
-check("micro trades (move < 0.3%) left out", r3["n_all"] == 50 and r3["skipped"] == 30 and r3["n"] == 20 and r3["best_k"] == r1["best_k"])
+small = [{"time": 500 + i, "pnl": "-2", "pnl_pnl": "1", "pnl_fee": "-3", "pnl_fund": "0"} for i in range(30)]
+r3 = V.hdg_reco_calc(dirloss + small, 1000, 500, 2, 2)
+print("  with small trades:", {k: r3[k] for k in ("n", "n_all", "skipped", "best_k")})
+check("|PnL| < 5$ left out", r3["n_all"] == 50 and r3["skipped"] == 30 and r3["n"] == 20 and r3["best_k"] == r1["best_k"])
+many = [{"time": 1000 + i, "pnl": "-9", "pnl_pnl": "-8", "pnl_fee": "-1", "pnl_fund": "0"} for i in range(80)]
+check("the last 50 of the passing ones", V.hdg_reco_calc(many, 1000, 500, 2, 2)["n"] == 50)
 check("move % by side", abs(V.hdg_move_pct({"side": "short", "long_price": "99", "short_price": "100"}) - 1.0) < 1e-9)
 print("ok", ok, "fail", bad)
 print("\n".join("TG: " + t for t in TG))
