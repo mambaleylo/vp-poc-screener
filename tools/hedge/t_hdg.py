@@ -156,5 +156,19 @@ check("bad cap refused", c.post("/api/hdg/config", json={"cap_pct": 0}).status_c
 # 10. a state reload keeps the pairs (restart)
 V.hdg_save(); saved = dict(V._HDG["pairs"]); V._HDG["pairs"] = {}; V.hdg_load()
 check("state survives a restart", set(V._HDG["pairs"]) == set(saved))
+# 11. the recommendation from the last 20 trades
+dirloss = [{"time": i, "pnl": "-9", "pnl_pnl": "-8", "pnl_fee": "-1", "pnl_fund": "0"} for i in range(14)] +           [{"time": 100 + i, "pnl": "9", "pnl_pnl": "10", "pnl_fee": "-1", "pnl_fund": "0"} for i in range(6)]
+r1 = V.hdg_reco_calc(dirloss, 1000, 500, 2, 2)
+print("  direction losses:", r1)
+check("reco: direction losses -> mirror positive, a best size", r1["mirror_now"] > 0 and r1["best_k"] > 0 and r1["half_mult"] == round(r1["best_k"] / 2 * 2, 2))
+feeloss = [{"time": i, "pnl": str(5 - 2 if i % 2 else -5 - 2), "pnl_pnl": "5" if i % 2 else "-5", "pnl_fee": "-2", "pnl_fund": "0"} for i in range(20)]
+r2 = V.hdg_reco_calc(feeloss, 1000, 500, 2, 2)
+print("  fee losses:", r2)
+check("reco: fee losses -> no good size", r2["best_k"] == 0 and r2["mirror_now"] < 0)
+import time as _t
+V._hdg_reco.update({"t": 0, "busy": False, "key": None}); V.hdg_reco(); _t.sleep(0.5)
+rv = V.hdg_reco()
+print("  live reco:", rv)
+check("reco via the exchange", rv and rv.get("n") == 2)
 print("ok", ok, "fail", bad)
 print("\n".join("TG: " + t for t in TG))

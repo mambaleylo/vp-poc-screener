@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.630"
+APP_VERSION = "0.99.631"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31909,6 +31909,70 @@ def hdg_balances():
     return dict(_hdg_bal["v"])
 
 
+_hdg_reco = {"t": 0, "v": None, "busy": False, "key": None}
+
+
+def hdg_reco_calc(rows, eq_src, eq_dst, mult, min_x):
+    """the first account's last closed positions -> what the mirror would have made: per trade the opposite of the
+    move and the funding, its own fees, scaled by k = mirror $ / first $; k for the best growth of the second
+    balance (max sum of log(1 + k * y / balance), Kelly) and half of it (safer: 20 trades are few)"""
+    f = lambda r, k: float(r.get(k) or 0)
+    ys, own, fees = [], 0.0, 0.0
+    for r in sorted(rows, key=lambda r: float(r.get("time") or 0)):
+        if r.get("pnl_pnl") is not None:
+            move, fee, fund = f(r, "pnl_pnl"), f(r, "pnl_fee"), f(r, "pnl_fund")
+        else:
+            move, fee, fund = f(r, "pnl"), 0.0, 0.0
+        ys.append(-move - fund + fee)         # the mirror of the same dollar size (fee < 0: paid again)
+        own += f(r, "pnl"); fees += fee
+    k_now = max(mult * eq_dst / eq_src, min_x)
+    out = {"n": len(ys), "own": round(own, 2), "fees": round(fees, 2), "k_now": round(k_now, 2),
+           "mirror_now": round(k_now * sum(ys), 2), "pos": sum(1 for y in ys if y > 0)}
+    best_k, best_g = 0.0, 0.0
+    for i in range(1, 401):
+        k = i * 0.05
+        g = 0.0
+        for y in ys:
+            v = 1 + k * y / eq_dst
+            if v <= 0:
+                g = -1e18; break
+            g += math.log(v)
+        if g > best_g:
+            best_k, best_g = k, g
+    out["best_k"] = round(best_k, 2)
+    out["best_mult"] = round(min(best_k * eq_src / eq_dst, 10), 2)       # the field's own maximum
+    out["half_mult"] = round(min(best_k / 2 * eq_src / eq_dst, 10), 2)
+    out["growth_best"] = round((math.exp(best_g) - 1) * 100, 1)
+    return out
+
+
+def hdg_reco():
+    """the recommendation from the first account's last 20 closed positions — refreshed in the background every 10 min"""
+    with _hdg_lock:
+        cfg = dict(_HDG["cfg"])
+    key = (cfg.get("src"), cfg.get("dst"), cfg.get("mult"), cfg.get("min_x"))
+    if (time.time() - _hdg_reco["t"] > 600 or _hdg_reco["key"] != key) and not _hdg_reco["busy"] and cfg.get("dst"):
+        _hdg_reco["busy"] = True
+
+        def run():
+            v = None
+            try:
+                with hdg_acc(cfg["src"]), live_http():
+                    rows = gate_signed_request("GET", "/futures/usdt/position_close", query_string="limit=20", retry_on_timeout=True) or []
+                    eq_src = hdg_equity()
+                with hdg_acc(cfg["dst"]), live_http():
+                    eq_dst = hdg_equity()
+                if rows and eq_src > 0 and eq_dst > 0:
+                    v = hdg_reco_calc(rows, eq_src, eq_dst, float(cfg.get("mult") or 2), float(cfg.get("min_x") or 0))
+                else:
+                    v = {"n": len(rows), "err": None if rows else "закрытых сделок на первом счёте нет"}
+            except Exception as e:
+                v = {"err": str(e)[:160]}
+            _hdg_reco.update({"v": v, "t": time.time(), "busy": False, "key": key})
+        threading.Thread(target=run, daemon=True).start()
+    return _hdg_reco["v"] if _hdg_reco["key"] == key else None
+
+
 def hdg_acc_label(a):
     return next((x["label"] for x in hdg_accounts() if x["id"] == a), str(a))
 
@@ -32295,8 +32359,9 @@ def hdg_status():
     opn = [dict(p, key=k) for k, p in pairs.items() if p.get("status") == "open"]
     done = sorted((dict(p, key=k) for k, p in pairs.items() if p.get("status") != "open"), key=lambda p: -(p.get("t_close") or 0))[:20]
     bal = hdg_balances()
+    reco = hdg_reco()
     accs = [dict(a, bal=bal.get(a["id"])) for a in hdg_accounts()]
-    return {"cfg": cfg, "accounts": accs, "open": opn, "done": done, "log": log[-30:][::-1], "err": err, "t": t,
+    return {"cfg": cfg, "accounts": accs, "reco": reco, "open": opn, "done": done, "log": log[-30:][::-1], "err": err, "t": t,
             "armed": armed, "dry": AUTOTRADE_DRY_RUN, "buf_pct": HDG_LIQ_BUF_PCT, "poll": HDG_POLL_SEC}
 
 
@@ -38798,6 +38863,16 @@ async function refreshHdg() {   // v0.99.628 — 🪞 hedge mirror
       <label class="switch"><input type="checkbox" id="hdgTg" ${c.tg !== false ? 'checked' : ''}><span class="switchSlider"></span></label></div>
     ${d.err && c.on ? `<div class="zbanner warn">${d.err}</div>` : ''}
     ${c.on && !d.err && d.t ? `<div class="dim" style="font-size:var(--fs-xs);">последняя проверка ${dd(d.t)}</div>` : ''}`);
+  const rc = d.reco;
+  if (c.dst && rc) {
+    const $ = v => `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${(+v).toFixed(2)}$</span>`;
+    let t;
+    if (rc.err) t = `<span class="dim">${rc.err}</span>`;
+    else if (!rc.best_k) t = `по последним ${rc.n} сделкам первого счёта зеркало было бы в минусе (${$(rc.mirror_now)} при нынешних настройках) — твой слив там в основном комиссии (${$(rc.fees)} из ${$(rc.own)}), включать не стоит`;
+    else t = `по последним ${rc.n} сделкам: твой итог ${$(rc.own)} (комиссии ${$(rc.fees)}), зеркало при нынешних настройках дало бы ${$(rc.mirror_now)} (в плюсе ${rc.pos} из ${rc.n}).
+      <b>Лучший рост второго счёта — «Размер зеркала» ${rc.best_mult}</b> (+${rc.growth_best}%), безопаснее — <b>${rc.half_mult}</b>: 20 сделок — мало, это ориентир${rc.best_k < (c.min_x ?? 2) ? `; минимум ×${c.min_x ?? 2} от сделки выше лучшего — его стоит снизить до ${(rc.best_k / 2).toFixed(1)}` : ''}`;
+    h += `<div class="zcard" style="font-size:var(--fs-sm);">📊 ${t}</div>`;
+  }
   const op = d.open || [];
   h += card(`Открытые зеркала · ${op.length}`, op.length ? op.map(p => {
       const ords = Object.values(p.orders || {});

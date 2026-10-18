@@ -19938,3 +19938,10 @@ v0.99.630 - 🪞 Hedge mirror: two new limits in the tab (the user agreed they m
          All the tabs' descriptions (Neuro, P/R, EMA, 📈 Пробой, 🪞 Хедж, the zone finder texts, the «ℹ️ Как
          работает» blocks, the breakout's trend-system note) now hide under the 💡 button like the older hints.
          Test on the fake exchange: 30/30 (tools/hedge/t_hdg.py).
+
+v0.99.631 - 🪞 Hedge mirror: a short recommendation from the first account's last 20 closed positions (the user asked
+         for it as a one-liner). Per trade the mirror gets the opposite of the move and the funding and pays its own
+         fees; shown: the user's own result and fees, what the mirror would have made with the current settings
+         (and in how many of the 20 it was positive), and the «Размер зеркала» with the best growth of the second
+         balance (Kelly) and half of it as the safer one; with no positive size (the losses are mostly fees) it
+         says the mirror is not worth switching on. Fetched in the background every 10 minutes. Tests: 33/33.
