@@ -19949,3 +19949,10 @@ v0.99.631 - 🪞 Hedge mirror: a short recommendation from the first account's l
 v0.99.632 - 🪞 Hedge mirror: the recommendation shows only the numbers (the user: no plus / minus amounts) — the safer
          «Размер зеркала», the maximum one, and «не меньше ×» when the current minimum is above the best size;
          with no good size: «зеркало не рекомендуется».
+
+v0.99.633 - 🪞 Hedge mirror: the recommendation now takes the first account's last 50 closed positions and leaves out
+         the impulsive ones — a price move from the entry to the exit under 0.3% (no leverage; the user: judge by the
+         closed PnL in %, not dollars). The block says how many were left out; under 10 left — too few to judge;
+         when the best mirror would be smaller than the user's own trade in dollars (it then only shrinks the
+         user's own side, no reversal) it says plainly «зеркало не рекомендуется» instead of fractional sizes
+         (the user's screenshot: «Размер зеркала 0.06 (максимум 0.11) · не меньше × 0.2»). Tests: 35/35.
