@@ -19911,3 +19911,16 @@ v0.99.627 - Zones: a result post (the ADA screenshot with the TradingView price-
          the same digits (0,0175 / 175) or when it has two prices and a bracket (a zone has no text), and a box
          missed on the first read is read once more at twice the size. On this screenshot shrunk to 700–1230 px
          and saved at JPEG 60–90 every copy is now a result post (800 px failed before).
+
+v0.99.628 - 🪞 Hedge mirror — a new tab (the user asked for it). The user picks the first account and the second one
+         from the accounts with keys in the settings (the main one and the module sub-accounts). Every NEW position
+         on the first account gets an opposite one on the second: the same coin and leverage, MULT (2 by default)
+         times the first position's share of its balance, taken of the second account's balance (margin 10$ of
+         100$ = 10% -> 20% -> 30$ of 150$). The first account's full-close triggers are copied at the same price:
+         its take is the mirror's stop, its stop is the mirror's take. A mirror stop beyond the liquidation is put
+         just before it (0.1% of the price, mark price) with a Telegram note; with no stop at all, the mirror gets
+         one there too. The first position gone (its stop / take or closed by hand) -> the mirror is closed at
+         market and its orders cancelled; the mirror closed on its own is not reopened. Partial closes and adds
+         are not copied, positions open before switching on are left alone, a coin the second account already
+         holds is not touched, nothing is sent in the dry-run mode. Checked every 5 s; the state survives restarts
+         (vp_hdg_state.json). Tested on a fake two-account exchange (tools/hedge/t_hdg.py, 22/22).

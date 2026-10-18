@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.627"
+APP_VERSION = "0.99.628"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7526,6 +7526,7 @@ LOOP_MAX_GAP_SEC = {
     "snr_live_loop": 60 * 60,
     "prx_loop": 60 * 60,   # v0.99.624 — Peak Reversal v2
     "rbx_loop": 3 * 3600,   # v0.99.625 — once a day, beats every minute
+    "hdg_loop": 10 * 60,   # v0.99.628 — 🪞 hedge mirror, beats every 5 s
     "emx_loop": 60 * 60,   # v0.99.618 — «EMA — касания» (the W/M loops no longer run); v0.99.619 — 15 -> 60 min, the hourly levels of 120 coins take longer on the phone (it beats per coin too)
     "battery_watch_loop": 30 * 60,   # v0.99.582
     "nx_loop": 60 * 60,   # v0.99.619 — Neuro v3 (the old live / mining loops no longer run)
@@ -7540,7 +7541,7 @@ LOOP_MAX_GAP_SEC = {
 LOOP_LABELS = {
     "scan_loop": "Volume скан", "msnr_live_loop": "MSNR живой скан",
     "lsw_live_loop": "Sweep живой скан", "snr_live_loop": "S/R живой скан",
-    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "nx_loop": "Нейро",
+    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "hdg_loop": "🪞 Хедж", "nx_loop": "Нейро",
     "reconcile_loop": "сверка позиций (автоторговля)",
     "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
     "snr_backtest_loop": "S/R бэктест",
@@ -31859,6 +31860,452 @@ def api_rbx_status():
         return jsonify({"err": f"статистика не посчиталась: {e}"})
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# v0.99.628 — 🪞 Hedge mirror: every NEW position on the source account gets an opposite one on the target account,
+# MULT x its size at the same leverage; the source's full-close triggers are copied with the same price / rule
+# (its take = the mirror's stop, its stop = the mirror's take); a mirror stop beyond the liquidation is moved just
+# before it (and when the mirror has no stop at all, one is put there); the source position gone (its stop / take
+# or closed by hand) -> the mirror is closed at market and its triggers cancelled. Partial closes / adds are not
+# copied; positions already open when it is switched on are left alone.
+# ═══════════════════════════════════════════════════════════════════════════
+HDG_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_hdg_state.json")
+HDG_POLL_SEC = 5
+HDG_LIQ_BUF_PCT = 0.1    # the stop before the liquidation: 0.1% of the price (at least 3 ticks) — the user: "максимально близко"
+_hdg_lock = threading.RLock()
+_HDG = {"cfg": {"on": False, "src": "default", "dst": None, "mult": 2.0, "tg": True}, "armed": False, "ignored": [],
+        "pairs": {}, "log": [], "err": None, "t": None, "loaded": False}
+
+
+def hdg_accounts():
+    """the accounts with keys: the main one + each module sub-account (Settings -> keys)"""
+    out = [{"id": "default", "label": "Основной", "ok": bool(GATE_API_KEY and GATE_API_SECRET)}]
+    for m in MODULE_ACCOUNT_MODES:
+        out.append({"id": m, "label": f"Суб-аккаунт {MODULE_ACCOUNT_LABELS.get(m, m)}", "ok": m in MODULE_CREDENTIALS})
+    return out
+
+
+def hdg_acc_label(a):
+    return next((x["label"] for x in hdg_accounts() if x["id"] == a), str(a))
+
+
+class hdg_acc:
+    """the requests inside go through that account's own keys — never a silent fallback to another account"""
+    def __init__(self, a):
+        if not (a == "default" and GATE_API_KEY and GATE_API_SECRET) and a not in MODULE_CREDENTIALS:
+            raise RuntimeError(f"у счёта «{hdg_acc_label(a)}» нет ключей")
+        self.ctx = using_account(None if a == "default" else a)
+
+    def __enter__(self):
+        self.ctx.__enter__(); return self
+
+    def __exit__(self, *e):
+        return self.ctx.__exit__(*e)
+
+
+def hdg_load():
+    try:
+        if os.path.exists(HDG_STATE_FILE):
+            with open(HDG_STATE_FILE) as f:
+                d = json.load(f)
+            with _hdg_lock:
+                for k in ("cfg", "armed", "ignored", "pairs", "log"):
+                    if k in d:
+                        _HDG[k] = d[k] if k != "cfg" else {**_HDG["cfg"], **d[k]}
+    except Exception as e:
+        log_error(f"hdg state load: {e}")
+    _HDG["loaded"] = True
+
+
+def hdg_save():
+    try:
+        with _hdg_lock:
+            pairs = _HDG["pairs"]
+            done = sorted((k for k, p in pairs.items() if p.get("status") != "open"), key=lambda k: pairs[k].get("t_close") or 0)
+            for k in done[:-60]:
+                pairs.pop(k, None)
+            data = json.dumps({k: _HDG[k] for k in ("cfg", "armed", "ignored", "pairs")} | {"log": _HDG["log"][-80:]})
+        tmp = HDG_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(data)
+        os.replace(tmp, HDG_STATE_FILE)
+    except Exception as e:
+        log_error(f"hdg state save: {e}")
+
+
+def hdg_event(text, tg=True):
+    with _hdg_lock:
+        _HDG["log"].append({"t": int(time.time()), "text": text})
+        _HDG["log"] = _HDG["log"][-80:]
+        on_tg = _HDG["cfg"].get("tg", True)
+    log_error(f"hdg: {text}")
+    if tg and on_tg:
+        send_telegram("🪞 " + text, category="hdg")
+
+
+def _hdg_side(p):
+    sz = float(p.get("size", 0) or 0)
+    return "long" if sz > 0 else "short"
+
+
+def _hdg_full_close_side(o, pos_sides):
+    """the side a trigger order closes FULLY ('long' / 'short'), else None (a partial close or an entry order)"""
+    ini = o.get("initial") or {}
+    ot = str(o.get("order_type") or "")
+    if "close-long" in ot:
+        return "long"
+    if "close-short" in ot:
+        return "short"
+    a = ini.get("auto_size")
+    if a in ("close_long", "close_short") and not float(ini.get("size", 0) or 0):
+        return a.split("_")[1]
+    if (ini.get("close") or ini.get("is_close")) and not float(ini.get("size", 0) or 0):
+        return pos_sides[0] if len(pos_sides) == 1 else None
+    return None
+
+
+def _hdg_liq_buf(price, tick):
+    return max(price * HDG_LIQ_BUF_PCT / 100, 3 * (tick or 0))
+
+
+def hdg_equity():
+    """the account's futures equity: the wallet + the open positions' unrealised PnL"""
+    a = gate_signed_request("GET", "/futures/usdt/accounts", retry_on_timeout=True) or {}
+    return float(a.get("total") or 0) + float(a.get("unrealised_pnl") or 0)
+
+
+def hdg_set_leverage(contract, lev, cll):
+    dual = get_dual_mode()
+    path = f"/futures/usdt/dual_comp/positions/{contract}/leverage" if dual else f"/futures/usdt/positions/{contract}/leverage"
+    q = f"leverage={lev}"
+    if str(lev) in ("0", "0.0") and cll:
+        q += f"&cross_leverage_limit={cll}"
+    return gate_signed_request("POST", path, query_string=q, retry_on_timeout=True)
+
+
+def hdg_close_position(contract, direction):
+    body = dict(_close_order_initial(contract, direction, get_dual_mode()))
+    return gate_signed_request("POST", "/futures/usdt/orders", body=body)
+
+
+def _hdg_dst_pos(dst_positions, contract, side):
+    return next((q for q in dst_positions if q.get("contract") == contract and _hdg_side(q) == side), None)
+
+
+def hdg_open(key, p, cfg):
+    """the mirror of a new source position: opposite side, the same leverage, MULT x the source's share of its
+    deposit (the position's notional / the account's equity) — of the target account's own deposit"""
+    contract, sside = p["contract"], _hdg_side(p)
+    dside = "short" if sside == "long" else "long"
+    ddir = "SHORT" if dside == "short" else "LONG"
+    n_src = abs(float(p.get("size", 0) or 0))
+    mult = float(cfg.get("mult") or 2)
+    lev, cll = str(p.get("leverage") or "0"), p.get("cross_leverage_limit")
+    price = float(p.get("mark_price") or 0) or float(p.get("entry_price") or 0)
+    with hdg_acc(cfg["src"]), live_http():
+        eq_src = hdg_equity()
+    with hdg_acc(cfg["dst"]), live_http():
+        eq_dst = hdg_equity()
+    qm = get_contract_spec(contract).get("quanto_multiplier") or 1
+    if eq_src <= 0 or eq_dst <= 0 or price <= 0:
+        raise RuntimeError(f"нет баланса / цены (первый {eq_src:.2f}$, второй {eq_dst:.2f}$)")
+    share = n_src * qm * price / eq_src                      # the source position's notional, in its deposits
+    n = int(round(share * mult * eq_dst / (qm * price)))
+    L = float(lev) if float(lev or 0) > 0 else (float(cll or 0) or 1.0)   # the margin = notional / leverage (the same on both)
+    pair = {"contract": contract, "src_side": sside, "src_size": n_src, "src_entry": float(p.get("entry_price") or 0) or None,
+            "share": round(share / L * 100, 2), "dst_share": round(share * mult / L * 100, 2), "eq_src": round(eq_src, 2), "eq_dst": round(eq_dst, 2),
+            "lev": lev, "cll": cll, "dst_side": dside, "dst_size": n, "dst_entry": None, "liq": None, "status": "open",
+            "t_open": int(time.time()), "orders": {}, "liq_stop": None, "notes": []}
+    coin = contract.replace("_USDT", "")
+    with hdg_acc(cfg["dst"]), live_http():
+        spec = get_contract_spec(contract)
+        if n < (spec.get("order_size_min") or 1):
+            raise RuntimeError(f"зеркало {share * mult / L * 100:.1f}% баланса второго счёта ({eq_dst:.0f}$) — меньше минимального ордера")
+        if any(q.get("contract") == contract for q in get_open_positions()):
+            raise RuntimeError("на втором счёте уже есть позиция по этой монете — не трогаю её")
+        try:
+            hdg_set_leverage(contract, int(float(lev)), cll)
+        except Exception as e:
+            pair["notes"].append(f"плечо не выставилось: {str(e)[:80]}")
+        with _hdg_lock:
+            _HDG["pairs"][key] = pair      # recorded BEFORE the order: a crash after it never opens a second mirror
+        hdg_save()
+        res = None
+        try:
+            res = place_market_order(contract, ddir, n)
+        except Exception as e:
+            if not _hdg_dst_pos(get_open_positions(), contract, dside):   # a timeout may still have filled — only a real miss fails
+                with _hdg_lock:
+                    _HDG["pairs"].pop(key, None)
+                raise
+        pos = _hdg_dst_pos(get_open_positions(), contract, dside)
+        if pos:
+            pair["dst_entry"] = float(pos.get("entry_price") or 0) or None
+            pair["liq"] = float(pos.get("liq_price") or 0) or None
+            pair["dst_size"] = abs(float(pos.get("size", 0) or 0))
+        else:
+            pair["dst_entry"] = float((res or {}).get("fill_price") or 0) or None
+    lev_txt = f"x{lev}" if lev not in ("0", "0.0") else f"кросс x{cll}"
+    hdg_event(f"{coin}: на первом счёте {'лонг' if sside == 'long' else 'шорт'} на {share / L * 100:.1f}% баланса — открыл зеркало "
+              f"{'шорт' if dside == 'short' else 'лонг'} на {share * mult / L * 100:.1f}% баланса второго счёта ({pair['dst_size']:g} контр., {lev_txt})" +
+              (f" по ~{pair['dst_entry']:.6g}" if pair["dst_entry"] else "") + (f" · {pair['notes'][0]}" if pair["notes"] else ""))
+    return pair
+
+
+def hdg_sync_orders(key, pair, src_orders, cfg):
+    """copy the source's full-close triggers (same price and rule: its take = the mirror's stop and back); a stop
+    beyond the liquidation -> just before it; no stop at all -> one just before the liquidation"""
+    contract, sside, dside = pair["contract"], pair["src_side"], pair["dst_side"]
+    ddir = "SHORT" if dside == "short" else "LONG"
+    coin = contract.replace("_USDT", "")
+    want = {}
+    for o in src_orders:
+        if (o.get("initial") or {}).get("contract") != contract:
+            continue
+        if _hdg_full_close_side(o, [sside]) != sside:
+            continue
+        tr = o.get("trigger") or {}
+        try:
+            want[str(o["id"])] = (float(tr.get("price")), int(tr.get("rule")), int(tr.get("price_type") or 0))
+        except (TypeError, ValueError, KeyError):
+            continue
+    is_stop = lambda rule: (dside == "short" and rule == 1) or (dside == "long" and rule == 2)
+    changed = False
+    with hdg_acc(cfg["dst"]), live_http():
+        tick = None
+        try:
+            tick = get_contract_spec(contract).get("order_price_round")
+        except Exception:
+            pass
+        if not pair.get("liq"):
+            pos = _hdg_dst_pos(get_open_positions(), contract, dside)
+            if pos:
+                pair["liq"] = float(pos.get("liq_price") or 0) or None
+        liq = pair.get("liq")
+        # the source's triggers gone / moved -> the mirror's copies out
+        for sid, m in list(pair["orders"].items()):
+            if sid not in want or (want[sid][0], want[sid][1]) != (m["src_price"], m["rule"]):
+                try:
+                    cancel_price_order(m["dst_id"])
+                except Exception:
+                    pass
+                pair["orders"].pop(sid, None); changed = True
+        for sid, (price, rule, ptype) in want.items():
+            if sid in pair["orders"]:
+                continue
+            px, clamped = price, False
+            if is_stop(rule) and liq:
+                buf = _hdg_liq_buf(liq, tick)
+                if dside == "short" and price >= liq - buf:
+                    px, clamped = round_to_tick_directional(liq - buf, tick, round_up=False) if tick else liq - buf, True
+                elif dside == "long" and price <= liq + buf:
+                    px, clamped = round_to_tick_directional(liq + buf, tick, round_up=True) if tick else liq + buf, True
+            r = place_close_trigger_order(contract, ddir, px, rule, tick, 1 if clamped else ptype)
+            pair["orders"][sid] = {"dst_id": str((r or {}).get("id")), "src_price": price, "price": px, "rule": rule,
+                                   "kind": "stop" if is_stop(rule) else "take", "clamped": clamped}
+            changed = True
+            if clamped:
+                hdg_event(f"{coin}: стоп зеркала ({price:.6g} = тейк первого счёта) за ликвидацией {liq:.6g} — поставил перед ней: {px:.6g}")
+        has_stop = any(m["kind"] == "stop" for m in pair["orders"].values())
+        if has_stop and pair.get("liq_stop"):
+            try:
+                cancel_price_order(pair["liq_stop"]["dst_id"])
+            except Exception:
+                pass
+            pair["liq_stop"] = None; changed = True
+        if not has_stop and not pair.get("liq_stop") and liq:
+            buf = _hdg_liq_buf(liq, tick)
+            if dside == "short":
+                px, rule = (round_to_tick_directional(liq - buf, tick, round_up=False) if tick else liq - buf), 1
+            else:
+                px, rule = (round_to_tick_directional(liq + buf, tick, round_up=True) if tick else liq + buf), 2
+            r = place_close_trigger_order(contract, ddir, px, rule, tick, 1)
+            pair["liq_stop"] = {"dst_id": str((r or {}).get("id")), "price": px}
+            changed = True
+            hdg_event(f"{coin}: у первого счёта нет тейка — стопа у зеркала нет; поставил стоп перед ликвидацией: {px:.6g} (ликвидация {liq:.6g})")
+    return changed
+
+
+def hdg_close(key, pair, cfg, why):
+    contract, dside = pair["contract"], pair["dst_side"]
+    ddir = "SHORT" if dside == "short" else "LONG"
+    coin = contract.replace("_USDT", "")
+    with hdg_acc(cfg["dst"]), live_http():
+        pos = _hdg_dst_pos(get_open_positions(), contract, dside)
+        if pos:
+            hdg_close_position(contract, ddir)
+        for m in list(pair["orders"].values()) + ([pair["liq_stop"]] if pair.get("liq_stop") else []):
+            try:
+                cancel_price_order(m["dst_id"])
+            except Exception:
+                pass
+    pair.update({"status": "closed", "t_close": int(time.time()), "why": why, "orders": {}, "liq_stop": None})
+    hdg_event(f"{coin}: {why} — зеркало {'закрыто' if pos else 'уже было закрыто'}, его ордера сняты")
+
+
+def hdg_tick():
+    with _hdg_lock:
+        cfg = dict(_HDG["cfg"])
+    if not cfg.get("on"):
+        return
+    if not cfg.get("dst") or cfg["dst"] == cfg.get("src"):
+        raise RuntimeError("выберите два разных счёта")
+    if AUTOTRADE_DRY_RUN:
+        raise RuntimeError("включён режим dry-run автоторговли — ордера не отправляются")
+    with hdg_acc(cfg["src"]), live_http():
+        src_pos = get_open_positions()
+        src_orders = get_open_price_orders() or []
+    cur = {f"{p['contract']}|{_hdg_side(p)}": p for p in src_pos}
+    changed = False
+    with _hdg_lock:
+        if not _HDG["armed"]:
+            _HDG["ignored"] = sorted(cur)
+            _HDG["armed"] = True
+            changed = True
+            if cur:
+                hdg_event(f"включено: уже открытые позиции первого счёта ({len(cur)}) не зеркалю — только новые", tg=False)
+        _HDG["ignored"] = [k for k in _HDG["ignored"] if k in cur]   # an ignored one closed -> its next opening is a new one
+        ignored = set(_HDG["ignored"])
+        pairs = dict(_HDG["pairs"])
+    # the source position gone -> the mirror closes; the mirror gone on its own -> stays closed
+    for key, pair in pairs.items():
+        if pair.get("status") in ("dst_closed", "error") and key not in cur:
+            pair["status"] = "closed" if pair["status"] == "dst_closed" else "failed"   # the source position is gone too
+            changed = True
+        if pair.get("status") != "open":
+            continue
+        try:
+            if key not in cur:
+                hdg_close(key, pair, cfg, "позиция на первом счёте закрыта")
+                changed = True
+                continue
+            with hdg_acc(cfg["dst"]), live_http():
+                pos = _hdg_dst_pos(get_open_positions(), pair["contract"], pair["dst_side"])
+            if not pos:
+                with hdg_acc(cfg["dst"]), live_http():
+                    for m in list(pair["orders"].values()) + ([pair["liq_stop"]] if pair.get("liq_stop") else []):
+                        try:
+                            cancel_price_order(m["dst_id"])
+                        except Exception:
+                            pass
+                pair.update({"status": "dst_closed", "t_close": int(time.time()), "why": "зеркало закрылось на бирже (стоп / тейк / вручную)",
+                             "orders": {}, "liq_stop": None})
+                hdg_event(f"{pair['contract'].replace('_USDT', '')}: зеркало закрылось само (стоп / тейк / вручную), первый счёт ещё в позиции — заново не открываю")
+                changed = True
+                continue
+            liq = float(pos.get("liq_price") or 0) or None
+            if liq and liq != pair.get("liq"):
+                pair["liq"] = liq
+            changed |= hdg_sync_orders(key, pair, src_orders, cfg)
+        except Exception as e:
+            pair.setdefault("errs", 0)
+            pair["errs"] += 1
+            if pair["errs"] in (1, 10):
+                hdg_event(f"{pair['contract'].replace('_USDT', '')}: ошибка: {str(e)[:160]}")
+    # new source positions -> mirrors
+    for key, p in cur.items():
+        if key in ignored or key in pairs and pairs[key].get("status") == "open":
+            continue
+        old = pairs.get(key)
+        if old and old.get("status") == "dst_closed":
+            continue   # the same source position is still open, its mirror closed on its own — not again
+        if old and old.get("status") == "error" and (old.get("tries", 1) >= 3 or time.time() - old.get("t_close", 0) < 30):
+            continue   # failed: up to 3 tries, 30 s apart
+        try:
+            pair = hdg_open(key, p, cfg)
+            hdg_sync_orders(key, pair, src_orders, cfg)
+        except Exception as e:
+            tries = (old.get("tries", 1) + 1) if old and old.get("status") == "error" else 1
+            with _hdg_lock:
+                if (_HDG["pairs"].get(key) or {}).get("status") != "open":
+                    _HDG["pairs"][key] = {"contract": p["contract"], "src_side": _hdg_side(p), "src_size": abs(float(p.get("size", 0) or 0)),
+                                          "status": "error", "tries": tries, "t_open": int(time.time()), "t_close": int(time.time()),
+                                          "why": str(e)[:200], "dst_side": "short" if _hdg_side(p) == "long" else "long", "orders": {}}
+            if tries in (1, 3):
+                hdg_event(f"{p['contract'].replace('_USDT', '')}: зеркало не открылось — {str(e)[:160]}" + (" (3 попытки, больше не пробую)" if tries == 3 else ""))
+        changed = True
+    if changed:
+        hdg_save()
+
+
+def hdg_loop():
+    time.sleep(30)
+    hdg_load()
+    while True:
+        heartbeat("hdg_loop")
+        try:
+            hdg_tick()
+            with _hdg_lock:
+                _HDG["err"] = None; _HDG["t"] = int(time.time())
+        except Exception as e:
+            with _hdg_lock:
+                new = _HDG["err"] != str(e)[:200]
+                _HDG["err"] = str(e)[:200]
+            if new:
+                log_error(f"hdg_loop: {e}")
+        time.sleep(HDG_POLL_SEC)
+
+
+def hdg_status():
+    with _hdg_lock:
+        cfg, pairs, log, err, t, armed = dict(_HDG["cfg"]), dict(_HDG["pairs"]), list(_HDG["log"]), _HDG["err"], _HDG["t"], _HDG["armed"]
+    opn = [dict(p, key=k) for k, p in pairs.items() if p.get("status") == "open"]
+    done = sorted((dict(p, key=k) for k, p in pairs.items() if p.get("status") != "open"), key=lambda p: -(p.get("t_close") or 0))[:20]
+    return {"cfg": cfg, "accounts": hdg_accounts(), "open": opn, "done": done, "log": log[-30:][::-1], "err": err, "t": t,
+            "armed": armed, "dry": AUTOTRADE_DRY_RUN, "buf_pct": HDG_LIQ_BUF_PCT, "poll": HDG_POLL_SEC}
+
+
+@app.route("/api/hdg/status")
+def api_hdg_status():
+    try:
+        return jsonify(hdg_status())
+    except Exception as e:
+        log_error(f"hdg status: {e}")
+        return jsonify({"err": str(e)})
+
+
+@app.route("/api/hdg/config", methods=["POST"])
+def api_hdg_config():
+    b = request.get_json(force=True, silent=True) or {}
+    ids = {a["id"] for a in hdg_accounts()}
+    with _hdg_lock:
+        cfg = dict(_HDG["cfg"])
+        has_open = any(p.get("status") == "open" for p in _HDG["pairs"].values())
+    for k in ("src", "dst"):
+        if k in b and b[k] != cfg.get(k):
+            if b[k] not in ids:
+                return jsonify({"ok": False, "error": "нет такого счёта"}), 400
+            if has_open:
+                return jsonify({"ok": False, "error": "есть открытые зеркала — сначала дождитесь их закрытия"}), 400
+            cfg[k] = b[k]
+    if "mult" in b:
+        try:
+            v = float(b["mult"])
+            if not 0.1 <= v <= 10:
+                raise ValueError
+            cfg["mult"] = v
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "множитель — число от 0.1 до 10"}), 400
+    if "tg" in b:
+        cfg["tg"] = bool(b["tg"])
+    if "on" in b:
+        on = bool(b["on"])
+        if on:
+            if not cfg.get("dst") or cfg["dst"] == cfg.get("src"):
+                return jsonify({"ok": False, "error": "выберите два разных счёта"}), 400
+            okk = {a["id"]: a["ok"] for a in hdg_accounts()}
+            if not okk.get(cfg["src"]) or not okk.get(cfg["dst"]):
+                return jsonify({"ok": False, "error": "у одного из счетов нет ключей (Настройки → ключи)"}), 400
+        with _hdg_lock:
+            if on and not cfg.get("on"):
+                _HDG["armed"] = False        # the positions open right now are left alone
+        cfg["on"] = on
+    with _hdg_lock:
+        _HDG["cfg"] = cfg
+    hdg_save()
+    return jsonify({"ok": True, **hdg_status()})
+
+
+
 @app.route("/api/zones/oc/retrain", methods=["POST"])
 def api_oc_retrain():
     def run():
@@ -34749,6 +35196,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="zones" style="color:#4caf50;">🎯 Зоны</div>
   <div class="tab" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
   <div class="tab" data-tab="rbx" style="color:#ffb74d;">📈 Пробой</div>
+  <div class="tab" data-tab="hdg" style="color:#b39ddb;">🪞 Хедж</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
@@ -34769,6 +35217,7 @@ INDEX_HTML = """<!doctype html>
   <div id="amdPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="neuroPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="rbxPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="hdgPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="snrPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="prvPanel" style="display:block;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="emwPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
@@ -35340,6 +35789,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('amdPanel').style.display = activeTab === 'amd' ? 'block' : 'none';
     document.getElementById('neuroPanel').style.display = activeTab === 'neuro' ? 'block' : 'none';
     document.getElementById('rbxPanel').style.display = activeTab === 'rbx' ? 'block' : 'none';
+    document.getElementById('hdgPanel').style.display = activeTab === 'hdg' ? 'block' : 'none';
     document.getElementById('snrPanel').style.display = activeTab === 'snr' ? 'block' : 'none';
     document.getElementById('prvPanel').style.display = activeTab === 'prv' ? 'block' : 'none';
     document.getElementById('emwPanel').style.display = activeTab === 'emw' ? 'block' : 'none';
@@ -35355,6 +35805,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'amd') refreshAmd();
     if (activeTab === 'neuro') refreshNeuro();
     if (activeTab === 'rbx') refreshRbx();
+    if (activeTab === 'hdg') refreshHdg();
     if (activeTab === 'snr') refreshSnr();
     if (activeTab === 'prv') refreshPrv();
     if (activeTab === 'emw') refreshEmw();
@@ -38253,6 +38704,75 @@ function stratNewBadge(c, isActive) {   // v0.99.557 — why a passing coin isn'
   return `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-xs);"><span style="font-size:var(--fs-xs);">${txt}</span></div>`;
 }
 
+async function refreshHdg() {   // v0.99.628 — 🪞 hedge mirror
+  const panel = document.getElementById('hdgPanel');
+  let d;
+  try { d = await (await fetch('/api/hdg/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
+  if (panel.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;   // not while typing
+  const card = (title, body) => `<div class="zcard"><div class="zh">${title}</div>${body}</div>`;
+  const coin = s => (s || '').replace('_USDT', '');
+  const dd = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
+  const side = s => s === 'long' ? '<span class="win">лонг</span>' : '<span class="loss">шорт</span>';
+  const px = v => v == null ? '—' : (+v).toPrecision(6).replace(/\.?0+$/, '');
+  const c = d.cfg || {}, accs = d.accounts || [];
+  const opt = (sel) => accs.map(a => `<option value="${a.id}" ${a.id === sel ? 'selected' : ''} ${a.ok ? '' : 'disabled'}>${a.label}${a.ok ? '' : ' — нет ключей'}</option>`).join('');
+  const selSt = 'background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);max-width:100%;';
+  const pill = !c.on ? '<span class="pill">выключено</span>' : (d.err ? '<span class="pill neg">ошибка</span>' : '<span class="pill pos">следит</span>');
+  let h = `<div class="dim">Каждая <b>новая</b> позиция на первом счёте → на втором открывается такая же монета в <b>обратную</b> сторону,
+    на ×${c.mult || 2} большую долю баланса (маржа 10$ из 100$ на первом = 10% → 20% → 30$ из 150$ на втором), плечо то же. Тейк первого счёта становится стопом зеркала, стоп — тейком (по той же цене).
+    Стоп за ликвидацией ставится прямо перед ней (${d.buf_pct || 0.1}% цены), и приходит уведомление. Позиция на первом счёте закрылась
+    (стоп, тейк или вручную) — зеркало закрывается по рынку, его ордера снимаются. Частичные закрытия и доборы не повторяются;
+    позиции, открытые до включения, не трогаются.</div>`;
+  h += card(`🪞 Хедж-зеркало ${pill}`, `
+    <div style="margin:6px 0;"><div class="label">Первый счёт — за ним следим</div>
+      <select id="hdgSrc" style="${selSt}width:100%;margin-top:4px;">${opt(c.src)}</select></div>
+    <div style="margin:6px 0 8px;"><div class="label">Второй счёт — зеркало</div>
+      <select id="hdgDst" style="${selSt}width:100%;margin-top:4px;"><option value="" ${c.dst ? '' : 'selected'} disabled>выберите</option>${opt(c.dst)}</select></div>
+    <div class="settingRow"><div><div class="label">Размер зеркала</div><div class="sub">во сколько раз больше доля баланса (маржи), чем у позиции первого счёта</div></div>
+      <input type="number" id="hdgMult" min="0.1" max="10" step="0.1" value="${c.mult || 2}" style="width:70px;${selSt}"></div>
+    <div class="settingRow"><div><div class="label">Включено</div><div class="sub">проверка каждые ${d.poll || 5} с</div></div>
+      <label class="switch"><input type="checkbox" id="hdgOn" ${c.on ? 'checked' : ''}><span class="switchSlider"></span></label></div>
+    <div class="settingRow subRow"><div><div class="label">↳ уведомления в Telegram</div></div>
+      <label class="switch"><input type="checkbox" id="hdgTg" ${c.tg !== false ? 'checked' : ''}><span class="switchSlider"></span></label></div>
+    ${d.err && c.on ? `<div class="zbanner warn">${d.err}</div>` : ''}
+    ${c.on && !d.err && d.t ? `<div class="dim" style="font-size:var(--fs-xs);">последняя проверка ${dd(d.t)}</div>` : ''}`);
+  const op = d.open || [];
+  h += card(`Открытые зеркала · ${op.length}`, op.length ? op.map(p => {
+      const ords = Object.values(p.orders || {});
+      const st = ords.filter(o => o.kind === 'stop'), tk = ords.filter(o => o.kind === 'take');
+      const lev = (p.lev && p.lev !== '0') ? `x${p.lev}` : `кросс x${p.cll || '?'}`;
+      return `<div class="zrow" style="padding:6px 0;border-bottom:1px solid var(--line);">
+        <b>${coin(p.contract)}</b> · первый: ${side(p.src_side)} ${p.share != null ? p.share + '% баланса' : p.src_size} → зеркало: ${side(p.dst_side)} ${p.dst_share != null ? p.dst_share + '% баланса' : ''} (${p.dst_size} контр.) ${lev}${p.dst_entry ? ' по ' + px(p.dst_entry) : ''}
+        <div class="dim" style="font-size:var(--fs-sm);">стоп: ${st.length ? st.map(o => px(o.price) + (o.clamped ? ' ⚠ перед ликвидацией' : '')).join(', ') : (p.liq_stop ? px(p.liq_stop.price) + ' ⚠ перед ликвидацией' : '—')}
+          · тейк: ${tk.length ? tk.map(o => px(o.price)).join(', ') : '—'} · ликвидация: ${px(p.liq)}${(p.notes || []).length ? ' · ' + p.notes.join('; ') : ''}</div></div>`;
+    }).join('') : '<div class="dim">нет — ждём новую позицию на первом счёте</div>');
+  const dn = d.done || [];
+  if (dn.length) {
+    const why = p => p.status === 'error' || p.status === 'failed' ? `<span class="loss">не открылось</span>: ${p.why || ''}` : (p.why || '');
+    h += `<details class="zcard"><summary class="zh" style="cursor:pointer;">Закрытые · ${dn.length}</summary>${dn.map(p =>
+      `<div style="padding:4px 0;border-bottom:1px solid var(--line);font-size:var(--fs-sm);"><b>${coin(p.contract)}</b> ${side(p.dst_side)} ${p.dst_size || ''} · ${dd(p.t_close)} · ${why(p)}</div>`).join('')}</details>`;
+  }
+  const lg = d.log || [];
+  if (lg.length) h += `<details class="zcard"><summary class="zh" style="cursor:pointer;">События · ${lg.length}</summary>${lg.map(e =>
+      `<div style="padding:3px 0;font-size:var(--fs-sm);"><span class="dim">${dd(e.t)}</span> ${e.text}</div>`).join('')}</details>`;
+  panel.innerHTML = h;
+  const post = async (body) => {
+    try {
+      const r = await (await fetch('/api/hdg/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})).json();
+      if (!r.ok) alert(r.error || 'не сохранилось');
+    } catch (e) { alert('не сохранилось: ' + e); }
+    refreshHdg();
+  };
+  document.getElementById('hdgSrc').onchange = e => post({src: e.target.value});
+  document.getElementById('hdgDst').onchange = e => post({dst: e.target.value});
+  document.getElementById('hdgMult').onchange = e => post({mult: e.target.value});
+  document.getElementById('hdgOn').onchange = e => {
+    if (e.target.checked && !confirm(`Включить зеркало? Каждая новая позиция на счёте «${(accs.find(a => a.id === c.src) || {}).label}» будет открывать обратную ×${c.mult || 2} на «${(accs.find(a => a.id === c.dst) || {}).label || '?'}» реальными деньгами.`)) { e.target.checked = false; return; }
+    post({on: e.target.checked});
+  };
+  document.getElementById('hdgTg').onchange = e => post({tg: e.target.checked});
+}
+
 async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h, the trend exit or half at +2R
   const panel = document.getElementById('rbxPanel');
   let d;
@@ -39284,6 +39804,7 @@ async function refreshAll() {
   if (activeTab === 'mirror') await refreshMirror();
   if (activeTab === 'neuro') await refreshNeuro();
   if (activeTab === 'rbx') await refreshRbx();
+  if (activeTab === 'hdg') await refreshHdg();
   if (activeTab === 'snr') await refreshSnr();
   if (activeTab === 'prv') await refreshPrv();
   if (activeTab === 'emw') await refreshEmw();
@@ -41124,6 +41645,7 @@ if __name__ == "__main__":
     # v0.99.624 — the old per-coin Peak Reversal (backtest / live / filter loops) is replaced by the model (prx_loop)
     threading.Thread(target=prx_loop, daemon=True).start()
     threading.Thread(target=rbx_loop, daemon=True).start()   # v0.99.625 — 📈 range breakout
+    threading.Thread(target=hdg_loop, daemon=True).start()   # v0.99.628 — 🪞 hedge mirror
     threading.Thread(target=entry_retry_loop, daemon=True).start()   # v0.99.566
     # v0.99.618 — the old W/M touch alerts and their statistics are replaced by «EMA — касания» (emx_loop)
     threading.Thread(target=emx_loop, daemon=True).start()
