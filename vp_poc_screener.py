@@ -31316,6 +31316,83 @@ def model_refresh_once():
     return done
 
 
+BT_TRADES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_bt_trades.json")
+BT_TRADES_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/main/vp_bt_trades.json"
+_bt_cache = {"d": None, "t": 0}
+
+
+def bt_trades():
+    """v0.99.637 — the research's backtest trades shown in the tabs (📈 breakout, P/R): the file next to the bot,
+    fetched from the repo when missing or a day old"""
+    if _bt_cache["d"] is not None and time.time() - _bt_cache["t"] < 3600:
+        return _bt_cache["d"]
+    d = None
+    try:
+        fresh = os.path.exists(BT_TRADES_FILE) and time.time() - os.path.getmtime(BT_TRADES_FILE) < 86400
+        if not fresh:
+            r = requests.get(BT_TRADES_URL, params={"nocache": int(time.time())}, timeout=60)
+            r.raise_for_status()
+            d = r.json()
+            tmp = BT_TRADES_FILE + ".new"
+            with open(tmp, "w") as f:
+                json.dump(d, f, separators=(",", ":"))
+            os.replace(tmp, BT_TRADES_FILE)
+    except Exception as e:
+        log_error(f"bt trades download: {e}")
+    if d is None and os.path.exists(BT_TRADES_FILE):
+        with open(BT_TRADES_FILE) as f:
+            d = json.load(f)
+    _bt_cache.update({"d": d, "t": time.time()})
+    return d
+
+
+@app.route("/api/bt/trades")
+def api_bt_trades():
+    mod = request.args.get("mod", "rbx")
+    try:
+        d = bt_trades() or {}
+        tr = sorted(d.get(mod) or [], key=lambda x: -x["t"])
+        return jsonify({"trades": tr, "made": d.get("made")})
+    except Exception as e:
+        return jsonify({"trades": [], "err": str(e)[:200]})
+
+
+@app.route("/api/btchart/<symbol>")
+def api_bt_chart(symbol):
+    """the candles around one trade (Gate's): the chart's own bars from a few dozen before the entry to a few after
+    the exit; 12h from 4h (UTC 00 / 12, like the bot)"""
+    try:
+        ch = request.args.get("c", "1d")
+        t = int(float(request.args.get("t") or 0)); x = int(float(request.args.get("x") or 0)) or int(time.time())
+        hrs = {"1h": 1, "4h": 4, "12h": 12, "1d": 24}.get(ch, 24)
+        sec = hrs * 3600
+        before = int(request.args.get("before") or 45)
+        start = t - before * sec
+        end = min(int(time.time()), max(x, t) + 8 * sec)
+        if (end - start) // sec > 600:          # a very long trade: the window shortened from the start
+            start = end - 600 * sec
+        if ch == "12h":
+            src = get_candles_range(symbol, "4h", start, end) or []
+            bars, cur, key = [], None, None
+            for c in src:
+                k = c["time"] // 43200
+                if k != key:
+                    if cur and cur["n"] == 3:
+                        bars.append(cur)
+                    key = k
+                    cur = {"time": k * 43200, "open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"], "n": 1}
+                else:
+                    cur["high"] = max(cur["high"], c["high"]); cur["low"] = min(cur["low"], c["low"]); cur["close"] = c["close"]; cur["n"] += 1
+            if cur and (cur["n"] == 3 or cur["time"] + 43200 > time.time()):
+                cur["forming"] = cur["n"] < 3
+                bars.append(cur)
+        else:
+            bars = get_candles_range(symbol, ch, start, end) or []
+        return jsonify({"bars": [{k: b[k] for k in ("time", "open", "high", "low", "close")} | ({"forming": True} if b.get("forming") else {}) for b in bars]})
+    except Exception as e:
+        return jsonify({"error": f"свечи не загрузились: {str(e)[:150]}"})
+
+
 def model_refresh_loop():
     time.sleep(600)
     while True:
@@ -31539,7 +31616,7 @@ def prx_stats():
             "open": [t for t in trades if t["status"] == "OPEN"][-30:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
-            "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "hour", "r", "result", "real")} for t in sorted(fin, key=lambda t: -t["hour"])[:30]]}
+            "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "hour", "r", "result", "real", "entry", "px", "sl", "tp", "exit", "t_out")} for t in sorted(fin, key=lambda t: -t["hour"])[:30]]}
 
 
 @app.route("/api/prx/status")
@@ -31892,7 +31969,7 @@ def rbx_stats():
             "err": err, "scan": scan, "watch": watch, "open": [t for t in trades if t["status"] == "OPEN"][-24:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 2) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None,
-            "last": [{k: t.get(k) for k in ("symbol", "side", "chart", "day", "r", "result", "real")} for t in sorted(fin, key=lambda t: -t["day"])[:30]]}
+            "last": [{k: t.get(k) for k in ("symbol", "side", "chart", "day", "r", "result", "real", "entry", "px", "sl", "exit", "t_out")} for t in sorted(fin, key=lambda t: -t["day"])[:30]]}
 
 
 @app.route("/api/rbx/status")
@@ -38974,6 +39051,112 @@ async function refreshHdg() {   // v0.99.628 — 🪞 hedge mirror
   document.getElementById('hdgTg').onchange = e => post({tg: e.target.checked});
 }
 
+// v0.99.637 — the backtest trades (📈 breakout, P/R) as a collapsed list, and a chart of any trade (backtest or live)
+window._btData = window._btData || {};
+window._btSt = window._btSt || {};
+window._btLive = window._btLive || {};
+const BT_CH = {'1d': 'день', '12h': '12ч', '1h': '1ч', '4h': '4ч'};
+const BT_KIND = {stop: 'стоп', take: 'тейк', trend: 'конец тренда', time: 'по времени', LOSS: 'стоп', WIN: 'тейк', TREND_END: 'конец тренда',
+  TIME_EXIT: 'по времени', BREAKEVEN: 'безубыток', TIME: 'по времени'};
+function btSection(mod, title) {
+  const body = window._btData[mod] ? btListHtml(mod) : '<div class="dim">загружаю…</div>';
+  return `<details class="zcard" ontoggle="btLoad(this, '${mod}')"><summary class="zh" style="margin:0;cursor:pointer;">📜 ${title}</summary><div id="btBox_${mod}" style="margin-top:6px;">${body}</div></details>`;
+}
+async function btLoad(det, mod) {
+  if (!det.open || window._btData[mod]) return;
+  try {
+    const d = await (await fetch('/api/bt/trades?mod=' + mod)).json();
+    window._btData[mod] = d.trades || [];
+  } catch (e) {
+    const b = document.getElementById('btBox_' + mod); if (b) b.innerHTML = '<div class="dim">нет связи</div>';
+    return;
+  }
+  btRender(mod);
+}
+function btRender(mod) { const b = document.getElementById('btBox_' + mod); if (b) b.innerHTML = btListHtml(mod); }
+function btSet(mod, k, v) { const st = window._btSt[mod] || (window._btSt[mod] = {f: 'all', n: 40}); st[k] = v; if (k === 'f') st.n = 40; btRender(mod); }
+function btListHtml(mod) {
+  const all = window._btData[mod] || [];
+  if (!all.length) return '<div class="dim">сделок нет</div>';
+  const st = window._btSt[mod] || (window._btSt[mod] = {f: 'all', n: 40});
+  const charts = [...new Set(all.map(t => t.c))];
+  const idx = all.map((t, i) => i).filter(i => st.f === 'all' || all[i].c === st.f);
+  const rs = idx.map(i => all[i].r), avg = rs.reduce((a, b) => a + b, 0) / (rs.length || 1), wr = rs.filter(r => r > 0).length / (rs.length || 1) * 100;
+  const chip = (k, lbl, n) => `<span onclick="btSet('${mod}', 'f', '${k}')" style="display:inline-block;padding:3px 9px;margin:0 6px 6px 0;border-radius:999px;cursor:pointer;border:1px solid var(--line);${st.f === k ? 'background:var(--card);color:var(--tx);' : 'color:var(--tx-3);'}">${lbl} · ${n}</span>`;
+  let h = `<div>${chip('all', 'все', all.length)}${charts.length > 1 ? charts.map(c => chip(c, BT_CH[c] || c, all.filter(t => t.c === c).length)).join('') : ''}</div>
+    <div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">${idx.length} сделок · в среднем ${avg > 0 ? '+' : ''}${avg.toFixed(2)}R · WR ${wr.toFixed(0)}% · тап по сделке — график</div>`;
+  h += idx.slice(0, st.n).map(i => btRowHtml(all[i], `btOpen('${mod}', ${i})`)).join('');
+  if (idx.length > st.n) h += `<div style="text-align:center;margin-top:6px;"><button class="btnNeutral" onclick="btSet('${mod}', 'n', ${st.n + 60})">ещё ${Math.min(60, idx.length - st.n)}</button></div>`;
+  return h;
+}
+function btRowHtml(t, onclick) {
+  const d = new Date(t.t * 1000).toLocaleDateString('ru-RU', {day: '2-digit', month: '2-digit', year: '2-digit'});
+  const r = t.r == null ? '<span class="dim">открыта</span>' : `<span class="${t.r > 0 ? 'win' : (t.r < 0 ? 'loss' : '')}">${t.r > 0 ? '+' : ''}${(+t.r).toFixed(2)}R</span>`;
+  return `<div onclick="${onclick}" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
+    <span><span class="dim">${d}</span> <b>${(t.s || '').replace('_USDT', '')}</b> <span class="${t.d > 0 ? 'win' : 'loss'}">${t.d > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${BT_CH[t.c] || t.c}${t.k ? ' · ' + (BT_KIND[t.k] || t.k) : ''}</span></span>
+    <span style="white-space:nowrap;">${r} ›</span></div>`;
+}
+function btOpen(mod, i) { const t = (window._btData[mod] || [])[i]; if (t) btChart(Object.assign({mod}, t)); }
+function btLiveOpen(mod, i) { const t = (window._btLive[mod] || [])[i]; if (t) btChart(t); }
+function btFromRbx(t) {   // a live 📈 trade -> the chart's trade
+  return {mod: 'rbx', s: t.symbol, d: t.side, c: t.chart || '1d', t: t.day, e: t.entry != null ? t.entry : t.px, sl: t.sl, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+}
+function btFromPrx(t) {
+  return {mod: 'prv', s: t.symbol, d: t.side, c: (t.tf || 1) + 'h', t: t.hour, e: t.entry != null ? t.entry : t.px, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+}
+async function btChart(o) {
+  const coin = (o.s || '').replace('_USDT', ''), side = o.d > 0 ? 'ЛОНГ' : 'ШОРТ';
+  document.getElementById('vgiModalTitle').textContent = `${coin} | ${o.mod === 'rbx' ? '📈 Пробой' : 'P/R'} ${BT_CH[o.c] || o.c} | ${side}${o.live ? '' : ' · бэктест'}`;
+  document.getElementById('vgiModalParams').textContent = 'загрузка...';
+  vgiModal.classList.add('open');
+  window._vgiLast = null;
+  window._emwRedraw = null;
+  let d;
+  try { d = await (await fetch(`/api/btchart/${o.s}?c=${o.c}&t=${o.t}&x=${o.x || 0}`)).json(); } catch (e) { document.getElementById('vgiModalParams').textContent = 'нет связи'; return; }
+  if (d.error) { document.getElementById('vgiModalParams').textContent = d.error; return; }
+  const res = o.r == null ? ' · открыта' : ` · ${BT_KIND[o.k] || o.k || ''} ${o.r > 0 ? '+' : ''}${(+o.r).toFixed(2)}R${o.xp != null ? ' @ ' + fmtNum(o.xp) : ''}`;
+  document.getElementById('vgiModalParams').innerHTML = `${fmtDateTime(o.t)} · вход ${fmtNum(o.e)} · SL ${fmtNum(o.sl)}${o.tp != null ? ' · TP ' + fmtNum(o.tp) : ''}${res}` +
+    (o.live ? '' : `<br><span style="font-size:var(--fs-xs);">свечи Gate; сделка посчитана на свечах Binance — цены могут чуть отличаться</span>`);
+  const draw = () => btDraw(d.bars || [], o);
+  window._emwRedraw = draw;
+  draw();
+}
+function btDraw(bars, o) {
+  const canvas = document.getElementById('vgiChartCanvas'), wrap = document.getElementById('vgiChartWrap');
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.max(200, wrap.clientWidth - 16), H = Math.max(260, wrap.clientHeight - 16);
+  canvas.width = W * dpr; canvas.height = H * dpr; canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  const sec = ({'1h': 1, '4h': 4, '12h': 12, '1d': 24}[o.c] || 24) * 3600;
+  const ei = bars.findIndex(b => b.time >= o.t);
+  const xi = o.x ? bars.findIndex(b => b.time >= o.x - sec) : -1;
+  const isL = o.d > 0;
+  const hl = [{p: o.e, color: '#ffffff', label: 'вход', width: 2, from: ei}, {p: o.sl, color: '#f87171', label: 'стоп', width: 2, from: ei}];
+  if (o.tp != null) hl.push({p: o.tp, color: '#34d399', label: 'тейк', width: 2, from: ei});
+  const zones = [], dots = [], series = [], legend = [{text: (BT_CH[o.c] || o.c) + ' свечи', color: '#a6b0c0'}, {text: isL ? 'лонг' : 'шорт', color: isL ? '#34d399' : '#f87171'}];
+  if (ei >= 0) {
+    zones.push({from: ei, to: xi >= 0 ? xi : bars.length - 1, p1: o.e, p2: o.sl, color: '#f87171'});
+    if (o.tp != null) zones.push({from: ei, to: xi >= 0 ? xi : bars.length - 1, p1: o.e, p2: o.tp, color: '#34d399'});
+    dots.push({t: bars[ei].time, p: o.e, color: '#ffffff', r: 5});
+  }
+  if (xi >= 0 && o.xp != null) dots.push({t: bars[xi].time, p: o.xp, color: o.r > 0 ? '#34d399' : (o.r < 0 ? '#f87171' : '#a6b0c0'), r: 6});
+  if (o.mod === 'rbx' && ei > 0) {
+    const N = o.n || (o.c === '12h' ? 30 : 20), si = ei - 1;   // the breakout bar, the range = the N bars before it
+    if (si - N >= 0) {
+      const rb = bars.slice(si - N, si);
+      zones.push({from: si - N, to: si - 1, p1: Math.min(...rb.map(b => b.low)), p2: Math.max(...rb.map(b => b.high)), color: '#ffb74d', alpha: 0.16});
+      legend.push({text: `коридор ${N} свечей`, color: '#ffb74d'});
+    }
+    const end = xi >= 0 ? xi : bars.length - 1;
+    series.push({vals: bars.map((b, i) => i < ei || i > end || i < 20 ? null :
+      (isL ? Math.min(...bars.slice(i - 20, i).map(x => x.low)) : Math.max(...bars.slice(i - 20, i).map(x => x.high)))), color: '#7fd1ff', width: 1.4});
+    legend.push({text: `выход: ${isL ? 'минимум' : 'максимум'} 20 свечей`, color: '#7fd1ff'});
+  }
+  emwPanel(ctx, {x: 4, y: 4, w: W - 4, h: H - 26}, bars, {dayFmt: sec < 86400, hlines: hl, zones, dots, series, legend, hi: ei});
+}
+
 async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h, the trend exit or half at +2R
   const panel = document.getElementById('rbxPanel');
   let d;
@@ -39006,13 +39189,15 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
   h += card('👀 В сжатии сейчас', (w.length ? `<div>${w.map(chip).join('')}</div><div class="dim" style="font-size:var(--fs-xs);">монеты в узком коридоре по своему тренду; закроется свеча за границей — будет сигнал${d.auto ? ' и сделка' : ''}</div>` : '<div class="dim" style="font-size:var(--fs-sm);">сейчас подходящих сжатий нет</div>')
     + `<div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">${['1d', '12h'].map(c => sc[c] ? `${c === '1d' ? 'день' : '12ч'}: проверка ${dd(sc[c].t)}, ${sc[c].coins} монет, пробоев ${sc[c].signals}, открыто ${sc[c].opened}` : '').filter(Boolean).join(' · ')}${sc.t ? ' · ' : ''}следующая — в 03:00 и 15:00 МСК</div>`);
   const op = d.open || [];
-  const row = t => `<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);">
+  const row = (t, i) => `<div onclick="btLiveOpen('rbx', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
       <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${t.chart === '12h' ? '12ч' : 'день'}${t.half ? (t.half_done ? ' · ½ взята' : ' · ½ на +2R') : ''}${t.real ? ' · 💰' : ''}</span></span>
       <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry != null ? t.entry : t.px)} · стоп ${fmtNum(t.sl)}</span></div>`;
   const cap = Object.values(ch).reduce((a, c) => a + 2 * (c.cap || 6), 0);
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, `из ${cap} мест`)}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : '')}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
-    ${op.length ? `<div style="margin-top:8px;">${op.slice().reverse().map(row).join('')}</div>` : ''}
-    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${zBars(d.last.map(t => ({label: `${coin(t.symbol)} ${t.side > 0 ? '↑' : '↓'}`, sub: `${t.chart === '12h' ? '12ч' : 'день'} · ${dd(t.day)}`, v: t.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}`);
+    ${op.length ? `<div style="margin-top:8px;">${op.slice().reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromRbx(t), `btLiveOpen('rbx', ${op.length + i})`)).join('')}</details>` : ''}`);
+  window._btLive.rbx = op.slice().reverse().map(btFromRbx).concat((d.last || []).map(btFromRbx));
+  h += btSection('rbx', 'Сделки бэктеста — день и 12ч, 2021–2026');
   const M = d.months || {};
   if ((M.months || []).length) {
     const mn = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
@@ -39062,12 +39247,14 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
     : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
   // 3. the trades
   const op = d.open || [];
-  const row = t => `<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);">
+  const row = (t, i) => `<div onclick="btLiveOpen('prv', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
       <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim"> · ${t.tf}ч${t.real ? ' · 💰' : ''}</span></span>
       <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry != null ? t.entry : t.px)} · до ${hm(t.until)}</span></div>`;
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
-    ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map(row).join('')}</div>` : ''}
-    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${zBars(d.last.map(t => ({label: `${coin(t.symbol)} ${t.side > 0 ? '↑' : '↓'}`, sub: `${t.tf}ч · ${hm(t.hour)}`, v: t.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}`);
+    ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromPrx(t), `btLiveOpen('prv', ${Math.min(10, op.length) + i})`)).join('')}</details>` : ''}`);
+  window._btLive.prv = op.slice(-10).reverse().map(btFromPrx).concat((d.last || []).map(btFromPrx));
+  h += btSection('prv', 'Сделки бэктеста — 2023–2026 (окно 24 мес, раз в квартал)');
   h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Индикатор — канал Кельтнера: средняя EMA20 и полосы ±ATR. Событие — свеча с тенью дальше 1.5 ATR от средней или закрытие, вернувшееся внутрь после закрытия за полосой. Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на 2.4 млн таких событий 127 монет Binance за 6 лет: для каждого — чем кончилась бы сделка со стопом ${rule.stop_atr || 1.5} ATR и тейком ${rule.take_r || 3}R за ${rule.hold_bars || 48} свечей. Порог выбран честно: модель учили на прошлых годах и проверяли на следующем; 2025–26 — финальная проверка. В начале каждого часа бот считает то же самое тем же кодом по только что закрытой свече 1ч (и 4ч, когда она закрылась) и открывает сделку, если оценка выше порога (по монете и стороне — одна сделка). Учёт — по свечам своего графика, как в исследовании: вход по открытию следующей свечи, стоп раньше тейка; комиссии и фандинг учтены. Прежний подбор параметров под каждую монету убран: на истории он был в минусе каждый год.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
