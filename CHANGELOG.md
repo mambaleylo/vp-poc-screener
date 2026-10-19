@@ -20004,3 +20004,5 @@ v0.99.639 - P/R: stop 3.0 ATR, take where it was (4.5 ATR = 1.5R) — the user's
          less profit). Model ver 3 with "label_rule" (what it learns: 1.5 ATR / 3R); the backtest trade list is
          recomputed with the new exits. Checked and not used: breakeven, half off at +1.5R, closer takes, a model
          retrained for 1.0 / 2.0 / 2.5 / 3.0 ATR, a re-entry after the stop. Details: tools/adaptation/README.md.
+v0.99.640 - The backtest trade lists (📈 breakout, P/R) are fetched again right after a bot update, not up to a day
+         later — the user still saw the P/R list with the old 1.5 ATR stop after v0.99.639.

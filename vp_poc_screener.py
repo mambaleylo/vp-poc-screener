@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.639"
+APP_VERSION = "0.99.640"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31378,7 +31378,8 @@ def bt_trades():
         return _bt_cache["d"]
     d = None
     try:
-        fresh = os.path.exists(BT_TRADES_FILE) and time.time() - os.path.getmtime(BT_TRADES_FILE) < 86400
+        fresh = (os.path.exists(BT_TRADES_FILE) and time.time() - os.path.getmtime(BT_TRADES_FILE) < 86400
+                 and os.path.getmtime(BT_TRADES_FILE) >= os.path.getmtime(os.path.abspath(__file__)))   # v0.99.640: a bot update refetches it
         if not fresh:
             r = requests.get(BT_TRADES_URL, params={"nocache": int(time.time())}, timeout=60)
             r.raise_for_status()
