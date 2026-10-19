@@ -50,3 +50,9 @@ schedule for every indicator and catch a regime change as early as possible. Run
    (`b_r1` > -1% in the trade's direction; model ver 5). Not kept: BTC 4 h (the two sets disagree), one / two entries
    per side an hour (disagree), at most 4–6 open per side, the day trend (EMA200), ADX < 30, the coin's own 24 h move,
    the market breadth (the share of coins with the same event) — fewer trades, less growth at the same drawdown.
+8. P/R by chart (v0.99.643; the user: "почему на стопах в основном 4ч"). `pr_tf.py` / `pr_tf2.py`: with both BTC filters
+   and the stop by close the bot's 4h trades were -0.16R, WR 37%, 50% stops, negative in 2023 / 2024 / 2025, and the
+   model's ranking on 4h is inverted (the higher the score above the threshold, the worse: -0.15 / -0.02 / -0.36R, also
+   -0.45R by the old 1.5 ATR / 3R rule), while on 1h R rises with the score (+0.41 / +0.48 / +0.60R). 1h only: 272
+   trades, +0.35R, WR 77%, the longest stop run 4. On the top 5% 4h is as good as 1h — the problem is the extreme 4h
+   scores only, i.e. exactly the bot's picks -> the 1h chart only (model ver 6, "tfs": [1]). t_prx_cs.py 16/16.

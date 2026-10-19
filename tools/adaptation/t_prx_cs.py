@@ -73,7 +73,9 @@ EV = {"L1_USDT": [(1, 1, feats(-5.0), 1.0, 10.0)], "L2_USDT": [(1, 1, feats(-3.0
 V.prx_model = lambda: {"models": {"1": [None], "-1": [None]}, "thr": {"1": 0.5, "-1": 0.5}, "side_cap": 12, **M}
 V.zm_tree_pred = lambda t_, x: 1.0
 V._own_top_syms = lambda n: list(EV)
-V.prx_coin_events = lambda sym, now, ref, th: EV[sym]
+seen_tfs = set()
+_orig_events = V.prx_coin_events
+V.prx_coin_events = lambda sym, now, ref, th, tfs=(1, 4): seen_tfs.add(tuple(tfs)) or EV[sym]
 V._zm_closed = lambda *a, **k: []
 V.get_tickers = lambda: []
 opened = []
@@ -81,4 +83,13 @@ V.prx_open = lambda m, c, th, px=None: opened.append(c["symbol"])
 V.prx_scan_once()
 check("BTC filter: 24 h -5% / +4.5% and 1 h -1.2% / +1.5% against skipped", sorted(opened) == ["L2_USDT", "L4_USDT", "S2_USDT"])
 check("BTC filter: the skips counted in the scan", V._PRX["scan"]["btc_skip"] == 4 and V._PRX["scan"]["signals"] == 3)
+check("v0.99.643: the scan asks for the 1h chart only", seen_tfs == {(1,)})
+# prx_coin_events with tfs=(1,) never looks at a closed 4h bar
+calls = []
+V._zm_closed = lambda sym, tf, sec, n, now: [{"time": H0 - 3600 * (400 - k), "open": 1, "high": 1, "low": 1, "close": 1} for k in range(0, 400)] if tf == "1h" else \
+    [{"time": H0 - 4 * 3600 * (300 - k), "open": 1, "high": 1, "low": 1, "close": 1} for k in range(0, 300)]
+V.prx_series = lambda cs: calls.append(len(cs)) or {"atr": [1.0]}
+V.prx_event = lambda cs, S, i, hrs: None
+_orig_events("X_USDT", H0 + 60, {"btc": [], "eth": []}, H0 - 4 * 3600 * 0, tfs=(1,))
+check("prx_coin_events(tfs=(1,)): only the 1h series is built", calls == [400])
 print(f"{ok}/{ok + bad}")
