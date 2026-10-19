@@ -20006,3 +20006,10 @@ v0.99.639 - P/R: stop 3.0 ATR, take where it was (4.5 ATR = 1.5R) — the user's
          retrained for 1.0 / 2.0 / 2.5 / 3.0 ATR, a re-entry after the stop. Details: tools/adaptation/README.md.
 v0.99.640 - The backtest trade lists (📈 breakout, P/R) are fetched again right after a bot update, not up to a day
          later — the user still saw the P/R list with the old 1.5 ATR stop after v0.99.639.
+v0.99.641 - P/R against the stop clusters (the user: good stats spoiled by clusters of stops swept by one big wick).
+         1) The stop by the bar's close: the trade closes at market only when its 1h / 4h bar closes beyond 3 ATR;
+         the exchange holds a hard stop at 6 ATR, the position is sized on it and R is counted from it (75 of 110
+         stops were wicks that closed back). 2) The BTC filter: no long after BTC fell more than 4% over 24 h, no
+         short after it rose more than 4% (the worst clusters were 10–12 coins caught against a market-wide move).
+         2023–26 walk-forward: 290 trades, WR 73%, +0.30R of the hard stop a trade; at 5% risk x42 with a 1-in-10
+         drawdown of 45% (before: 2% -> x18, 56%). Model ver 4; tests tools/adaptation/t_prx_cs.py 14/14.
