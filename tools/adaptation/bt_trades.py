@@ -82,6 +82,7 @@ def prv_trades():
     SK, TK, Q, WIN, STEP, GAP = 1.5, 3.0, 0.99, 24, 3, 10 * 86400
     XSK, XTK, XHS = 3.0, 1.5, 6.0   # the traded rule (prv_export3.py ver 4): stop 3 ATR on the bar's close, hard stop 6 ATR
     BTCF = 4.0               # v0.99.641: no entry when BTC moved more than this % against the trade over 24 h
+    BTCF1 = 1.0              # v0.99.642: ... or more than this % over the last hour
     lab = W.lab_of(SK, TK)
     xlab = np.load(f"{D}/prv_lab_cs.npz")["cs"].astype(float); xlab = np.where(np.abs(xlab) > 20, np.nan, xlab)
     def month_add(t, k):
@@ -103,7 +104,7 @@ def prv_trades():
             ri, ti = np.where(ref & (W.SD == s))[0], np.where(te & (W.SD == s))[0]
             thr = float(np.quantile(sum(m.predict(W.X[ri]) for m in ms) / 3, Q))
             sc = sum(m.predict(W.X[ti]) for m in ms) / 3
-            ok = (sc >= thr) & (W.SD[ti] * W.F["b_r24"][ti] > -BTCF)
+            ok = (sc >= thr) & (W.SD[ti] * W.F["b_r24"][ti] > -BTCF) & (W.SD[ti] * W.F["b_r1"][ti] > -BTCF1)
             sel.append(ti[ok]); scs.append(sc[ok])
         print("quarter", dt.datetime.fromtimestamp(t0, dt.timezone.utc).strftime("%Y-%m"), flush=True)
         t0 = t1

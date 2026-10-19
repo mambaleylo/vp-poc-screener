@@ -44,3 +44,9 @@ schedule for every indicator and catch a regime change as early as possible. Run
    only slightly better on the top 5% (the threshold was picked on the 392, so its gain is optimistic). Together at
    5% risk of the hard stop: x46 over 2023–26 with a 1-in-10 drawdown of 42% (now: 2% -> x18, 56%). Model ver 4;
    `t_prx_cs.py` 14/14 (the stop by close, the hard stop, the market close of a real position, the BTC filter).
+7. More P/R filters (v0.99.642) on the saved walk-forward scores (`pr_sel.py` once, then `pr_hyp.py` / `pr_hyp2.py` /
+   `pr_hyp3.py <99|95>` in seconds; the replay keeps a slot until the trade's real exit). At an equal 1-in-10 drawdown
+   (45%): the 24 h BTC filter x47, the 1 h one alone x43, both x103 (the top 5%: x2.2 / x2.6 / x2.6) -> both deployed
+   (`b_r1` > -1% in the trade's direction; model ver 5). Not kept: BTC 4 h (the two sets disagree), one / two entries
+   per side an hour (disagree), at most 4–6 open per side, the day trend (EMA200), ADX < 30, the coin's own 24 h move,
+   the market breadth (the share of coins with the same event) — fewer trades, less growth at the same drawdown.

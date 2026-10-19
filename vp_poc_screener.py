@@ -31240,8 +31240,12 @@ PRX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{r
 # move — a long when BTC fell more than 4% over the last 24 h, a short when it rose more. The worst stop clusters were
 # exactly that (catching a falling market with 10–12 coins at once). The model's "btc_filter" overrides it.
 PRX_BTC_FILTER = 4.0
-PRX_MODEL_VER = 4   # v0.99.636 — 2: trained on the last 24 months only, retrained every quarter (the adaptation study)
+# v0.99.642 — and the last hour: no long after BTC fell more than 1% over the last closed hour, no short after it rose
+# more (the market still flying against the trade right now). 24 h + 1 h together: the longest stop run 10 -> 6.
+PRX_BTC_FILTER_1H = 1.0
+PRX_MODEL_VER = 5   # v0.99.636 — 2: trained on the last 24 months only, retrained every quarter (the adaptation study)
 # v0.99.641 — 4: the stop by the bar's close (3 ATR) + a hard stop 6 ATR on the exchange, R per the hard stop; the BTC filter
+# v0.99.642 — 5: the same + the 1-hour BTC filter (the research stats and the backtest list recomputed with it)
 # v0.99.639 — 3: the same model, traded with a stop of 3.0 ATR and the take where it was (4.5 ATR = 1.5R): WR 66% instead of
 # 48% and a drawdown of 15R instead of 24R for about a third less profit (the user: "3.0 лучше"); "label_rule" = what it learns
 PRX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_prx_state.json")
@@ -31530,7 +31534,9 @@ def prx_scan_once():
                 best.append((sc / thr if thr > 0 else 0.0, sym, s, hrs, round(sc, 3)))
                 if sc >= thr and atr:
                     b24 = x[len(PRX_BAND_NAMES) + NX_NAMES.index("b_r24")]     # BTC over the last 24 h, %
-                    if s * b24 <= -float(m.get("btc_filter") or PRX_BTC_FILTER):
+                    b1 = x[len(PRX_BAND_NAMES) + NX_NAMES.index("b_r1")]       # BTC over the last hour, %
+                    if (s * b24 <= -float(m.get("btc_filter") or PRX_BTC_FILTER)
+                            or s * b1 <= -float(m.get("btc_filter_1h") or PRX_BTC_FILTER_1H)):
                         btc_skip += 1
                         continue
                     cands.append({"symbol": sym, "side": s, "tf": hrs, "score": round(sc, 3), "atr": atr, "px": px})
@@ -31694,7 +31700,7 @@ def prx_stats():
     weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
     return {"on": PRV_ENABLED, "auto": AUTOTRADE_ENABLED_PRV, "tg": TELEGRAM_ALERTS_PRV,
             "risk": MODULE_RISK_PCT.get("prv") or PRX_RISK_DEFAULT,
-            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "label_rule", "research", "side_cap", "train")} | {"btc_filter": m.get("btc_filter") or PRX_BTC_FILTER} if m else None,
+            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "label_rule", "research", "side_cap", "train")} | {"btc_filter": m.get("btc_filter") or PRX_BTC_FILTER, "btc_filter_1h": m.get("btc_filter_1h") or PRX_BTC_FILTER_1H} if m else None,
             "err": err, "scan": scan, "near": last,
             "open": [t for t in trades if t["status"] == "OPEN"][-30:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
@@ -39325,7 +39331,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>до <b>${rule.hold_bars || 48}</b> свечей</span><span>просадка до <b>${dd}R</b></span></div>
       <div class="zsub">Вход — по рынку после закрытия свечи, ${rule.stop_close ? `стоп — <b>${rule.stop_atr} ATR по закрытию свечи</b> (тень за стопом сделку не закрывает; на бирже стоит аварийный стоп ${rule.hard_atr} ATR — от него считается риск и R), тейк — <b>${(rule.take_r * rule.stop_atr).toFixed(1)} ATR</b>` : `стоп — <b>${rule.stop_atr} ATR</b> её графика, тейк — <b>${rule.take_r} риска</b>`}, через ${rule.hold_bars} свечей выход (1ч — 2 дня, 4ч — 8 дней). Не больше ${m.side_cap || 12} сделок в одну сторону.
-        ${m.btc_filter ? `Против рынка не входит: лонг — если BTC за 24 ч упал больше чем на ${m.btc_filter}%, шорт — если вырос больше.` : ''}</div>
+        ${m.btc_filter ? `Против рынка не входит: лонг — если BTC упал за 24 ч больше чем на ${m.btc_filter}% или за последний час больше чем на ${m.btc_filter_1h}%, шорт — если вырос так же.` : ''}</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «P/R» в настройках риска (пусто = ${d.risk}%). Сделок бывает много одновременно — держите риск маленьким.</div>`}`;
   }
   h += card(`🔄 Peak Reversal ${pill}`, top);

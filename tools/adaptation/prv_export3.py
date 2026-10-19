@@ -12,6 +12,7 @@ import os, json, datetime as dt
 SK, TK, Q, WIN, STEP = 1.5, 3.0, 0.99, 24, 3
 XSK, XTK, XHS = 3.0, 1.5, 6.0   # the stop by close (ATR), the take (R of that stop), the hard stop (ATR)
 BTCF = 4.0              # the BTC filter, % over 24 h against the trade
+BTCF1 = 1.0             # v0.99.642: and % over the last hour (feature b_r1)
 import numpy as np, lightgbm as lgb
 from mk import ts
 from lgbpure import export
@@ -44,7 +45,7 @@ if os.environ.get("WF", "1") == "1":
             ms = fit3(tr, s)
             ri, ti = np.where(ref & (W.SD == s))[0], np.where(te & (W.SD == s))[0]
             thr = float(np.quantile(score(ms, ri), Q))
-            ok_btc = W.SD[ti] * W.F["b_r24"][ti] > -BTCF
+            ok_btc = (W.SD[ti] * W.F["b_r24"][ti] > -BTCF) & (W.SD[ti] * W.F["b_r1"][ti] > -BTCF1)
             sel.append(ti[(score(ms, ti) >= thr) & ok_btc])
         print("quarter", dt.datetime.fromtimestamp(t0, dt.timezone.utc).strftime("%Y-%m"), flush=True)
         t0 = t1
@@ -68,8 +69,8 @@ for s in (1, -1):
     w = np.where(last & (W.SD == s))[0]
     thr[str(s)] = round(float(np.quantile(score(ms, w), Q)), 6)
     print("side", s, "thr", thr[str(s)], flush=True)
-out = {"ver": 4, "kind": "prv_v3", "feats": W.NAMES, "models": models, "thr": thr, "q": Q, "basis": ["EMA", 20], "band": 1.5,
-       "rule": {"stop_atr": XSK, "take_r": XTK, "hold_bars": 48, "hard_atr": XHS, "stop_close": True}, "label_rule": {"stop_atr": SK, "take_r": TK}, "btc_filter": BTCF, "side_cap": 12, "trained_to": tmax,
+out = {"ver": 5, "kind": "prv_v3", "feats": W.NAMES, "models": models, "thr": thr, "q": Q, "basis": ["EMA", 20], "band": 1.5,
+       "rule": {"stop_atr": XSK, "take_r": XTK, "hold_bars": 48, "hard_atr": XHS, "stop_close": True}, "label_rule": {"stop_atr": SK, "take_r": TK}, "btc_filter": BTCF, "btc_filter_1h": BTCF1, "side_cap": 12, "trained_to": tmax,
        "train": {"window_months": WIN, "retrain_months": STEP, "from": int(month_add(tmax, -WIN))},
        "research": {"coins": 127, "cap": 12, "q": Q, "years": years, "scheme": "окно 24 мес, переобучение раз в 3 мес"}}
 json.dump(out, open(f"{W.D}/vp_prv_model.json", "w"), separators=(",", ":"))

@@ -1,4 +1,4 @@
-"""v0.99.641 — P/R: the stop by the bar's close + the hard stop, and the BTC filter (mocked candles / exchange)."""
+"""v0.99.641 — P/R: the stop by the bar's close + the hard stop, and the BTC filter (24 h; v0.99.642 + 1 h) (mocked candles / exchange)."""
 import sys, io, contextlib, os
 sys.argv = ["x"]
 sys.path.insert(0, os.environ.get("BOT", "/home/user/vp-poc-screener"))
@@ -14,7 +14,7 @@ V.send_telegram = lambda *a, **k: None
 V.notify_trade_result = lambda *a, **k: None
 closed = []
 V.close_position_for_mode = lambda mode, sym, d: closed.append((mode, sym, d)) or "closed"
-M = {"rule": {"stop_atr": 3.0, "take_r": 1.5, "hold_bars": 48, "hard_atr": 6.0, "stop_close": True}, "btc_filter": 4.0}
+M = {"rule": {"stop_atr": 3.0, "take_r": 1.5, "hold_bars": 48, "hard_atr": 6.0, "stop_close": True}, "btc_filter": 4.0, "btc_filter_1h": 1.0}
 H0 = 1_800_000_000 // 3600 * 3600
 def mk(open_, rows):   # rows: (high, low, close) per 1h bar from H0
     out, o = [], open_
@@ -63,10 +63,13 @@ V.AUTOTRADE_ENABLED_PRV = False
 check("the exchange stop = the hard stop, sized on it", calls == [(94.0, 104.5)])
 # the BTC filter in the scan
 ib = len(V.PRX_BAND_NAMES) + V.NX_NAMES.index("b_r24")
-def feats(b24):
-    x = [0.0] * (len(V.PRX_BAND_NAMES) + len(V.NX_NAMES)); x[ib] = b24; return x
+i1 = len(V.PRX_BAND_NAMES) + V.NX_NAMES.index("b_r1")
+def feats(b24, b1=0.0):
+    x = [0.0] * (len(V.PRX_BAND_NAMES) + len(V.NX_NAMES)); x[ib] = b24; x[i1] = b1; return x
 EV = {"L1_USDT": [(1, 1, feats(-5.0), 1.0, 10.0)], "L2_USDT": [(1, 1, feats(-3.0), 1.0, 10.0)],
-      "S1_USDT": [(1, -1, feats(+4.5), 1.0, 10.0)], "S2_USDT": [(1, -1, feats(-6.0), 1.0, 10.0)]}
+      "S1_USDT": [(1, -1, feats(+4.5), 1.0, 10.0)], "S2_USDT": [(1, -1, feats(-6.0), 1.0, 10.0)],
+      "L3_USDT": [(1, 1, feats(-1.0, -1.2), 1.0, 10.0)], "L4_USDT": [(1, 1, feats(-1.0, -0.8), 1.0, 10.0)],
+      "S3_USDT": [(1, -1, feats(0.0, +1.5), 1.0, 10.0)]}
 V.prx_model = lambda: {"models": {"1": [None], "-1": [None]}, "thr": {"1": 0.5, "-1": 0.5}, "side_cap": 12, **M}
 V.zm_tree_pred = lambda t_, x: 1.0
 V._own_top_syms = lambda n: list(EV)
@@ -76,6 +79,6 @@ V.get_tickers = lambda: []
 opened = []
 V.prx_open = lambda m, c, th, px=None: opened.append(c["symbol"])
 V.prx_scan_once()
-check("BTC filter: a long after BTC -5% and a short after BTC +4.5% skipped", sorted(opened) == ["L2_USDT", "S2_USDT"])
-check("BTC filter: the skips counted in the scan", V._PRX["scan"]["btc_skip"] == 2 and V._PRX["scan"]["signals"] == 2)
+check("BTC filter: 24 h -5% / +4.5% and 1 h -1.2% / +1.5% against skipped", sorted(opened) == ["L2_USDT", "L4_USDT", "S2_USDT"])
+check("BTC filter: the skips counted in the scan", V._PRX["scan"]["btc_skip"] == 4 and V._PRX["scan"]["signals"] == 3)
 print(f"{ok}/{ok + bad}")
