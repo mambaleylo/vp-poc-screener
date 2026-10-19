@@ -20018,3 +20018,8 @@ v0.99.642 - P/R: the BTC filter also looks at the last hour — no long after BT
          hypotheses on the walk-forward and on the top-5% check set; both BTC filters together were the best at an
          equal drawdown. 2023–26: 279 trades, WR 73%, +0.31R of the hard stop, the longest stop run 6 instead of 10;
          at 5% risk x45 with a 1-in-10 drawdown of 35%. Model ver 5; tools/adaptation/t_prx_cs.py 14/14.
+v0.99.643 - P/R trades the 1h chart only (the user noticed the stops were mostly 4h). On 4h the model's ranking
+         is inverted — the higher the score, the worse the trade (the bot's 4h trades -0.16R, WR 37%, half of them
+         stops), on 1h R rises with the score. Everything rechecked on 1h only: the BTC filters 4% / 1% and the stop
+         by close stay the best, the take / stop distances stay 4.5 / 3 / 6 ATR (the alternatives are within noise).
+         2023–26: 264 trades, WR ~76%, +0.33R of the hard stop a trade. Model ver 6; t_prx_cs.py 16/16.
