@@ -4,10 +4,14 @@ walk-forward (3 models per retrain, per quarter, 2023-01 .. 2026-09); the export
 months, the threshold from the last 12 months' scores.
 Ver 3 (v0.99.639): the model still learns the 1.5 ATR / 3R outcome, but the trades run with a stop of 3.0 ATR and the
 take at the same place (4.5 ATR = 1.5R) — fewer losses and a smaller drawdown for a bit less profit (the user's choice).
-The exit label comes from pr_lab2.py (prv_lab3.npz, "s30_t45")."""
+The exit label comes from pr_lab2.py (prv_lab3.npz, "s30_t45").
+v0.99.641 (ver 4): the stop by the CLOSE of the trade's bar at 3 ATR and a hard stop at 6 ATR on the exchange (75 of 110
+stops were wicks that closed back); R per the hard stop (the sizing risk); the label from pr_lab_cs.py. And the BTC filter — no entry against a market move: a long when BTC fell more than BTCF % over the last 24 h,
+a short when it rose more (the feature "b_r24"); a filtered signal takes no slot."""
 import os, json, datetime as dt
 SK, TK, Q, WIN, STEP = 1.5, 3.0, 0.99, 24, 3
-XSK, XTK = 3.0, 1.5     # the traded stop (ATR) and take (R of that stop)
+XSK, XTK, XHS = 3.0, 1.5, 6.0   # the stop by close (ATR), the take (R of that stop), the hard stop (ATR)
+BTCF = 4.0              # the BTC filter, % over 24 h against the trade
 import numpy as np, lightgbm as lgb
 from mk import ts
 from lgbpure import export
@@ -17,7 +21,7 @@ def month_add(t, k):
     m = d.month - 1 + k
     return int(dt.datetime(d.year + m // 12, m % 12 + 1, 1, tzinfo=dt.timezone.utc).timestamp())
 lab = W.lab_of(SK, TK)
-xlab = np.load(f"{W.D}/prv_lab3.npz")["s30_t45"].astype(float)
+xlab = np.load(f"{W.D}/prv_lab_cs.npz")["cs"].astype(float)
 xlab = np.where(np.abs(xlab) > 20, np.nan, xlab)
 GAP = 10 * 86400
 def mdl(seed):
@@ -40,7 +44,8 @@ if os.environ.get("WF", "1") == "1":
             ms = fit3(tr, s)
             ri, ti = np.where(ref & (W.SD == s))[0], np.where(te & (W.SD == s))[0]
             thr = float(np.quantile(score(ms, ri), Q))
-            sel.append(ti[score(ms, ti) >= thr])
+            ok_btc = W.SD[ti] * W.F["b_r24"][ti] > -BTCF
+            sel.append(ti[(score(ms, ti) >= thr) & ok_btc])
         print("quarter", dt.datetime.fromtimestamp(t0, dt.timezone.utc).strftime("%Y-%m"), flush=True)
         t0 = t1
     out = sorted(W.replay(np.concatenate(sel), xlab))
@@ -63,8 +68,8 @@ for s in (1, -1):
     w = np.where(last & (W.SD == s))[0]
     thr[str(s)] = round(float(np.quantile(score(ms, w), Q)), 6)
     print("side", s, "thr", thr[str(s)], flush=True)
-out = {"ver": 3, "kind": "prv_v3", "feats": W.NAMES, "models": models, "thr": thr, "q": Q, "basis": ["EMA", 20], "band": 1.5,
-       "rule": {"stop_atr": XSK, "take_r": XTK, "hold_bars": 48}, "label_rule": {"stop_atr": SK, "take_r": TK}, "side_cap": 12, "trained_to": tmax,
+out = {"ver": 4, "kind": "prv_v3", "feats": W.NAMES, "models": models, "thr": thr, "q": Q, "basis": ["EMA", 20], "band": 1.5,
+       "rule": {"stop_atr": XSK, "take_r": XTK, "hold_bars": 48, "hard_atr": XHS, "stop_close": True}, "label_rule": {"stop_atr": SK, "take_r": TK}, "btc_filter": BTCF, "side_cap": 12, "trained_to": tmax,
        "train": {"window_months": WIN, "retrain_months": STEP, "from": int(month_add(tmax, -WIN))},
        "research": {"coins": 127, "cap": 12, "q": Q, "years": years, "scheme": "окно 24 мес, переобучение раз в 3 мес"}}
 json.dump(out, open(f"{W.D}/vp_prv_model.json", "w"), separators=(",", ":"))

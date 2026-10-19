@@ -26149,7 +26149,7 @@ def notify_trade_result(module, symbol, direction, entry, exit_price, result, r=
         if not TELEGRAM_ALERTS_TRADE_RESULTS or (TELEGRAM_TRADE_RESULTS_REAL_ONLY and not real):
             return
         head = {"WIN": "✅ ТЕЙК", "LOSS": "❌ СТОП", "BE": "🛡 БЕЗУБЫТОК", "TIME_EXIT": "⏱ выход по времени", "TIMEOUT": "⏱ выход по времени", "AUTHOR_EXIT": "📣 закрыта по посту автора", "MANUAL": "✋ закрыта вручную",
-                "LOSS_EARLY": "✂️ ранний выход"}.get(result, str(result))
+                "LOSS_EARLY": "✂️ ранний выход", "STOP_CLOSE": "❌ СТОП (свеча закрылась за стопом)", "HARD_STOP": "❌ АВАРИЙНЫЙ СТОП"}.get(result, str(result))
         d = 1 if str(direction).upper() == "LONG" else -1
         pct = d * (exit_price - entry) / entry * 100 if entry and exit_price is not None else None
         nums = " · ".join(x for x in (f"{r:+.2f}R" if r is not None else "",
@@ -31240,7 +31240,8 @@ PRX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{r
 # move — a long when BTC fell more than 4% over the last 24 h, a short when it rose more. The worst stop clusters were
 # exactly that (catching a falling market with 10–12 coins at once). The model's "btc_filter" overrides it.
 PRX_BTC_FILTER = 4.0
-PRX_MODEL_VER = 3   # v0.99.636 — 2: trained on the last 24 months only, retrained every quarter (the adaptation study)
+PRX_MODEL_VER = 4   # v0.99.636 — 2: trained on the last 24 months only, retrained every quarter (the adaptation study)
+# v0.99.641 — 4: the stop by the bar's close (3 ATR) + a hard stop 6 ATR on the exchange, R per the hard stop; the BTC filter
 # v0.99.639 — 3: the same model, traded with a stop of 3.0 ATR and the take where it was (4.5 ATR = 1.5R): WR 66% instead of
 # 48% and a drawdown of 15R instead of 24R for about a third less profit (the user: "3.0 лучше"); "label_rule" = what it learns
 PRX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_prx_state.json")
@@ -31561,16 +31562,21 @@ def prx_open(m, c, t_hour, live_px=None):
     rule = m["rule"]
     s, sym, hrs = c["side"], c["symbol"], c["tf"]
     direction = "LONG" if s > 0 else "SHORT"
-    risk = rule["stop_atr"] * c["atr"]
+    soft = rule["stop_atr"] * c["atr"]
     px = live_px or c["px"]
-    sl, tp = px - s * risk, px + s * rule["take_r"] * risk
+    sl, tp = px - s * soft, px + s * rule["take_r"] * soft
     hold = int(rule["hold_bars"])
     tr = {"id": f"prx_{sym}_{s}_{hrs}_{t_hour}", "symbol": sym, "side": s, "tf": hrs, "direction": direction, "hour": t_hour,
-          "score": c["score"], "risk": risk, "entry": None, "sl": sl, "tp": tp, "px": px, "hold": hold, "take_r": float(rule["take_r"]),
+          "score": c["score"], "risk": soft, "entry": None, "sl": sl, "tp": tp, "px": px, "hold": hold, "take_r": float(rule["take_r"]),
           "until": t_hour + hold * hrs * 3600, "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False}
+    if rule.get("stop_close") and rule.get("hard_atr"):
+        # v0.99.641 — the stop by the CLOSE of the trade's bar (a wick through it no longer stops the trade); the exchange
+        # holds only the hard stop further away, and the position is sized on it ("risk" = the hard stop's distance)
+        hard = float(rule["hard_atr"]) * c["atr"]
+        tr.update({"risk": hard, "soft": soft, "hs": px - s * hard})
     if AUTOTRADE_ENABLED_PRV and live_px:
         try:
-            res = execute_autotrade("prv", sym, direction, live_px, sl, tp, extra={"p/r": f"v2 {hrs}ч {c['score']}"},
+            res = execute_autotrade("prv", sym, direction, live_px, tr.get("hs", sl), tp, extra={"p/r": f"v2 {hrs}ч {c['score']}"},
                                     risk_pct_override=MODULE_RISK_PCT.get("prv") or PRX_RISK_DEFAULT)
             tr["real"] = (res or {}).get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
             tr["autotrade"] = {"status": (res or {}).get("status"), "detail": str((res or {}).get("detail") or "")[:200]}
@@ -31582,8 +31588,10 @@ def prx_open(m, c, t_hour, live_px=None):
         _PRX["trades"].append(tr)
     if TELEGRAM_ALERTS_PRV:
         pct = lambda p: (p - px) / px * 100
+        stop_txt = (f"стоп {sl:.6g} ({pct(sl):+.1f}%) по закрытию {hrs}ч свечи, аварийный {tr['hs']:.6g} ({pct(tr['hs']):+.1f}%)" if tr.get("hs") is not None
+                    else f"стоп {sl:.6g} ({pct(sl):+.1f}%)")
         send_telegram(f"{'🟢' if s > 0 else '🔴'} {sym.replace('_USDT', '')} {direction} · 🔄 Peak Reversal ({hrs}ч)\n"
-                      f"вход по рынку ~{px:.6g} · стоп {sl:.6g} ({pct(sl):+.1f}%) · тейк {tp:.6g} ({pct(tp):+.1f}%) · держать до {hold * hrs} ч\n"
+                      f"вход по рынку ~{px:.6g} · {stop_txt} · тейк {tp:.6g} ({pct(tp):+.1f}%) · держать до {hold * hrs} ч\n"
                       f"оценка модели {c['score']} · " + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"), category="prv")
 
 
@@ -31606,14 +31614,29 @@ def prx_settle(now=None):
                     changed = True
                 continue
             s, risk, hold = t["side"], t["risk"], int(t["hold"])
+            soft = t.get("soft")        # v0.99.641: the stop by close (a trade opened before keeps the plain stop)
             if t.get("entry") is None:
                 e = cs[0]["open"]
                 with _prx_lock:
-                    t.update({"entry": e, "sl": e - s * risk, "tp": e + s * t["take_r"] * risk})
+                    if soft:
+                        t.update({"entry": e, "sl": e - s * soft, "hs": e - s * risk, "tp": e + s * t["take_r"] * soft})
+                    else:
+                        t.update({"entry": e, "sl": e - s * risk, "tp": e + s * t["take_r"] * risk})
                 changed = True
             e, sl, tp = t["entry"], t["sl"], t["tp"]
             res = None
             for k, c in enumerate(cs[:hold]):
+                if soft:     # the hard stop inside the bar, then the take, then the bar's close beyond the stop
+                    if (c["low"] <= t["hs"]) if s > 0 else (c["high"] >= t["hs"]):
+                        res = ("HARD_STOP", t["hs"], k)
+                        break
+                    if (c["high"] >= tp) if s > 0 else (c["low"] <= tp):
+                        res = ("WIN", tp, k)
+                        break
+                    if (c["close"] <= sl) if s > 0 else (c["close"] >= sl):
+                        res = ("STOP_CLOSE", c["close"], k)
+                        break
+                    continue
                 if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
                     res = ("LOSS", sl, k)
                     break
@@ -31626,8 +31649,8 @@ def prx_settle(now=None):
                 continue
             kind, ex, k = res
             r = (s * (ex - e) - e * PRX_FEE - e * PRX_FUND * (k + 1) * hrs / 24) / risk
-            if kind == "TIME_EXIT" and t.get("real") and AUTOTRADE_ENABLED_PRV:
-                log_error(f"p/r time exit {t['symbol']}: {close_position_for_mode('prv', t['symbol'], t['direction'])}")
+            if kind in ("TIME_EXIT", "STOP_CLOSE") and t.get("real") and AUTOTRADE_ENABLED_PRV:
+                log_error(f"p/r {kind.lower()} {t['symbol']}: {close_position_for_mode('prv', t['symbol'], t['direction'])}")
             with _prx_lock:
                 t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + sec), "r": round(r, 3)})
             changed = True
@@ -31676,7 +31699,7 @@ def prx_stats():
             "open": [t for t in trades if t["status"] == "OPEN"][-30:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
-            "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "hour", "r", "result", "real", "entry", "px", "sl", "tp", "exit", "t_out")} for t in sorted(fin, key=lambda t: -t["hour"])[:30]]}
+            "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "hour", "r", "result", "real", "entry", "px", "sl", "tp", "hs", "exit", "t_out")} for t in sorted(fin, key=lambda t: -t["hour"])[:30]]}
 
 
 @app.route("/api/prx/status")
@@ -39123,7 +39146,7 @@ window._btData = window._btData || {};
 window._btSt = window._btSt || {};
 window._btLive = window._btLive || {};
 const BT_CH = {'1d': 'день', '12h': '12ч', '1h': '1ч', '4h': '4ч'};
-const BT_KIND = {stop: 'стоп', take: 'тейк', trend: 'конец тренда', time: 'по времени', LOSS: 'стоп', WIN: 'тейк', TREND_END: 'конец тренда',
+const BT_KIND = {stop: 'стоп', hard: 'аварийный стоп', STOP_CLOSE: 'стоп по закрытию', HARD_STOP: 'аварийный стоп', take: 'тейк', trend: 'конец тренда', time: 'по времени', LOSS: 'стоп', WIN: 'тейк', TREND_END: 'конец тренда',
   TIME_EXIT: 'по времени', BREAKEVEN: 'безубыток', TIME: 'по времени'};
 function btSection(mod, title) {
   const body = window._btData[mod] ? btListHtml(mod) : '<div class="dim">загружаю…</div>';
@@ -39169,7 +39192,7 @@ function btFromRbx(t) {   // a live 📈 trade -> the chart's trade
   return {mod: 'rbx', s: t.symbol, d: t.side, c: t.chart || '1d', t: t.day, e: t.entry != null ? t.entry : t.px, sl: t.sl, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
 }
 function btFromPrx(t) {
-  return {mod: 'prv', s: t.symbol, d: t.side, c: (t.tf || 1) + 'h', t: t.hour, e: t.entry != null ? t.entry : t.px, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+  return {mod: 'prv', s: t.symbol, d: t.side, c: (t.tf || 1) + 'h', t: t.hour, e: t.entry != null ? t.entry : t.px, sl: t.sl, tp: t.tp, hs: t.hs, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
 }
 async function btChart(o) {
   const coin = (o.s || '').replace('_USDT', ''), side = o.d > 0 ? 'ЛОНГ' : 'ШОРТ';
@@ -39200,7 +39223,8 @@ function btDraw(bars, o) {
   const ei = bars.findIndex(b => b.time >= o.t);
   const xi = o.x ? bars.findIndex(b => b.time >= o.x - sec) : -1;
   const isL = o.d > 0;
-  const hl = [{p: o.e, color: '#ffffff', label: 'вход', width: 2, from: ei}, {p: o.sl, color: '#f87171', label: 'стоп', width: 2, from: ei}];
+  const hl = [{p: o.e, color: '#ffffff', label: 'вход', width: 2, from: ei}, {p: o.sl, color: '#f87171', label: o.hs != null ? 'стоп (закр.)' : 'стоп', width: 2, from: ei}];
+  if (o.hs != null) hl.push({p: o.hs, color: '#b91c1c', label: 'авар. стоп', width: 1, from: ei});
   if (o.tp != null) hl.push({p: o.tp, color: '#34d399', label: 'тейк', width: 2, from: ei});
   const zones = [], dots = [], series = [], legend = [{text: (BT_CH[o.c] || o.c) + ' свечи', color: '#a6b0c0'}, {text: isL ? 'лонг' : 'шорт', color: isL ? '#34d399' : '#f87171'}];
   if (ei >= 0) {
@@ -39300,7 +39324,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
     top += tr_ + `<div class="zsub">Проверка на истории 127 монет — каждый год модель не видела${rs.scheme ? ' (' + rs.scheme + ')' : ''}. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>до <b>${rule.hold_bars || 48}</b> свечей</span><span>просадка до <b>${dd}R</b></span></div>
-      <div class="zsub">Вход — по рынку после закрытия свечи, стоп — <b>${rule.stop_atr} ATR</b> её графика, тейк — <b>${rule.take_r} риска</b>, через ${rule.hold_bars} свечей выход (1ч — 2 дня, 4ч — 8 дней). Не больше ${m.side_cap || 12} сделок в одну сторону.
+      <div class="zsub">Вход — по рынку после закрытия свечи, ${rule.stop_close ? `стоп — <b>${rule.stop_atr} ATR по закрытию свечи</b> (тень за стопом сделку не закрывает; на бирже стоит аварийный стоп ${rule.hard_atr} ATR — от него считается риск и R), тейк — <b>${(rule.take_r * rule.stop_atr).toFixed(1)} ATR</b>` : `стоп — <b>${rule.stop_atr} ATR</b> её графика, тейк — <b>${rule.take_r} риска</b>`}, через ${rule.hold_bars} свечей выход (1ч — 2 дня, 4ч — 8 дней). Не больше ${m.side_cap || 12} сделок в одну сторону.
         ${m.btc_filter ? `Против рынка не входит: лонг — если BTC за 24 ч упал больше чем на ${m.btc_filter}%, шорт — если вырос больше.` : ''}</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «P/R» в настройках риска (пусто = ${d.risk}%). Сделок бывает много одновременно — держите риск маленьким.</div>`}`;
   }
@@ -39323,7 +39347,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
     ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromPrx(t), `btLiveOpen('prv', ${Math.min(10, op.length) + i})`)).join('')}</details>` : ''}`);
   window._btLive.prv = op.slice(-10).reverse().map(btFromPrx).concat((d.last || []).map(btFromPrx));
   h += btSection('prv', 'Сделки бэктеста — 2023–2026 (окно 24 мес, раз в квартал)');
-  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Индикатор — канал Кельтнера: средняя EMA20 и полосы ±ATR. Событие — свеча с тенью дальше 1.5 ATR от средней или закрытие, вернувшееся внутрь после закрытия за полосой. Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на 2.4 млн таких событий 127 монет Binance за 6 лет: для каждого — чем кончилась бы сделка со стопом ${((m && m.label_rule) || rule).stop_atr || 1.5} ATR и тейком ${((m && m.label_rule) || rule).take_r || 3}R за ${rule.hold_bars || 48} свечей.${m && m.label_rule ? ` Торгуется со стопом шире — ${rule.stop_atr} ATR, тейк на том же месте (${rule.take_r}R): прибыльных сделок больше и просадка меньше, прибыль на треть ниже.` : ''} Порог выбран честно: модель учили на прошлых годах и проверяли на следующем; 2025–26 — финальная проверка. В начале каждого часа бот считает то же самое тем же кодом по только что закрытой свече 1ч (и 4ч, когда она закрылась) и открывает сделку, если оценка выше порога (по монете и стороне — одна сделка). Учёт — по свечам своего графика, как в исследовании: вход по открытию следующей свечи, стоп раньше тейка; комиссии и фандинг учтены. Прежний подбор параметров под каждую монету убран: на истории он был в минусе каждый год.</div></details>`;
+  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Индикатор — канал Кельтнера: средняя EMA20 и полосы ±ATR. Событие — свеча с тенью дальше 1.5 ATR от средней или закрытие, вернувшееся внутрь после закрытия за полосой. Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на 2.4 млн таких событий 127 монет Binance за 6 лет: для каждого — чем кончилась бы сделка со стопом ${((m && m.label_rule) || rule).stop_atr || 1.5} ATR и тейком ${((m && m.label_rule) || rule).take_r || 3}R за ${rule.hold_bars || 48} свечей.${m && m.label_rule ? ` Торгуется со стопом шире — ${rule.stop_atr} ATR${rule.stop_close ? ' по закрытию свечи (аварийный ' + rule.hard_atr + ' ATR)' : ''}, тейк на том же месте: прибыльных сделок больше и просадка меньше.` : ''} Порог выбран честно: модель учили на прошлых годах и проверяли на следующем; 2025–26 — финальная проверка. В начале каждого часа бот считает то же самое тем же кодом по только что закрытой свече 1ч (и 4ч, когда она закрылась) и открывает сделку, если оценка выше порога (по монете и стороне — одна сделка). Учёт — по свечам своего графика, как в исследовании: вход по открытию следующей свечи, стоп раньше тейка; комиссии и фандинг учтены. Прежний подбор параметров под каждую монету убран: на истории он был в минусе каждый год.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
 

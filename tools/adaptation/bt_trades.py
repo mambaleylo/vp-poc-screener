@@ -80,9 +80,10 @@ def prv_trades():
     import lightgbm as lgb
     import prv_wf as W
     SK, TK, Q, WIN, STEP, GAP = 1.5, 3.0, 0.99, 24, 3, 10 * 86400
-    XSK, XTK = 3.0, 1.5      # the traded rule (prv_export3.py ver 3); the model learns SK / TK
+    XSK, XTK, XHS = 3.0, 1.5, 6.0   # the traded rule (prv_export3.py ver 4): stop 3 ATR on the bar's close, hard stop 6 ATR
+    BTCF = 4.0               # v0.99.641: no entry when BTC moved more than this % against the trade over 24 h
     lab = W.lab_of(SK, TK)
-    xlab = np.load(f"{D}/prv_lab3.npz")["s30_t45"].astype(float); xlab = np.where(np.abs(xlab) > 20, np.nan, xlab)
+    xlab = np.load(f"{D}/prv_lab_cs.npz")["cs"].astype(float); xlab = np.where(np.abs(xlab) > 20, np.nan, xlab)
     def month_add(t, k):
         d = dt.datetime.fromtimestamp(int(t), dt.timezone.utc); m = d.month - 1 + k
         return int(dt.datetime(d.year + m // 12, m % 12 + 1, 1, tzinfo=dt.timezone.utc).timestamp())
@@ -102,7 +103,8 @@ def prv_trades():
             ri, ti = np.where(ref & (W.SD == s))[0], np.where(te & (W.SD == s))[0]
             thr = float(np.quantile(sum(m.predict(W.X[ri]) for m in ms) / 3, Q))
             sc = sum(m.predict(W.X[ti]) for m in ms) / 3
-            sel.append(ti[sc >= thr]); scs.append(sc[sc >= thr])
+            ok = (sc >= thr) & (W.SD[ti] * W.F["b_r24"][ti] > -BTCF)
+            sel.append(ti[ok]); scs.append(sc[ok])
         print("quarter", dt.datetime.fromtimestamp(t0, dt.timezone.utc).strftime("%Y-%m"), flush=True)
         t0 = t1
     sel = np.concatenate(sel); scs = np.concatenate(scs)
@@ -132,19 +134,21 @@ def prv_trades():
             cache[(sym, tf)] = (O, H, L, C, T, atr)
         O, H, L, C, T, atr = cache[(sym, tf)]
         i = int(np.searchsorted(T, t))
-        e = O[i + 1]; risk = XSK * atr[i]; stop = e - s * risk; tp = e + s * XTK * risk   # v0.99.639: traded with stop 3.0 ATR, take 4.5 ATR
+        e = O[i + 1]; stop = e - s * XSK * atr[i]; tp = e + s * XTK * XSK * atr[i]; hs = e - s * XHS * atr[i]; risk = XHS * atr[i]
         kind, kx, ex = "time", 47, C[i + 48]
         for q in range(48):
             b = i + 1 + q
-            if (L[b] <= stop) if s > 0 else (H[b] >= stop):
-                kind, kx, ex = "stop", q, stop; break
+            if (L[b] <= hs) if s > 0 else (H[b] >= hs):
+                kind, kx, ex = "hard", q, hs; break
             if (H[b] >= tp) if s > 0 else (L[b] <= tp):
                 kind, kx, ex = "take", q, tp; break
+            if (C[b] <= stop) if s > 0 else (C[b] >= stop):
+                kind, kx, ex = "stop", q, C[b]; break
         r = (s * (ex - e) - e * FEE - e * FUND * (kx + 1) * tf / 24) / risk
         if abs(r - float(xlab[j])) > 0.02:
             bad += 1
         gs, scl = gate_sym(sym)
-        res.append({"s": gs, "d": s, "c": f"{tf}h", "t": t, "e": round(e / scl, 10), "sl": round(stop / scl, 10), "tp": round(tp / scl, 10),
+        res.append({"s": gs, "d": s, "c": f"{tf}h", "t": t, "e": round(e / scl, 10), "sl": round(stop / scl, 10), "tp": round(tp / scl, 10), "hs": round(hs / scl, 10),
                     "x": int(T[i + 1 + kx]), "xp": round(float(ex) / scl, 10), "r": round(float(xlab[j]), 3), "k": kind})
     print("prv", len(res), "R mismatches", bad, flush=True)
     return res

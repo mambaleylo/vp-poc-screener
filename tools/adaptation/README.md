@@ -34,3 +34,13 @@ schedule for every indicator and catch a regime change as early as possible. Run
    back to the entry within n bars after the stop looked good on the 392 trades (+0.36R a re-entry) but is negative
    on the top 5% (3087 trades, -0.03..-0.15R) and with a 1.0 ATR stop -> not used. Deployed: the same model, stop
    3.0 ATR, take 4.5 ATR (`prv_export3.py`, model ver 3, `label_rule` = what the model learns).
+6. P/R stop clusters (v0.99.641; the user: the good stats are spoiled by clusters of stops, all swept by one big wick).
+   75 of 110 stops of the 392 trades were wicks (the stop bar closed back inside); the worst clusters (10–14 stops in a
+   row) were 10–12 trades opened at once against a market-wide move. Checked on the 392 trades and on the top 5%
+   (3087 trades, a check set): a pause after a stop until a plus, one / two / three open trades at a time — worse at an
+   equal drawdown. Kept: (a) the stop by the CLOSE of the trade's bar at 3 ATR with a hard stop 6 ATR on the exchange
+   (`pr_lab_cs.py`; R per the hard stop): the drawdown halves on both sets at about the same R; (b) the BTC filter: no
+   long after BTC -4% over 24 h, no short after +4% (feature `b_r24`) — +0.45 -> +0.65R a trade on the 392 trades but
+   only slightly better on the top 5% (the threshold was picked on the 392, so its gain is optimistic). Together at
+   5% risk of the hard stop: x46 over 2023–26 with a 1-in-10 drawdown of 42% (now: 2% -> x18, 56%). Model ver 4;
+   `t_prx_cs.py` 14/14 (the stop by close, the hard stop, the market close of a real position, the BTC filter).
