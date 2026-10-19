@@ -19999,3 +19999,8 @@ v0.99.637 - The 📈 breakout and P/R tabs: a collapsed «📜 Сделки бэ
 v0.99.638 - Trade charts (backtest and live): the entry now sits near the left edge — 6 bars before it for P/R,
          the range plus 3 bars for 📈 breakout — and the window runs 30 bars past the exit (at least 60 bars after
          the entry), so the user sees the trade itself and what the price did after the stop or take.
+v0.99.639 - P/R: stop 3.0 ATR, take where it was (4.5 ATR = 1.5R) — the user's choice after the stop / take study
+         (the same model; on 2023–26 walk-forward: WR 66% instead of 48%, drawdown 15R instead of 24R, about a third
+         less profit). Model ver 3 with "label_rule" (what it learns: 1.5 ATR / 3R); the backtest trade list is
+         recomputed with the new exits. Checked and not used: breakeven, half off at +1.5R, closer takes, a model
+         retrained for 1.0 / 2.0 / 2.5 / 3.0 ATR, a re-entry after the stop. Details: tools/adaptation/README.md.
