@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.637"
+APP_VERSION = "0.99.638"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31414,9 +31414,10 @@ def api_bt_chart(symbol):
         t = int(float(request.args.get("t") or 0)); x = int(float(request.args.get("x") or 0)) or int(time.time())
         hrs = {"1h": 1, "4h": 4, "12h": 12, "1d": 24}.get(ch, 24)
         sec = hrs * 3600
-        before = int(request.args.get("before") or 45)
+        before = int(request.args.get("before") or 6)     # the entry near the left edge: the trade itself gets the room
+        after = int(request.args.get("after") or 30)
         start = t - before * sec
-        end = min(int(time.time()), max(x, t) + 8 * sec)
+        end = min(int(time.time()), max(max(x, t) + after * sec, t + 60 * sec))
         if (end - start) // sec > 600:          # a very long trade: the window shortened from the start
             start = end - 600 * sec
         if ch == "12h":
@@ -39167,7 +39168,7 @@ async function btChart(o) {
   window._vgiLast = null;
   window._emwRedraw = null;
   let d;
-  try { d = await (await fetch(`/api/btchart/${o.s}?c=${o.c}&t=${o.t}&x=${o.x || 0}`)).json(); } catch (e) { document.getElementById('vgiModalParams').textContent = 'нет связи'; return; }
+  try { d = await (await fetch(`/api/btchart/${o.s}?c=${o.c}&t=${o.t}&x=${o.x || 0}&before=${o.mod === 'rbx' ? (o.n || (o.c === '12h' ? 30 : 20)) + 3 : 6}`)).json(); } catch (e) { document.getElementById('vgiModalParams').textContent = 'нет связи'; return; }
   if (d.error) { document.getElementById('vgiModalParams').textContent = d.error; return; }
   const res = o.r == null ? ' · открыта' : ` · ${BT_KIND[o.k] || o.k || ''} ${o.r > 0 ? '+' : ''}${(+o.r).toFixed(2)}R${o.xp != null ? ' @ ' + fmtNum(o.xp) : ''}`;
   document.getElementById('vgiModalParams').innerHTML = `${fmtDateTime(o.t)} · вход ${fmtNum(o.e)} · SL ${fmtNum(o.sl)}${o.tp != null ? ' · TP ' + fmtNum(o.tp) : ''}${res}` +

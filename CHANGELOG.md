@@ -19996,3 +19996,6 @@ v0.99.637 - The 📈 breakout and P/R tabs: a collapsed «📜 Сделки бэ
          with another version is downloaded, checked and taken with a restart — the same as /update, with a note
          in Telegram; a commit with only models / data restarts nothing. A switch in the settings («Автообновление
          с GitHub», on). Tests: tools/adaptation/t_autoupd.py 6/6.
+v0.99.638 - Trade charts (backtest and live): the entry now sits near the left edge — 6 bars before it for P/R,
+         the range plus 3 bars for 📈 breakout — and the window runs 30 bars past the exit (at least 60 bars after
+         the entry), so the user sees the trade itself and what the price did after the stop or take.
