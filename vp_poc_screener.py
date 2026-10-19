@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.635"
+APP_VERSION = "0.99.636"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31534,7 +31534,7 @@ def prx_stats():
     weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
     return {"on": PRV_ENABLED, "auto": AUTOTRADE_ENABLED_PRV, "tg": TELEGRAM_ALERTS_PRV,
             "risk": MODULE_RISK_PCT.get("prv") or PRX_RISK_DEFAULT,
-            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap")} if m else None,
+            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap", "train")} if m else None,
             "err": err, "scan": scan, "near": last,
             "open": [t for t in trades if t["status"] == "OPEN"][-30:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
@@ -39044,7 +39044,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
     const all = Object.values(ys).filter(x => x && x.n);
     const n = all.reduce((a, x) => a + x.n, 0), avg = n ? all.reduce((a, x) => a + x.avg * x.n, 0) / n : null;
     const wk = all.length ? all.reduce((a, x) => a + x.wk, 0) / all.length : null, dd = Math.max(0, ...all.map(x => x.dd || 0));
-    const tr_ = m.train ? `<div class="dim" style="font-size:var(--fs-xs);">🔄 модель учится на последних ${m.train.window_months} мес и переобучается раз в ${m.train.retrain_months} мес · обучена до ${new Date(m.trained_to * 1000).toLocaleDateString('ru-RU')}</div>` : '';
+    const tr_ = m.train ? `<div class="dim" style="font-size:var(--fs-xs);">🔄 модель учится на последних ${m.train.window_months} мес${m.train.auto ? ` и переобучается раз в ${m.train.retrain_months} мес` : ''} · обучена до ${new Date(m.trained_to * 1000).toLocaleDateString('ru-RU')}</div>` : '';
     top += tr_ + `<div class="zsub">Проверка на истории 127 монет — каждый год модель не видела${rs.scheme ? ' (' + rs.scheme + ')' : ''}. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>до <b>${rule.hold_bars || 48}</b> свечей</span><span>просадка до <b>${dd}R</b></span></div>

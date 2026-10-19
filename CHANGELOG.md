@@ -19968,3 +19968,18 @@ v0.99.635 - 🪞 Hedge mirror: «зеркало не рекомендуется�
          grows the account — it hid a working recommendation. Now the size is shown, and when it is below the
          «не меньше ×» minimum the block says the second account's size is what holds it back. The first
          account's own loss was never part of the calculation (the user asked).
+
+v0.99.636 - Adaptation: how long the models should learn and how often to retrain (the user: the market changes, keep up
+         with it and see a change early). Every model indicator was replayed on the same unseen months 2023-01 ..
+         2026-09 with the window 6 / 12 / 24 / 36 months / all history, the retrain every 1 / 3 / 12 months and
+         recency weights, the close ones repeated with other random seeds (tools/adaptation). Peak Reversal gains
+         clearly from a shorter memory: the last 24 months, retrained every quarter — +0.50R a trade over three seeds
+         vs +0.21R for the all-history yearly model, every year positive; the new model (P/R model version 2, 3
+         models per side on 2024-10 .. 2026-09) walks forward at 2023 +0.35R, 2024 +0.84R, 2025–26 +0.70R, ~2 trades
+         a week (the old one: +0.23 / +0.60 / -0.11 and -0.22 in 2026); the bot's events and trades = the research's
+         (72/72, 60/60). Neuro, EMA and the strong zones stay: the differences are within the seed noise. Windows of
+         6–12 months are worse everywhere. Pausing a module after losing virtual trades was tested too (the last
+         N trades / D days, per side, an EMA of R): it cuts the range breakout's and P/R's profit (the big winners
+         come right after loss streaks), for EMA it halves the drawdown but lowers the total — not used.
+         The bot now checks the repo once a day for a retrained model (the same version, a later "trained_to") for
+         all four models and takes it without an update; the P/R tab shows the window and the training date.
