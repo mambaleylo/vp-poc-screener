@@ -31236,7 +31236,9 @@ def api_nx_status():
 # bar is an entry at market; the virtual record follows the chart's candles exactly as the research labels.
 PRX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_prv_model.json")
 PRX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_prv_model.json"
-PRX_MODEL_VER = 2   # v0.99.636 — 2: trained on the last 24 months only, retrained every quarter (the adaptation study)
+PRX_MODEL_VER = 3   # v0.99.636 — 2: trained on the last 24 months only, retrained every quarter (the adaptation study)
+# v0.99.639 — 3: the same model, traded with a stop of 3.0 ATR and the take where it was (4.5 ATR = 1.5R): WR 66% instead of
+# 48% and a drawdown of 15R instead of 24R for about a third less profit (the user: "3.0 лучше"); "label_rule" = what it learns
 PRX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_prx_state.json")
 PRX_TOP = int(os.environ.get("VP_PRX_TOP", "120"))
 PRX_RISK_DEFAULT = 0.5
@@ -31660,7 +31662,7 @@ def prx_stats():
     weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
     return {"on": PRV_ENABLED, "auto": AUTOTRADE_ENABLED_PRV, "tg": TELEGRAM_ALERTS_PRV,
             "risk": MODULE_RISK_PCT.get("prv") or PRX_RISK_DEFAULT,
-            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap", "train")} if m else None,
+            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "label_rule", "research", "side_cap", "train")} if m else None,
             "err": err, "scan": scan, "near": last,
             "open": [t for t in trades if t["status"] == "OPEN"][-30:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
@@ -39311,7 +39313,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
     ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromPrx(t), `btLiveOpen('prv', ${Math.min(10, op.length) + i})`)).join('')}</details>` : ''}`);
   window._btLive.prv = op.slice(-10).reverse().map(btFromPrx).concat((d.last || []).map(btFromPrx));
   h += btSection('prv', 'Сделки бэктеста — 2023–2026 (окно 24 мес, раз в квартал)');
-  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Индикатор — канал Кельтнера: средняя EMA20 и полосы ±ATR. Событие — свеча с тенью дальше 1.5 ATR от средней или закрытие, вернувшееся внутрь после закрытия за полосой. Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на 2.4 млн таких событий 127 монет Binance за 6 лет: для каждого — чем кончилась бы сделка со стопом ${rule.stop_atr || 1.5} ATR и тейком ${rule.take_r || 3}R за ${rule.hold_bars || 48} свечей. Порог выбран честно: модель учили на прошлых годах и проверяли на следующем; 2025–26 — финальная проверка. В начале каждого часа бот считает то же самое тем же кодом по только что закрытой свече 1ч (и 4ч, когда она закрылась) и открывает сделку, если оценка выше порога (по монете и стороне — одна сделка). Учёт — по свечам своего графика, как в исследовании: вход по открытию следующей свечи, стоп раньше тейка; комиссии и фандинг учтены. Прежний подбор параметров под каждую монету убран: на истории он был в минусе каждый год.</div></details>`;
+  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Индикатор — канал Кельтнера: средняя EMA20 и полосы ±ATR. Событие — свеча с тенью дальше 1.5 ATR от средней или закрытие, вернувшееся внутрь после закрытия за полосой. Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на 2.4 млн таких событий 127 монет Binance за 6 лет: для каждого — чем кончилась бы сделка со стопом ${((m && m.label_rule) || rule).stop_atr || 1.5} ATR и тейком ${((m && m.label_rule) || rule).take_r || 3}R за ${rule.hold_bars || 48} свечей.${m && m.label_rule ? ` Торгуется со стопом шире — ${rule.stop_atr} ATR, тейк на том же месте (${rule.take_r}R): прибыльных сделок больше и просадка меньше, прибыль на треть ниже.` : ''} Порог выбран честно: модель учили на прошлых годах и проверяли на следующем; 2025–26 — финальная проверка. В начале каждого часа бот считает то же самое тем же кодом по только что закрытой свече 1ч (и 4ч, когда она закрылась) и открывает сделку, если оценка выше порога (по монете и стороне — одна сделка). Учёт — по свечам своего графика, как в исследовании: вход по открытию следующей свечи, стоп раньше тейка; комиссии и фандинг учтены. Прежний подбор параметров под каждую монету убран: на истории он был в минусе каждый год.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
 

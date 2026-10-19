@@ -24,3 +24,13 @@ schedule for every indicator and catch a regime change as early as possible. Run
      drawdown (73 -> 36R) but lowers the total (611 -> 527R) — no gate deployed.
 4. The bot (v0.99.636) checks the repo once a day: a model of the same version with a later `trained_to` replaces
    the local one (`t_refresh.py`: 8/8), so a retrained model reaches the phone without a bot update.
+5. P/R stop and take (v0.99.639; the user: P/R often hits the stop and then the take, or nearly reaches the take and
+   turns to the stop). `pr_lab2.py <out> s30_t45 ...` writes more exit labels aligned with `prv_ev` (`s30_t45` = stop
+   3.0 ATR, take 4.5 ATR). 392 walk-forward trades of the deployed scheme, simulated on 15m bars, R of each variant's
+   own stop (the same $ risk): now (1.5 ATR / 3R) +0.66R, Σ+257, WR 48%, drawdown 24R; the same model with a stop of
+   2.0 ATR Σ+218, WR 56%, dd 23; 3.0 ATR (take where it was = 1.5R) Σ+176, WR 66%, dd 15. A model retrained for
+   1.0 ATR: Σ+299 but dd 43; for 2.0 / 2.5 / 3.0 ATR: Σ+195 / +130 / +153 — worse than the same model with a wider
+   stop. Breakeven at +1 / +1.5 / +2R, half off at +1.5R, a closer take: all lower. A re-entry when the price comes
+   back to the entry within n bars after the stop looked good on the 392 trades (+0.36R a re-entry) but is negative
+   on the top 5% (3087 trades, -0.03..-0.15R) and with a 1.0 ATR stop -> not used. Deployed: the same model, stop
+   3.0 ATR, take 4.5 ATR (`prv_export3.py`, model ver 3, `label_rule` = what the model learns).

@@ -80,7 +80,9 @@ def prv_trades():
     import lightgbm as lgb
     import prv_wf as W
     SK, TK, Q, WIN, STEP, GAP = 1.5, 3.0, 0.99, 24, 3, 10 * 86400
+    XSK, XTK = 3.0, 1.5      # the traded rule (prv_export3.py ver 3); the model learns SK / TK
     lab = W.lab_of(SK, TK)
+    xlab = np.load(f"{D}/prv_lab3.npz")["s30_t45"].astype(float); xlab = np.where(np.abs(xlab) > 20, np.nan, xlab)
     def month_add(t, k):
         d = dt.datetime.fromtimestamp(int(t), dt.timezone.utc); m = d.month - 1 + k
         return int(dt.datetime(d.year + m // 12, m % 12 + 1, 1, tzinfo=dt.timezone.utc).timestamp())
@@ -115,7 +117,7 @@ def prv_trades():
             continue
         e_ = t + 48 * W.TF[j] * 3600
         busy[key] = e_; act.append((e_, W.SD[j]))
-        if lab[j] == lab[j]:
+        if xlab[j] == xlab[j]:
             chosen.append(j)
     files = sorted(glob.glob(f"{D}/prv_ev/*.npz"))
     syms = [os.path.basename(f)[:-4] for f in files if len(np.load(f)["t"])]
@@ -130,7 +132,7 @@ def prv_trades():
             cache[(sym, tf)] = (O, H, L, C, T, atr)
         O, H, L, C, T, atr = cache[(sym, tf)]
         i = int(np.searchsorted(T, t))
-        e = O[i + 1]; risk = SK * atr[i]; stop = e - s * risk; tp = e + s * TK * risk
+        e = O[i + 1]; risk = XSK * atr[i]; stop = e - s * risk; tp = e + s * XTK * risk   # v0.99.639: traded with stop 3.0 ATR, take 4.5 ATR
         kind, kx, ex = "time", 47, C[i + 48]
         for q in range(48):
             b = i + 1 + q
@@ -139,11 +141,11 @@ def prv_trades():
             if (H[b] >= tp) if s > 0 else (L[b] <= tp):
                 kind, kx, ex = "take", q, tp; break
         r = (s * (ex - e) - e * FEE - e * FUND * (kx + 1) * tf / 24) / risk
-        if abs(r - float(lab[j])) > 0.02:
+        if abs(r - float(xlab[j])) > 0.02:
             bad += 1
         gs, scl = gate_sym(sym)
         res.append({"s": gs, "d": s, "c": f"{tf}h", "t": t, "e": round(e / scl, 10), "sl": round(stop / scl, 10), "tp": round(tp / scl, 10),
-                    "x": int(T[i + 1 + kx]), "xp": round(float(ex) / scl, 10), "r": round(float(lab[j]), 3), "k": kind})
+                    "x": int(T[i + 1 + kx]), "xp": round(float(ex) / scl, 10), "r": round(float(xlab[j]), 3), "k": kind})
     print("prv", len(res), "R mismatches", bad, flush=True)
     return res
 

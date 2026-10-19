@@ -1,9 +1,13 @@
 """Peak Reversal v3 (the adaptation study, ad_wf.py): the same rule (stop 1.5 ATR, take 3R, 48 bars, top 1% per side),
 the model trained on the LAST 24 MONTHS only and retrained every quarter. The yearly stats = that scheme's
 walk-forward (3 models per retrain, per quarter, 2023-01 .. 2026-09); the export = 3 models per side on the last 24
-months, the threshold from the last 12 months' scores."""
+months, the threshold from the last 12 months' scores.
+Ver 3 (v0.99.639): the model still learns the 1.5 ATR / 3R outcome, but the trades run with a stop of 3.0 ATR and the
+take at the same place (4.5 ATR = 1.5R) — fewer losses and a smaller drawdown for a bit less profit (the user's choice).
+The exit label comes from pr_lab2.py (prv_lab3.npz, "s30_t45")."""
 import os, json, datetime as dt
 SK, TK, Q, WIN, STEP = 1.5, 3.0, 0.99, 24, 3
+XSK, XTK = 3.0, 1.5     # the traded stop (ATR) and take (R of that stop)
 import numpy as np, lightgbm as lgb
 from mk import ts
 from lgbpure import export
@@ -13,6 +17,8 @@ def month_add(t, k):
     m = d.month - 1 + k
     return int(dt.datetime(d.year + m // 12, m % 12 + 1, 1, tzinfo=dt.timezone.utc).timestamp())
 lab = W.lab_of(SK, TK)
+xlab = np.load(f"{W.D}/prv_lab3.npz")["s30_t45"].astype(float)
+xlab = np.where(np.abs(xlab) > 20, np.nan, xlab)
 GAP = 10 * 86400
 def mdl(seed):
     return lgb.LGBMRegressor(n_estimators=300, learning_rate=0.03, num_leaves=15, min_child_samples=1000, subsample=0.7, subsample_freq=1,
@@ -37,7 +43,7 @@ if os.environ.get("WF", "1") == "1":
             sel.append(ti[score(ms, ti) >= thr])
         print("quarter", dt.datetime.fromtimestamp(t0, dt.timezone.utc).strftime("%Y-%m"), flush=True)
         t0 = t1
-    out = sorted(W.replay(np.concatenate(sel), lab))
+    out = sorted(W.replay(np.concatenate(sel), xlab))
     years = {}
     for y in (2023, 2024, 2025):
         rs = np.array([r for e, r in out if (ts(y) <= e < ts(y + 1)) or (y == 2025 and e >= ts(2026))])
@@ -57,8 +63,8 @@ for s in (1, -1):
     w = np.where(last & (W.SD == s))[0]
     thr[str(s)] = round(float(np.quantile(score(ms, w), Q)), 6)
     print("side", s, "thr", thr[str(s)], flush=True)
-out = {"ver": 2, "kind": "prv_v3", "feats": W.NAMES, "models": models, "thr": thr, "q": Q, "basis": ["EMA", 20], "band": 1.5,
-       "rule": {"stop_atr": SK, "take_r": TK, "hold_bars": 48}, "side_cap": 12, "trained_to": tmax,
+out = {"ver": 3, "kind": "prv_v3", "feats": W.NAMES, "models": models, "thr": thr, "q": Q, "basis": ["EMA", 20], "band": 1.5,
+       "rule": {"stop_atr": XSK, "take_r": XTK, "hold_bars": 48}, "label_rule": {"stop_atr": SK, "take_r": TK}, "side_cap": 12, "trained_to": tmax,
        "train": {"window_months": WIN, "retrain_months": STEP, "from": int(month_add(tmax, -WIN))},
        "research": {"coins": 127, "cap": 12, "q": Q, "years": years, "scheme": "окно 24 мес, переобучение раз в 3 мес"}}
 json.dump(out, open(f"{W.D}/vp_prv_model.json", "w"), separators=(",", ":"))
