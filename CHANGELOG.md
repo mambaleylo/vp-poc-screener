@@ -20013,3 +20013,8 @@ v0.99.641 - P/R against the stop clusters (the user: good stats spoiled by clust
          short after it rose more than 4% (the worst clusters were 10–12 coins caught against a market-wide move).
          2023–26 walk-forward: 290 trades, WR 73%, +0.30R of the hard stop a trade; at 5% risk x42 with a 1-in-10
          drawdown of 45% (before: 2% -> x18, 56%). Model ver 4; tests tools/adaptation/t_prx_cs.py 14/14.
+v0.99.642 - P/R: the BTC filter also looks at the last hour — no long after BTC fell more than 1% over the last
+         closed hour, no short after it rose more than 1% (together with the 24 h one). Checked among ten filter
+         hypotheses on the walk-forward and on the top-5% check set; both BTC filters together were the best at an
+         equal drawdown. 2023–26: 279 trades, WR 73%, +0.31R of the hard stop, the longest stop run 6 instead of 10;
+         at 5% risk x45 with a 1-in-10 drawdown of 35%. Model ver 5; tools/adaptation/t_prx_cs.py 14/14.
