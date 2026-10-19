@@ -31188,7 +31188,7 @@ def api_nx_status():
 # bar is an entry at market; the virtual record follows the chart's candles exactly as the research labels.
 PRX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_prv_model.json")
 PRX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_prv_model.json"
-PRX_MODEL_VER = 1
+PRX_MODEL_VER = 2   # v0.99.636 — 2: trained on the last 24 months only, retrained every quarter (the adaptation study)
 PRX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_prx_state.json")
 PRX_TOP = int(os.environ.get("VP_PRX_TOP", "120"))
 PRX_RISK_DEFAULT = 0.5
@@ -31280,6 +31280,50 @@ def prx_model():
     with _prx_lock:
         _PRX.update({"model": m, "err": None})
     return m
+
+
+def model_refresh_once():
+    """v0.99.636 — a model retrained later (the same version, a later "trained_to") is taken from the repo: the file is
+    replaced and the module reloads it on its next use. Only the version decides the format, so a model the bot's
+    code cannot read is never taken."""
+    done = []
+    for name, fn, url, ver, lock, st in (("🎯 Сильные зоны", ZM_MODEL_FILE, ZM_MODEL_URL, ZM_MODEL_VER, _zm_lock, _ZM),
+                                         ("📐 EMA", EMX_MODEL_FILE, EMX_MODEL_URL, EMX_MODEL_VER, _emx_lock, _EMX),
+                                         ("🧠 Нейро", NX_MODEL_FILE, NX_MODEL_URL, NX_MODEL_VER, _nx_lock, _NX),
+                                         ("P/R", PRX_MODEL_FILE, PRX_MODEL_URL, PRX_MODEL_VER, _prx_lock, _PRX)):
+        try:
+            local = 0
+            if os.path.exists(fn):
+                with open(fn) as f:
+                    lm = json.load(f)
+                if lm.get("ver") == ver:
+                    local = int(lm.get("trained_to") or 0)
+            r = requests.get(url.format(ref="main"), params={"nocache": int(time.time())}, timeout=120)
+            r.raise_for_status()
+            m = r.json()
+            if m.get("ver") != ver or not m.get("models") or int(m.get("trained_to") or 0) <= local:
+                continue
+            tmp = fn + ".new"
+            with open(tmp, "w") as f:
+                json.dump(m, f, separators=(",", ":"))
+            os.replace(tmp, fn)
+            with lock:
+                st["model"] = None          # reloaded from the file on the next use
+            done.append(name)
+            log_error(f"model refresh: {name} — a newer model (trained to {time.strftime('%Y-%m-%d', time.gmtime(int(m['trained_to'])))}) taken")
+        except Exception as e:
+            log_error(f"model refresh {name}: {e}")
+    return done
+
+
+def model_refresh_loop():
+    time.sleep(600)
+    while True:
+        try:
+            model_refresh_once()
+        except Exception as e:
+            log_error(f"model_refresh_loop: {e}")
+        time.sleep(24 * 3600)
 
 
 def prx_load():
@@ -39000,7 +39044,8 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
     const all = Object.values(ys).filter(x => x && x.n);
     const n = all.reduce((a, x) => a + x.n, 0), avg = n ? all.reduce((a, x) => a + x.avg * x.n, 0) / n : null;
     const wk = all.length ? all.reduce((a, x) => a + x.wk, 0) / all.length : null, dd = Math.max(0, ...all.map(x => x.dd || 0));
-    top += `<div class="zsub">Проверка на истории 127 монет — каждый год модель не видела. Результат на сделку:</div>
+    const tr_ = m.train ? `<div class="dim" style="font-size:var(--fs-xs);">🔄 модель учится на последних ${m.train.window_months} мес и переобучается раз в ${m.train.retrain_months} мес · обучена до ${new Date(m.trained_to * 1000).toLocaleDateString('ru-RU')}</div>` : '';
+    top += tr_ + `<div class="zsub">Проверка на истории 127 монет — каждый год модель не видела${rs.scheme ? ' (' + rs.scheme + ')' : ''}. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>до <b>${rule.hold_bars || 48}</b> свечей</span><span>просадка до <b>${dd}R</b></span></div>
       <div class="zsub">Вход — по рынку после закрытия свечи, стоп — <b>${rule.stop_atr} ATR</b> её графика, тейк — <b>${rule.take_r} риска</b>, через ${rule.hold_bars} свечей выход (1ч — 2 дня, 4ч — 8 дней). Не больше ${m.side_cap || 12} сделок в одну сторону.</div>
@@ -41803,6 +41848,7 @@ if __name__ == "__main__":
     threading.Thread(target=prx_loop, daemon=True).start()
     threading.Thread(target=rbx_loop, daemon=True).start()   # v0.99.625 — 📈 range breakout
     threading.Thread(target=hdg_loop, daemon=True).start()   # v0.99.628 — 🪞 hedge mirror
+    threading.Thread(target=model_refresh_loop, daemon=True).start()   # v0.99.636 — retrained models from the repo, daily
     threading.Thread(target=entry_retry_loop, daemon=True).start()   # v0.99.566
     # v0.99.618 — the old W/M touch alerts and their statistics are replaced by «EMA — касания» (emx_loop)
     threading.Thread(target=emx_loop, daemon=True).start()
