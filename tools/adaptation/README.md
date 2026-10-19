@@ -56,3 +56,10 @@ schedule for every indicator and catch a regime change as early as possible. Run
    -0.45R by the old 1.5 ATR / 3R rule), while on 1h R rises with the score (+0.41 / +0.48 / +0.60R). 1h only: 272
    trades, +0.35R, WR 77%, the longest stop run 4. On the top 5% 4h is as good as 1h — the problem is the extreme 4h
    scores only, i.e. exactly the bot's picks -> the 1h chart only (model ver 6, "tfs": [1]). t_prx_cs.py 16/16.
+9. Everything again on the 1h chart only (v0.99.643; the user: "все заново проверь"). `pr_rev.py <99|95>`: the BTC grid
+   24 h {—, 3, 4, 5, 6}% x 1 h {—, 0.5, 1, 1.5, 2}% — 4% / 1% stays at the top on both sets (the plateau 3–4% / 1–1.5%:
+   +0.35..+0.36R, WR 77–78%, a stop run of 6). `pr_rev.py <99|95> exits 4 1`: the stop by close beats the stop on
+   touch and the old 1.5 ATR / 3R rule on both sets. `pr_lab_cs.py SOFT HARD TAKE name` + `pr_exit2.py`: the take
+   3 / 3.75 / 4.5 / 6 ATR / none, the soft stop 2 / 3 / 4 ATR, the hard stop 4.5 / 6 / 8 ATR — the take 3.75 and the
+   soft stop 4 are a bit better on both sets, everything else worse on one of them; the differences are within the
+   bootstrap noise (R +0.33..+0.37, WR 77–80%), so the rule stays 3 / 6 / 4.5 ATR.
