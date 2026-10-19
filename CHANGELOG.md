@@ -19983,3 +19983,16 @@ v0.99.636 - Adaptation: how long the models should learn and how often to retrai
          come right after loss streaks), for EMA it halves the drawdown but lowers the total — not used.
          The bot now checks the repo once a day for a retrained model (the same version, a later "trained_to") for
          all four models and takes it without an update; the P/R tab shows the window and the training date.
+
+v0.99.637 - The 📈 breakout and P/R tabs: a collapsed «📜 Сделки бэктеста» list (the user) — the breakout's 957 trades
+         2021–2026 (day and 12h, the bot's rule with its cap) and P/R's 392 trades 2023–2026 (the 24-month quarterly
+         walk-forward of the new model), newest first, 40 at a time, a filter by chart, the average R and the win
+         rate of the shown set. A tap opens the trade on the chart (Gate's candles): the entry, the stop, the take
+         (P/R), the exit point with its result, the profit / loss areas; for the breakout also the range before the
+         breakout and the 20-bar exit line. The live trades (open and the latest results) open the same chart.
+         The trades file (vp_bt_trades.json, tools/adaptation/bt_trades.py) re-simulates every trade from the bars
+         and matches the research's R (957/957, 392/392); the bot fetches it from the repo once a day.
+         Auto-update (the user): every 10 minutes the bot asks GitHub for the latest commit of main; a new commit
+         with another version is downloaded, checked and taken with a restart — the same as /update, with a note
+         in Telegram; a commit with only models / data restarts nothing. A switch in the settings («Автообновление
+         с GitHub», on). Tests: tools/adaptation/t_autoupd.py 6/6.

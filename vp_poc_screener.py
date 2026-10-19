@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.636"
+APP_VERSION = "0.99.637"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1156,7 +1156,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
                   "zones_zm_enabled", "autotrade_zones_zm", "telegram_alerts_zones_zm",   # v0.99.616
-                  "telegram_alerts_trade_results", "telegram_trade_results_real_only",
+                  "telegram_alerts_trade_results", "telegram_trade_results_real_only", "auto_update",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
@@ -1240,6 +1240,7 @@ def get_settings():
         "telegram_alerts_zones_zm": TELEGRAM_ALERTS_ZONES_ZM,
         "telegram_alerts_trade_results": TELEGRAM_ALERTS_TRADE_RESULTS,   # v0.99.457
         "telegram_trade_results_real_only": TELEGRAM_TRADE_RESULTS_REAL_ONLY,
+        "auto_update": AUTO_UPDATE,   # v0.99.637
         "telegram_alerts_zones": TELEGRAM_ALERTS_ZONES,
         "zones_tp_pct": ZONES_TP_PCT,
         "zones_max_days": ZONES_MAX_DAYS,
@@ -1509,6 +1510,8 @@ def apply_settings(updates):
         globals()["TELEGRAM_ALERTS_TRADE_RESULTS"] = bool(updates["telegram_alerts_trade_results"])
     if "telegram_trade_results_real_only" in updates:
         globals()["TELEGRAM_TRADE_RESULTS_REAL_ONLY"] = bool(updates["telegram_trade_results_real_only"])
+    if "auto_update" in updates:   # v0.99.637
+        globals()["AUTO_UPDATE"] = bool(updates["auto_update"])
     for _k, _g in (("rbx_enabled", "RBX_ENABLED"), ("autotrade_rbx", "AUTOTRADE_ENABLED_RBX"), ("telegram_alerts_rbx", "TELEGRAM_ALERTS_RBX"), ("rbx_half", "RBX_HALF")):   # v0.99.625
         if _k in updates:
             globals()[_g] = bool(updates[_k])
@@ -7527,6 +7530,7 @@ LOOP_MAX_GAP_SEC = {
     "prx_loop": 60 * 60,   # v0.99.624 — Peak Reversal v2
     "rbx_loop": 3 * 3600,   # v0.99.625 — once a day, beats every minute
     "hdg_loop": 10 * 60,   # v0.99.628 — 🪞 hedge mirror, beats every 5 s
+    "auto_update_loop": 30 * 60,   # v0.99.637 — beats every 10 min
     "emx_loop": 60 * 60,   # v0.99.618 — «EMA — касания» (the W/M loops no longer run); v0.99.619 — 15 -> 60 min, the hourly levels of 120 coins take longer on the phone (it beats per coin too)
     "battery_watch_loop": 30 * 60,   # v0.99.582
     "nx_loop": 60 * 60,   # v0.99.619 — Neuro v3 (the old live / mining loops no longer run)
@@ -7541,7 +7545,7 @@ LOOP_MAX_GAP_SEC = {
 LOOP_LABELS = {
     "scan_loop": "Volume скан", "msnr_live_loop": "MSNR живой скан",
     "lsw_live_loop": "Sweep живой скан", "snr_live_loop": "S/R живой скан",
-    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "hdg_loop": "🪞 Хедж", "nx_loop": "Нейро",
+    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "hdg_loop": "🪞 Хедж", "auto_update_loop": "автообновление", "nx_loop": "Нейро",
     "reconcile_loop": "сверка позиций (автоторговля)",
     "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
     "snr_backtest_loop": "S/R бэктест",
@@ -27970,6 +27974,50 @@ def start_update_retry():
     return True
 
 
+# v0.99.637 — the user: check GitHub for a new version by itself and run /update when there is one. Every
+# AUTO_UPDATE_SEC the latest commit of main is asked (a few dozen bytes, 6 an hour of the API's 60); only a new commit
+# downloads that commit's file, and only another version in it restarts the bot — a commit with only models / data
+# changes nothing.
+AUTO_UPDATE = os.environ.get("VP_AUTO_UPDATE", "1") == "1"
+AUTO_UPDATE_SEC = 600
+_auto_upd = {"sha": None, "t": None, "err": None}
+
+
+def auto_update_check():
+    """-> the new version when the bot is about to restart on it, else None"""
+    r = requests.get(SELF_UPDATE_API, headers={"Accept": "application/vnd.github.sha"}, timeout=20)
+    sha = r.text.strip() if r.status_code == 200 else ""
+    _auto_upd["t"] = int(time.time())
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise RuntimeError(f"GitHub не ответил ({r.status_code})")
+    if sha == _auto_upd["sha"]:
+        return None
+    nv = self_update_download(only_if_newer=True)
+    _auto_upd["sha"] = sha
+    if nv == APP_VERSION:
+        return None
+    tg_outbox_push(f"🔄 Автообновление: на GitHub новая версия v{APP_VERSION} → v{nv}, перезапускаю…")
+    zones_save()
+    self_restart("update", 3)
+    return nv
+
+
+def auto_update_loop():
+    time.sleep(120)
+    while True:
+        heartbeat("auto_update_loop")
+        if AUTO_UPDATE and not _update_retry["running"]:
+            try:
+                if auto_update_check():
+                    return
+                _auto_upd["err"] = None
+            except Exception as e:
+                if _auto_upd["err"] != str(e)[:120]:
+                    log_error(f"auto update: {e}")
+                _auto_upd["err"] = str(e)[:120]
+        time.sleep(AUTO_UPDATE_SEC)
+
+
 def save_everything_before_exit(wait_tg=10.0):
     """v0.99.486 — before any restart / stop: every module's state to disk (the
     modules save at their own moments; a change since the last save would be
@@ -35816,6 +35864,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">Автообновление с GitHub</div>
+          <div class="sub">каждые 10 минут бот смотрит, нет ли новой версии; если есть — сам делает /update и перезапускается (сообщение в Telegram)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutoUpdate"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Нестабильность сети</div>
           <div class="sub">разово, когда за 10 минут накопилось 5+ сетевых ошибок (Read timed out / ConnectionError) — не про открытые позиции, только про сбор данных</div>
         </div>
@@ -40522,6 +40577,7 @@ const setInputs = {
   telegram_alerts_zones: document.getElementById('setTelegramZones'),
   telegram_alerts_trade_results: document.getElementById('setTgTradeResults'),
   telegram_trade_results_real_only: document.getElementById('setTgTradeResultsReal'),
+  auto_update: document.getElementById('setAutoUpdate'),   // v0.99.637
   telegram_alerts_network: document.getElementById('setTelegramNetwork'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_neuro: document.getElementById('setAutotradeNeuro'),
@@ -42036,6 +42092,7 @@ if __name__ == "__main__":
     threading.Thread(target=rbx_loop, daemon=True).start()   # v0.99.625 — 📈 range breakout
     threading.Thread(target=hdg_loop, daemon=True).start()   # v0.99.628 — 🪞 hedge mirror
     threading.Thread(target=model_refresh_loop, daemon=True).start()   # v0.99.636 — retrained models from the repo, daily
+    threading.Thread(target=auto_update_loop, daemon=True).start()   # v0.99.637 — a new version on GitHub -> /update by itself
     threading.Thread(target=entry_retry_loop, daemon=True).start()   # v0.99.566
     # v0.99.618 — the old W/M touch alerts and their statistics are replaced by «EMA — касания» (emx_loop)
     threading.Thread(target=emx_loop, daemon=True).start()
