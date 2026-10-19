@@ -31236,6 +31236,10 @@ def api_nx_status():
 # bar is an entry at market; the virtual record follows the chart's candles exactly as the research labels.
 PRX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_prv_model.json")
 PRX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_prv_model.json"
+# v0.99.641 — the BTC filter (the user: "пачки стопов… одним большим фитилем снесены"): no entry against a market-wide
+# move — a long when BTC fell more than 4% over the last 24 h, a short when it rose more. The worst stop clusters were
+# exactly that (catching a falling market with 10–12 coins at once). The model's "btc_filter" overrides it.
+PRX_BTC_FILTER = 4.0
 PRX_MODEL_VER = 3   # v0.99.636 — 2: trained on the last 24 months only, retrained every quarter (the adaptation study)
 # v0.99.639 — 3: the same model, traded with a stop of 3.0 ATR and the take where it was (4.5 ATR = 1.5R): WR 66% instead of
 # 48% and a drawdown of 15R instead of 24R for about a third less profit (the user: "3.0 лучше"); "label_rule" = what it learns
@@ -31512,7 +31516,7 @@ def prx_scan_once():
     now = time.time()
     t_hour = int(now // 3600 * 3600)
     ref = {"btc": _zm_closed("BTC_USDT", "1h", 3600, 1000, now), "eth": _zm_closed("ETH_USDT", "1h", 3600, 1000, now)}
-    cands, coins, events, best = [], 0, 0, []
+    cands, coins, events, best, btc_skip = [], 0, 0, [], 0
     for sym in _own_top_syms(PRX_TOP):
         heartbeat("prx_loop")
         try:
@@ -31524,6 +31528,10 @@ def prx_scan_once():
                 thr = m["thr"][str(s)]
                 best.append((sc / thr if thr > 0 else 0.0, sym, s, hrs, round(sc, 3)))
                 if sc >= thr and atr:
+                    b24 = x[len(PRX_BAND_NAMES) + NX_NAMES.index("b_r24")]     # BTC over the last 24 h, %
+                    if s * b24 <= -float(m.get("btc_filter") or PRX_BTC_FILTER):
+                        btc_skip += 1
+                        continue
                     cands.append({"symbol": sym, "side": s, "tf": hrs, "score": round(sc, 3), "atr": atr, "px": px})
         except Exception as e:
             log_error(f"p/r scan {sym}: {e}")
@@ -31544,7 +31552,7 @@ def prx_scan_once():
         prx_open(m, c, t_hour, live.get(c["symbol"]))
         opened += 1
     with _prx_lock:
-        _PRX["scan"] = {"t": int(now), "hour": t_hour, "coins": coins, "events": events, "signals": len(cands), "opened": opened}
+        _PRX["scan"] = {"t": int(now), "hour": t_hour, "coins": coins, "events": events, "signals": len(cands), "opened": opened, "btc_skip": btc_skip}
         _PRX["last"] = [{"symbol": b[1], "side": b[2], "tf": b[3], "score": b[4], "pct": round(100 * b[0])} for b in best[:8]]
     prx_save()
 
@@ -31663,7 +31671,7 @@ def prx_stats():
     weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
     return {"on": PRV_ENABLED, "auto": AUTOTRADE_ENABLED_PRV, "tg": TELEGRAM_ALERTS_PRV,
             "risk": MODULE_RISK_PCT.get("prv") or PRX_RISK_DEFAULT,
-            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "label_rule", "research", "side_cap", "train")} if m else None,
+            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "label_rule", "research", "side_cap", "train")} | {"btc_filter": m.get("btc_filter") or PRX_BTC_FILTER} if m else None,
             "err": err, "scan": scan, "near": last,
             "open": [t for t in trades if t["status"] == "OPEN"][-30:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
@@ -39292,7 +39300,8 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
     top += tr_ + `<div class="zsub">Проверка на истории 127 монет — каждый год модель не видела${rs.scheme ? ' (' + rs.scheme + ')' : ''}. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>до <b>${rule.hold_bars || 48}</b> свечей</span><span>просадка до <b>${dd}R</b></span></div>
-      <div class="zsub">Вход — по рынку после закрытия свечи, стоп — <b>${rule.stop_atr} ATR</b> её графика, тейк — <b>${rule.take_r} риска</b>, через ${rule.hold_bars} свечей выход (1ч — 2 дня, 4ч — 8 дней). Не больше ${m.side_cap || 12} сделок в одну сторону.</div>
+      <div class="zsub">Вход — по рынку после закрытия свечи, стоп — <b>${rule.stop_atr} ATR</b> её графика, тейк — <b>${rule.take_r} риска</b>, через ${rule.hold_bars} свечей выход (1ч — 2 дня, 4ч — 8 дней). Не больше ${m.side_cap || 12} сделок в одну сторону.
+        ${m.btc_filter ? `Против рынка не входит: лонг — если BTC за 24 ч упал больше чем на ${m.btc_filter}%, шорт — если вырос больше.` : ''}</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «P/R» в настройках риска (пусто = ${d.risk}%). Сделок бывает много одновременно — держите риск маленьким.</div>`}`;
   }
   h += card(`🔄 Peak Reversal ${pill}`, top);
@@ -39300,7 +39309,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
   const sc = d.scan, near = d.near || [];
   const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;">
       <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.tf}ч · ${a.pct}%</span></span>`;
-  h += card('🔎 Последний час', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, `монет · выходов за полосу ${sc.events}`)}${tile('сигналов', sc.signals, '')}${tile('открыто', sc.opened, '')}</div>
+  h += card('🔎 Последний час', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, `монет · выходов за полосу ${sc.events}`)}${tile('сигналов', sc.signals, sc.btc_skip ? `ещё ${sc.btc_skip} против BTC — пропущены` : '')}${tile('открыто', sc.opened, '')}</div>
     ${near.length ? `<div class="zsub" style="margin-top:8px;">ближе всех к порогу (100% — сигнал):</div><div>${near.map(chip).join('')}</div>` : ''}
     <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · следующий пересчёт в начале часа</div>`
     : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
