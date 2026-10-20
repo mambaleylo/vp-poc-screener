@@ -20134,3 +20134,11 @@ v0.99.663 - Limit entries for 🧠 Neuro and 📈 Breakout (no fill within the w
          redone, 764 trades). Real trades: the bot watches the price and opens at market when it reaches the limit.
          Checked and not kept: the same limit for 🌊 Cascade (worse on both sets). Tests: tools/neuro_model t_nx_lim
          146/146, tools/rr_hunt t_rbx_lim 197/200 (two still open at the data's end, one flat-candle coin).
+v0.99.664 - Night round 2, part 2. 📐 EMA: the entry by a limit 0.2 daily ATR past the EMA instead of at the EMA (the
+         stop, the take and the partial counted from it; no fill within the touch hour = no trade). On the bot's set
+         +0.74R a trade vs +0.52R, WR 75% vs 68%, x5668 vs x1330 at an equal drawdown; the check set +0.42R vs +0.24R,
+         x399 vs x9.5; every year better in both, and 0.15–0.3 ATR all beat the entry at the EMA. About half as many
+         trades (~1.6 a week). Model ver 7, the backtest list redone (392 trades). Checked and not kept (not better on
+         both sets): P/R take / stops / hold / locks / early exits; Neuro stop / take / hold / break-even / cap / ADX and
+         BTC, trend, volume, funding, RSI filters; Breakout limit depth / wait, strength, partial, channel, stop, cap and
+         ten entry filters; Cascade swing length / buffer, stop width, hold, take, trailing, a pause after a loss.

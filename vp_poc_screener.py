@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.663"
+APP_VERSION = "0.99.664"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30172,7 +30172,7 @@ def zm_stats():
 # the price is watched every 30 s; the virtual record follows the 1h candles exactly as the research did.
 EMX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_ema_model.json")
 EMX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_ema_model.json"
-EMX_MODEL_VER = 6   # v0.99.661 — 6: a third off at +1R (the stop to the fill), take 4R; v0.99.645 — 5: + the BTC EMA50 filter (the research stats and the backtest list with it); v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
+EMX_MODEL_VER = 7   # v0.99.664 — 7: the entry limit 0.2 daily ATR past the EMA; v0.99.661 — 6: a third off at +1R (the stop to the fill), take 4R; v0.99.645 — 5: + the BTC EMA50 filter (the research stats and the backtest list with it); v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
 # v0.99.644 — 4: the same model, a new trading rule from the hypothesis study (tools/ema_model/ema_hyp*.py), better than
 # the old one on the bot's top 3% and on the top 10% check set at an equal drawdown: longs only (on shorts the score does
 # not rank: ~0R at every score), no entry when the price is >= 10 daily ATR above the daily EMA200 (those lost on both
@@ -30489,10 +30489,12 @@ def emx_levels(sym, h1, h4, d1, t_hour, m, bt):
             x = [float(f.get(k, 0.0)) for k in m["feats"]]
             sc = sum(zm_tree_pred(t_, x) for t_ in m["models"]) / len(m["models"])
             if emx_pass(m, tf, side, sc, f):
-                risk = lv * m["rule"]["stop_datr"] * f["datr"] / 100
-                out.append({"symbol": sym, "tf": tf, "n": n, "side": side, "lv": lv, "score": round(sc, 3), "datr": f["datr"],
-                            "sl": lv - side * risk, "tp": lv + side * m["rule"]["take_r"] * risk, "hour": t_hour, "px": px,
-                            "dist": round((lv - px) / px * 100, 2)})
+                # v0.99.664 — the entry limit deep_datr daily ATR past the EMA (the stop / take from it)
+                le = lv * (1 - side * float(m["rule"].get("deep_datr") or 0) * f["datr"] / 100)
+                risk = le * m["rule"]["stop_datr"] * f["datr"] / 100
+                out.append({"symbol": sym, "tf": tf, "n": n, "side": side, "lv": le, "ema": lv, "score": round(sc, 3), "datr": f["datr"],
+                            "sl": le - side * risk, "tp": le + side * m["rule"]["take_r"] * risk, "hour": t_hour, "px": px,
+                            "dist": round((le - px) / px * 100, 2)})
     return out
 
 
@@ -30589,7 +30591,7 @@ def emx_fire(a, t_touch, live_px=None):
     emx_save()
     if TELEGRAM_ALERTS_EMW and tr["sel"]:
         pct = lambda p: (p - a["lv"]) / a["lv"] * 100
-        send_telegram(f"{'🟢' if a['side'] > 0 else '🔴'} {a['symbol'].replace('_USDT', '')} {direction} · EMA {a['n']} ({EMX_TF_NAME[a['tf']]}) — касание\n"
+        send_telegram(f"{'🟢' if a['side'] > 0 else '🔴'} {a['symbol'].replace('_USDT', '')} {direction} · EMA {a['n']} ({EMX_TF_NAME[a['tf']]}) — " + (f"лимитка за EMA ({a['ema']:.6g})" if a.get("ema") and a["ema"] != a["lv"] else "касание") + "\n"
                       f"вход {a['lv']:.6g} · стоп {a['sl']:.6g} ({pct(a['sl']):+.1f}%) · тейк {a['tp']:.6g} ({pct(a['tp']):+.1f}%) · держать до {int(m.get('rule', {}).get('hold_h', 24))} ч\n"
                       + (f"на {a['lv'] + a['side'] * tr['part_r'] * abs(a['lv'] - a['sl']):.6g} закрыть {round(tr['part_f'] * 100)}% и стоп в безубыток\n" if tr["part_r"] else "") +
                       f"оценка модели {a['score']} · " + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"), category="emw")
@@ -40113,7 +40115,7 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
     top += `<div class="zsub">Проверка на истории — каждый год модель не видела. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>сделка до <b>${Math.round((rule.hold_h || 24))} ч</b></span><span>просадка до <b>${dd}R</b></span></div>
-      <div class="zsub">Вход — на EMA, стоп — <b>${rule.stop_datr} дневного хода</b> монеты за EMA${rule.part_r ? `, на <b>+${rule.part_r}R закрыть ${Math.round(rule.part_f * 100)}%</b> и стоп в безубыток` : ''}, тейк — <b>${rule.take_r} риска</b>. Не больше ${m.side_cap || 12} сделок в одну сторону.
+      <div class="zsub">Вход — ${rule.deep_datr ? `лимиткой на <b>${rule.deep_datr} дневного хода за EMA</b> (не дошла за час касания — сделки нет)` : 'на EMA'}, стоп — <b>${rule.stop_datr} дневного хода</b> монеты за входом${rule.part_r ? `, на <b>+${rule.part_r}R закрыть ${Math.round(rule.part_f * 100)}%</b> и стоп в безубыток` : ''}, тейк — <b>${rule.take_r} риска</b>. Не больше ${m.side_cap || 12} сделок в одну сторону.
         ${m.sides ? `${m.sides.length === 1 && m.sides[0] === 1 ? 'Только лонги (на шортах модель не различает хорошие касания от плохих). ' : ''}Не входит, если цена уже дальше ${m.max_d_ema200} дневных ATR над EMA200 дня; касания на 4ч — только самые уверенные.${m.btc_ema50 ? ' Лонги — только пока BTC выше своей дневной EMA50.' : ''}` : ''}</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «EMA» в настройках риска (пусто = ${d.risk}%). Сделок много одновременно: просадка на истории до ${dd}R — держите риск маленьким.</div>`}`;
     const sl = d.sel || {}, cr = sl.rule || {}, rsl = sl.research || {};
@@ -40139,7 +40141,7 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
     ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromEmx(t), `btLiveOpen('emx', ${Math.min(10, op.length) + i})`)).join('')}</details>` : ''}`);
   window._btLive.emx = op.slice(-10).reverse().map(btFromEmx).concat((d.last || []).map(btFromEmx));
   h += btSection('emx', 'Сделки бэктеста — 2022–2026 (модель каждый год учится только на прошлых)');
-  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Каждый час бот считает уровни EMA формирующихся свечей (их значение известно с открытия свечи и не меняется) и оценивает, каким было бы касание в этот час: график и EMA, разгон к уровню, EMA вокруг, RSI трёх графиков, тренд дня и недели, BTC, сила монеты, другие EMA рядом. Уровни с оценкой выше порога «на прицеле»: цена проверяется каждые 30 с, при касании — сигнал в Telegram${d.auto ? ' и сделка' : ''}. Считается только первое касание EMA за свечу. Учёт сделок — по часовым свечам, как в исследовании: стоп раньше тейка, в час входа тейк не считается, выход через ${rule.hold_h || 24} ч; комиссии и фандинг учтены.</div></details>`;
+  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Каждый час бот считает уровни EMA формирующихся свечей (их значение известно с открытия свечи и не меняется) и оценивает, каким было бы касание в этот час: график и EMA, разгон к уровню, EMA вокруг, RSI трёх графиков, тренд дня и недели, BTC, сила монеты, другие EMA рядом. Уровни с оценкой выше порога «на прицеле»: цена проверяется каждые 30 с, при касании уровня входа — сигнал в Telegram${d.auto ? ' и сделка' : ''}. Считается только первое касание EMA за свечу. Учёт сделок — по часовым свечам, как в исследовании: стоп раньше тейка, в час входа тейк не считается, выход через ${rule.hold_h || 24} ч; комиссии и фандинг учтены.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
 
