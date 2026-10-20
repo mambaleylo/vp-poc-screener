@@ -20101,3 +20101,8 @@ v0.99.657 - Zones, the sweep before the line (the user: "на практике �
          hypotheses get entries at the sweep (a limit 0.25 / 0.5 / 0.75 of the way against the move) with stops in
          shares of the way; a variant that lost live (15+ closed signals, average below zero) is no longer signalled —
          the next one that holds on the history and its last third is taken, or none.
+v0.99.658 - Zones: "ловить сам вынос" (the user: "я думал наоборот, эти 0.5 движения ловить"): a reverse family in the
+         "🧪 Вход до зоны" hypotheses — once the price went 1 / 2 / 3 / 5% against the zone, a trade the same way
+         (against the zone) with the take 0.5 / 1 / 2% further and the stop 0.5 / 1 / 2% back; the line reached first
+         = no trade; fees counted (0.1% is 0.2R on a 0.5% take). Its best line is shown under the verdict; if it
+         holds on the history and its last third (and later live), the bot signals it like the other variants.

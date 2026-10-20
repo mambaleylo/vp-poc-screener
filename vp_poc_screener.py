@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.657"
+APP_VERSION = "0.99.658"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -25197,6 +25197,45 @@ def zones_hyp_sim(after, d, target, pull, sl_pct, tp_mode):
     return {"r": d * (after[-1]["close"] - e) / risk - fee, "result": "TIME_EXIT"}
 
 
+ZONES_REV_PULL = (1.0, 2.0, 3.0, 5.0)    # v0.99.658 — "против зоны": the trigger, the price moved this % against the zone
+ZONES_REV_TK = (0.5, 1.0, 2.0)          # the take, % further the same way
+ZONES_REV_SL = (0.5, 1.0, 2.0)          # the stop, % back toward the zone
+
+
+def zones_hyp_sim_rev(after, d, target, pull, sl_pct, tk_pct):
+    """v0.99.658 — the sweep itself (the user: "эти 0.5 движения ловить"): once the price went pull % against the zone
+    (d = the zone's direction), a trade the same way (-d) with the take tk % further and the stop sl % back. The line
+    reached first = no trade. Conservative as zones_hyp_sim: the stop first, the take from the candle after the fill."""
+    if not after:
+        return None
+    p0 = after[0]["open"]
+    line_tp = zones_approach_tp(target, d)
+    e = p0 * (1 - d * pull / 100)
+    q = -d
+    tp, sl = e * (1 + q * tk_pct / 100), e * (1 - q * sl_pct / 100)
+    risk = abs(e - sl)
+    fee = ZONES_FEE * e / risk
+    filled = False
+    for k, c in enumerate(after):
+        if not filled:
+            if (d > 0 and c["high"] >= line_tp) or (d < 0 and c["low"] <= line_tp):
+                return None
+            if (d > 0 and c["low"] <= e) or (d < 0 and c["high"] >= e):
+                filled = True
+                # the fill candle came from the zone's side: its extreme there was most likely before the fill —
+                # a stop on it only when the candle closed back beyond the stop
+                if (q > 0 and c["close"] <= sl) or (q < 0 and c["close"] >= sl):
+                    return {"r": -1 - fee, "result": "LOSS"}
+            continue
+        if (q > 0 and c["low"] <= sl) or (q < 0 and c["high"] >= sl):
+            return {"r": -1 - fee, "result": "LOSS"}
+        if (q > 0 and c["high"] >= tp) or (q < 0 and c["low"] <= tp):
+            return {"r": tk_pct / sl_pct - fee, "result": "WIN"}
+    if not filled:
+        return None
+    return {"r": q * (after[-1]["close"] - e) / risk - fee, "result": "TIME_EXIT"}
+
+
 def zones_hyp_table(cases):
     """cases: [(post_time, after candles, dir, target)] of finished posts. Every variant
     over all of them; "test" = the same variant on the last third of the history only
@@ -25226,8 +25265,29 @@ def zones_hyp_table(cases):
                              "wr": round(sum(1 for r in rs if r["result"] == "WIN") / len(rs) * 100, 1),
                              "avg_r": round(sum(xs) / len(xs), 3), "g": round((math.exp(lg) - 1) * 100, 3),
                              "test_n": len(rs_t), "test_r": round(sum(rs_t) / len(rs_t), 3) if rs_t else None})
+    for pull in ZONES_REV_PULL:   # v0.99.658 — the reverse family
+        for sl in ZONES_REV_SL:
+            for tk in ZONES_REV_TK:
+                rs, rs_t = [], []
+                for t0, after, d, target in cases:
+                    r = zones_hyp_sim_rev(after, d, target, pull, sl, tk)
+                    if r is None:
+                        continue
+                    rs.append(r)
+                    if cut is not None and t0 >= cut:
+                        rs_t.append(r["r"])
+                if not rs:
+                    continue
+                xs = [r["r"] for r in rs]
+                lg = sum(math.log(max(1e-6, 1 + rf * x)) for x in xs) / len(xs)
+                rows.append({"rev": True, "pull": pull, "sl": sl, "tp": f"{tk:g}%", "tk": tk, "n": len(xs), "entry_pct": round(len(xs) / len(cases) * 100),
+                             "wr": round(sum(1 for r in rs if r["result"] == "WIN") / len(rs) * 100, 1),
+                             "avg_r": round(sum(xs) / len(xs), 3), "g": round((math.exp(lg) - 1) * 100, 3),
+                             "test_n": len(rs_t), "test_r": round(sum(rs_t) / len(rs_t), 3) if rs_t else None})
     rows.sort(key=lambda r: (-(r["n"] >= ZONES_LEARN_MIN), -r["avg_r"]))
-    return {"posts": len(cases), "cut": cut, "rows": rows, "risk": round(rf * 100, 2)}
+    rev = [r for r in rows if r.get("rev")]
+    return {"posts": len(cases), "cut": cut, "rows": rows, "risk": round(rf * 100, 2),
+            "rev_best": rev[0] if rev else None}
 
 
 def zones_post_levels(post):
@@ -25376,7 +25436,7 @@ def zones_pb_variant():
         if r["n"] >= ZONES_LEARN_MIN and r["avg_r"] > 0 and (r.get("test_r") or 0) > 0:
             # v0.99.657 — a variant that already lost live (15+ closed signals, the average below zero) is not signalled
             rs = [t["pnl_r"] for t in live if t.get("pnl_r") is not None
-                  and all(t["variant"].get(k) == r[k] for k in ("pull", "sl", "tp"))]
+                  and all(t["variant"].get(k) == r.get(k) for k in ("pull", "sl", "tp", "rev"))]
             if len(rs) >= 15 and sum(rs) / len(rs) < 0:
                 continue
             return r
@@ -25427,29 +25487,37 @@ def zones_pb_on_new_post(post):
         return None
     d, sym = ap["dir"], post["symbol"]
     line_tp = zones_approach_tp(ap["target"], d)
-    e = zones_pull_px(price, d, v["pull"], line_tp)
-    if (d > 0 and e >= line_tp) or (d < 0 and e <= line_tp):
-        return None
-    sl = zones_sl_px(e, d, v["sl"], line_tp)
-    risk_px = abs(e - sl)
-    if risk_px <= e * 0.001:
-        return None
-    tp = {"line": line_tp, "half": e + (line_tp - e) / 2, "2r": e + d * 2 * risk_px, "3r": e + d * 3 * risk_px}[v["tp"]]
+    zd = d
+    if v.get("rev"):     # v0.99.658 — against the zone: the trade goes the pullback's way
+        e = price * (1 - zd * v["pull"] / 100)
+        d = -zd
+        tp, sl = e * (1 + d * v["tk"] / 100), e * (1 - d * v["sl"] / 100)
+        risk_px = abs(e - sl)
+    else:
+        e = zones_pull_px(price, d, v["pull"], line_tp)
+        if (d > 0 and e >= line_tp) or (d < 0 and e <= line_tp):
+            return None
+        sl = zones_sl_px(e, d, v["sl"], line_tp)
+        risk_px = abs(e - sl)
+        if risk_px <= e * 0.001:
+            return None
+        tp = {"line": line_tp, "half": e + (line_tp - e) / 2, "2r": e + d * 2 * risk_px, "3r": e + d * 3 * risk_px}[v["tp"]]
     direction = "LONG" if d > 0 else "SHORT"
     sz = _zones_pb_size(sym, direction, e, sl)
-    tr = {"symbol": sym, "direction": direction, "dir": d, "time": int(now), "ref": price, "entry": e, "sl": sl, "tp": tp,
-          "line_tp": line_tp, "target": ap["target"], "variant": {k: v[k] for k in ("pull", "sl", "tp", "n", "avg_r", "test_r", "wr")},
+    tr = {"symbol": sym, "direction": direction, "dir": d, "zdir": zd, "time": int(now), "ref": price, "entry": e, "sl": sl, "tp": tp,
+          "line_tp": line_tp, "target": ap["target"], "variant": {k: v.get(k) for k in ("pull", "sl", "tp", "n", "avg_r", "test_r", "wr", "rev", "tk")},
           "size": sz, "status": "PENDING" if v["pull"] else "OPEN", "fill_t": None if v["pull"] else int(now),
           "chk_t": int(now // 60 * 60), "result": None, "pnl_r": None, "exit_price": None, "exit_time": None}
     post["pb_trade"] = tr
     word = "ЛОНГ" if d > 0 else "ШОРТ"
-    tp_name = ZONES_HYP_TP_NAMES.get(v["tp"], v["tp"])
+    tp_name = ZONES_HYP_TP_NAMES.get(v["tp"], v["tp"]) if not v.get("rev") else f"{v['tk']:g}% дальше по откату"
     size_txt = (f"плечо {sz['lev']}x · маржа ${sz['margin']:g} · на стопе −${sz['loss']:g}"
                 + (f" ({sz['loss_pct']:g}% баланса)" if sz.get("loss_pct") is not None else "")
                 if sz.get("lev") and not sz.get("skip") else f"объём: {sz.get('skip') or 'не посчитан'}")
-    zones_pb_notify(f"🧪 Откат · {sym.replace('_USDT', '')} {word}\n"
-                 + (f"лимитка {e:.6g} ({zones_pull_txt(v['pull'])} от {price:.6g}, {abs(price - e) / price * 100:.2g}%)" if v["pull"] else f"вход по рынку {e:.6g}")
-                 + f"\nстоп {sl:.6g} ({abs(sl - e) / e * 100:.2g}%{'' if v['sl'] > 0 else ', ' + zones_sl_txt(v['sl'])}) · тейк {tp:.6g} ({tp_name})\n{size_txt}\n"
+    zones_pb_notify(f"🧪 Откат · {sym.replace('_USDT', '')} {word}" + (" · против зоны (ловим вынос)" if v.get("rev") else "") + "\n"
+                 + (f"стоп-вход {e:.6g}, когда цена уйдёт на {v['pull']:g}% от {price:.6g} против зоны" if v.get("rev") else
+                    f"лимитка {e:.6g} ({zones_pull_txt(v['pull'])} от {price:.6g}, {abs(price - e) / price * 100:.2g}%)" if v["pull"] else f"вход по рынку {e:.6g}")
+                 + f"\nстоп {sl:.6g} ({abs(sl - e) / e * 100:.2g}%{'' if v.get('rev') or v['sl'] > 0 else ', ' + zones_sl_txt(v['sl'])}) · тейк {tp:.6g} ({tp_name})\n{size_txt}\n"
                  f"по истории: {v['n']} сделок, WR {v['wr']}%, {v['avg_r']:+.2f}R, последняя треть {v['test_r']:+.2f}R\n"
                  f"🔔 только сигнал — бот ордер не ставит, ведёт статистику")
     return tr
@@ -25462,6 +25530,7 @@ def _zones_track_pb(post):
     tr = post["pb_trade"]
     now = time.time()
     d, sym = tr["dir"], tr["symbol"]
+    zd = tr.get("zdir", d)    # v0.99.658: the zone's direction (the reverse trades go the other way)
     try:
         cs = get_candles_range(sym, "1m", int(tr["chk_t"]), int(now)) or []
     except Exception as e:
@@ -25478,16 +25547,16 @@ def _zones_track_pb(post):
         changed = True
         hit = lambda px, up: (c["high"] >= px) if up else (c["low"] <= px)
         if tr["status"] == "PENDING":
-            if hit(tr["line_tp"], d > 0):
+            if hit(tr["line_tp"], zd > 0):
                 with _zones_lock:
                     tr.update({"status": "MISSED", "exit_time": c["time"]})
                 zones_pb_notify(f"🧪 Откат · {sym.replace('_USDT', '')}: цена ушла к зоне без отката — лимитка не налилась, сигнал снят")
                 return True
-            if hit(tr["entry"], d < 0):
+            if hit(tr["entry"], zd < 0):
                 with _zones_lock:
                     tr.update({"status": "OPEN", "fill_t": c["time"]})
-                zones_pb_notify(f"🧪 Откат · {sym.replace('_USDT', '')}: цена дошла до лимитки {tr['entry']:.6g} (сигнал, на бирже ордера нет) · стоп {tr['sl']:.6g} · тейк {tr['tp']:.6g}")
-                if hit(tr["sl"], d < 0):
+                zones_pb_notify(f"🧪 Откат · {sym.replace('_USDT', '')}: цена дошла до {'стоп-входа' if zd != d else 'лимитки'} {tr['entry']:.6g} (сигнал, на бирже ордера нет) · стоп {tr['sl']:.6g} · тейк {tr['tp']:.6g}")
+                if (hit(tr["sl"], d < 0) if zd == d else ((c["close"] <= tr["sl"]) if d > 0 else (c["close"] >= tr["sl"]))):
                     res = ("LOSS", tr["sl"], c["time"])
                     break
             continue
@@ -25511,8 +25580,10 @@ def _zones_track_pb(post):
             tr.update({"status": "CLOSED", "result": kind, "exit_price": px, "exit_time": tx, "pnl_r": round(r, 3)})
         if zones_pb_tg():
             notify_trade_result("zones_pb", sym, tr["direction"], tr["entry"], px, kind, r, real=False,
-                                note=f"{zones_pull_txt(tr['variant']['pull'])} · стоп {zones_sl_txt(tr['variant']['sl'])} · тейк "
-                                     f"{ZONES_HYP_TP_NAMES.get(tr['variant']['tp'], tr['variant']['tp'])}")
+                                note=(f"против зоны · после {tr['variant']['pull']:g}% · стоп {tr['variant']['sl']:g}% · тейк {tr['variant'].get('tk', 0):g}%"
+                                      if tr["variant"].get("rev") else
+                                      f"{zones_pull_txt(tr['variant']['pull'])} · стоп {zones_sl_txt(tr['variant']['sl'])} · тейк "
+                                      f"{ZONES_HYP_TP_NAMES.get(tr['variant']['tp'], tr['variant']['tp'])}"))
         _zones_learn_event.set()
         changed = True
     return changed
@@ -38684,7 +38755,7 @@ async function refreshZones() {
     const tpN = {line: 'до 1-й линии', half: 'полпути', '2r': '2R', '3r': '3R'};
     const slT = v => v > 0 ? v + '%' : (-v) + '× пути';   // v0.99.656: a stop sized on the way to the line
     const pullT = v => v > 0 ? 'откат ' + v + '%' : (v < 0 ? 'откат ' + (-v) + '× пути' : 'сразу');   // v0.99.657
-    const hrow = r => `<tr class="${r.n < d.learn_min ? 'dim' : ''}"><td>${pullT(r.pull)}<div class="dim">стоп ${slT(r.sl)} · тейк ${tpN[r.tp] || r.tp}</div></td><td>${r.n}<div class="dim">${r.entry_pct}%</div></td><td>${r.wr}%</td><td>${sgR(r.avg_r)}<div class="dim">${sgP(r.g)}</div></td><td>${r.test_r == null ? '—' : sgR(r.test_r)}<div class="dim">${r.test_n || ''}</div></td></tr>`;
+    const hrow = r => `<tr class="${r.n < d.learn_min ? 'dim' : ''}"><td>${r.rev ? `🔁 против зоны после ${r.pull}%` : pullT(r.pull)}<div class="dim">стоп ${slT(r.sl)} · тейк ${r.rev ? r.tk + '% дальше' : (tpN[r.tp] || r.tp)}</div></td><td>${r.n}<div class="dim">${r.entry_pct}%</div></td><td>${r.wr}%</td><td>${sgR(r.avg_r)}<div class="dim">${sgP(r.g)}</div></td><td>${r.test_r == null ? '—' : sgR(r.test_r)}<div class="dim">${r.test_n || ''}</div></td></tr>`;
     const head = '<thead><tr><th>Вход</th><th>сделок</th><th>WR</th><th>средний<div class="dim">счёт</div></th><th>посл. треть</th></tr></thead>';
     const top = hy.rows.filter(r => r.n >= d.learn_min).slice(0, 10);
     const b = top[0];
@@ -38709,7 +38780,7 @@ async function refreshZones() {
     };
     const pbRow = t => `<tr><td>${(t.symbol || '').replace('_USDT', '')} ${t.direction === 'LONG' ? 'лонг' : 'шорт'}<div class="dim">${zdate(t.time)}</div></td><td>${+(+t.entry).toPrecision(5)}<div class="dim">стоп ${+(+t.sl).toPrecision(5)} · тейк ${+(+t.tp).toPrecision(5)}</div></td><td>${t.status === 'CLOSED' ? `<b class="${t.pnl_r > 0 ? 'win' : 'loss'}">${resTxt[t.result] || t.result} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R</b>` : (stTxt[t.status] || t.status)}${pbSizeTxt(t)}</td></tr>`;
     const pbBlock = `<div class="zh" style="margin-top:10px;">🔔 Сигналы откатов вживую</div>
-      <div class="zsub" style="margin-top:0;">${pv ? `сейчас сигналю вариант: <b>${pv.pull ? pullT(pv.pull) : 'вход сразу'} · стоп ${slT(pv.sl)} · тейк ${tpN[pv.tp] || pv.tp}</b> (лучший, что в плюсе и на последней трети)` : 'ни один вариант не в плюсе на последней трети — новых сигналов нет'}. В Telegram: лимитка, стоп, тейк, плечо и убыток на стопе при вашем риске; ордера бот не ставит.</div>
+      <div class="zsub" style="margin-top:0;">${pv ? `сейчас сигналю вариант: <b>${pv.rev ? `🔁 против зоны после ${pv.pull}% · стоп ${pv.sl}% · тейк ${pv.tk}% дальше` : `${pv.pull ? pullT(pv.pull) : 'вход сразу'} · стоп ${slT(pv.sl)} · тейк ${tpN[pv.tp] || pv.tp}`}</b> (лучший, что в плюсе и на последней трети)` : 'ни один вариант не в плюсе на последней трети — новых сигналов нет'}. В Telegram: лимитка, стоп, тейк, плечо и убыток на стопе при вашем риске; ордера бот не ставит.</div>
       <label style="display:block;margin:6px 0 8px;cursor:pointer;"><input type="checkbox" ${d.pb_tg ? 'checked' : ''} onchange="zonesPbTg(this.checked)"> <b>уведомления об откатах в Telegram</b><div class="dim" style="font-size:var(--fs-sm);">статистика ведётся в любом случае</div></label>
       ${pb.n ? `<div class="zkv"><div>сигналов</div><div><b>${pb.n}</b>: ждут ${pb.pending} · в позиции ${pb.open} · не налились ${pb.missed} · закрыто ${pb.closed}</div>
         ${pb.closed ? `<div>итог закрытых</div><div>тейков ${pb.wins} из ${pb.closed} · средний <b>${sgR(pb.avg_r)}</b> · всего ${pb.sum_r > 0 ? '+' : ''}${pb.sum_r}R</div>` : ''}</div>
@@ -38717,6 +38788,7 @@ async function refreshZones() {
         ${(pb.last || []).length > (window._pbN || 15) ? `<div style="text-align:center;margin-top:6px;"><button class="btnNeutral" onclick="window._pbN = (window._pbN || 15) + 20; refreshZones();">ещё ${Math.min(20, pb.last.length - (window._pbN || 15))} из ${pb.last.length - (window._pbN || 15)}</button></div>` : ''}` : '<div class="dim">живых сигналов пока не было</div>'}`;
     hypCard = card('🧪 Вход до зоны — гипотезы', `<div class="zsub" style="margin-top:0;">Посты, где цена ещё не дошла до зон (${hy.posts}). Вход в сторону зоны: сразу или лимиткой после отката против движения; стоп от входа — в % или в долях пути до линии («1× пути» — стоп так же далеко, как тейк у линии); тейк до 1-й линии, на полпути или 2R / 3R. Свеча и стоп, и тейк — считаю стоп. Под числом сделок — в какой доле постов был вход; под средним — рост счёта за сделку. «Посл. треть» — тот же вариант только на последней трети постов по времени: проверка, что это не подгонка. Счёт — при риске ${hy.risk}%. Сделок бот не открывает — только сигналы ниже.</div>
       <div class="zsub">${verdict}</div>
+      ${hy.rev_best ? `<div class="zsub">🔁 Ловить сам вынос (вход по ходу отката, против зоны) — лучший: после ${hy.rev_best.pull}% тейк ${hy.rev_best.tk}% / стоп ${hy.rev_best.sl}%: ${hy.rev_best.n} сделок, WR ${hy.rev_best.wr}%, ${sgR(hy.rev_best.avg_r)}, последняя треть ${hy.rev_best.test_r == null ? '—' : sgR(hy.rev_best.test_r)}</div>` : ''}
       ${top.length ? `<div class="zwrap"><table class="ztbl">${head}<tbody>${top.map(hrow).join('')}</tbody></table></div>` : ''}
       <details><summary>все ${hy.rows.length} вариантов</summary><div class="zwrap"><table class="ztbl">${head}<tbody>${hy.rows.map(hrow).join('')}</tbody></table></div></details>
       ${pbBlock}`);
