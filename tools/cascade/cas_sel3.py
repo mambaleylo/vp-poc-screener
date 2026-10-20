@@ -51,6 +51,7 @@ while t0 < end:
         ms = fit(ok)
         for side in ((1, -1) if ONE else (s,)):
             ri, ti = np.where(ref & (SD == side))[0], np.where(te & (SD == side))[0]
+            if not len(ti) or not len(ri): continue
             pr = pred(ms, ri); sc[side][ti] = pred(ms, ti)
             for q in (0.98, 0.99, 0.995): thr[(side, q)][ti] = np.quantile(pr, q)
     print(TAG, dt.datetime.fromtimestamp(t0, dt.timezone.utc).strftime("%Y-%m"), flush=True)
