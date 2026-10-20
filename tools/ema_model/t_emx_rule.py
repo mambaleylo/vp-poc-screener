@@ -9,14 +9,15 @@ def check(name, cond):
     global ok, bad
     ok += bool(cond); bad += (not cond)
     print(("OK  " if cond else "FAIL") + " " + name)
-m = {"thr": 0.35, "sides": [1], "max_d_ema200": 10.0, "tf_margin": {"4h": 0.1}}
-check("a long 1d touch above the threshold passes", V.emx_pass(m, "1d", 1, 0.36, {"s_d_ema200": 3.0}))
-check("below the threshold: no", not V.emx_pass(m, "1d", 1, 0.34, {"s_d_ema200": 3.0}))
-check("a short: no (longs only)", not V.emx_pass(m, "1d", -1, 0.9, {"s_d_ema200": 3.0}))
-check("10+ daily ATR above the daily EMA200: no", not V.emx_pass(m, "1w", 1, 0.9, {"s_d_ema200": 10.5}))
-check("4h needs the threshold + 0.1", not V.emx_pass(m, "4h", 1, 0.40, {"s_d_ema200": 1.0}) and V.emx_pass(m, "4h", 1, 0.46, {"s_d_ema200": 1.0}))
+m = {"thr": 0.35, "sides": [1], "max_d_ema200": 10.0, "tf_margin": {"4h": 0.1}, "btc_ema50": True}
+check("a long 1d touch above the threshold passes", V.emx_pass(m, "1d", 1, 0.36, {"s_d_ema200": 3.0, "s_b_ema50": 2.0}))
+check("below the threshold: no", not V.emx_pass(m, "1d", 1, 0.34, {"s_d_ema200": 3.0, "s_b_ema50": 2.0}))
+check("a short: no (longs only)", not V.emx_pass(m, "1d", -1, 0.9, {"s_d_ema200": 3.0, "s_b_ema50": 2.0}))
+check("10+ daily ATR above the daily EMA200: no", not V.emx_pass(m, "1w", 1, 0.9, {"s_d_ema200": 10.5, "s_b_ema50": 2.0}))
+check("4h needs the threshold + 0.1", not V.emx_pass(m, "4h", 1, 0.40, {"s_d_ema200": 1.0, "s_b_ema50": 2.0}) and V.emx_pass(m, "4h", 1, 0.46, {"s_d_ema200": 1.0, "s_b_ema50": 2.0}))
+check("v0.99.645: BTC below its daily EMA50: no long", not V.emx_pass(m, "1d", 1, 0.9, {"s_d_ema200": 1.0, "s_b_ema50": -0.5}))
 old = {"thr": 0.35}
-check("a model without the fields takes the bot's defaults", not V.emx_pass(old, "1d", -1, 0.9, {"s_d_ema200": 0.0}) and V.emx_pass(old, "1d", 1, 0.36, {"s_d_ema200": 0.0}))
+check("a model without the fields takes the bot's defaults", not V.emx_pass(old, "1d", -1, 0.9, {"s_d_ema200": 0.0, "s_b_ema50": 2.0}) and V.emx_pass(old, "1d", 1, 0.36, {"s_d_ema200": 0.0, "s_b_ema50": 2.0}))
 V._EMX["model"] = {"ver": 4, "q": 0.97, "thr": 0.35, "rule": {"stop_datr": 0.75, "take_r": 3.0, "hold_h": 72}, "sides": [1], "max_d_ema200": 10.0, "tf_margin": {"4h": 0.1}}
 V._EMX["trades"] = [{"symbol": "SOL_USDT", "side": 1, "tf": "1d", "n": 50, "entry": 140.0, "sl": 133.0, "tp": 161.0, "t_in": 1, "hour": 0, "status": "CLOSED",
                      "result": "WIN", "r": 2.9, "exit": 161.0, "t_out": 9, "real": False, "sel": True}]

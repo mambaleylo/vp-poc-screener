@@ -20029,3 +20029,8 @@ v0.99.644 - 📐 EMA: a new trading rule after the same study as P/R (hypotheses
          2022–26: +0.58R a trade instead of +0.47R, WR 52% instead of 49%, the longest losing run 19 instead of
          33. The EMA tab gets the backtest trade list with charts and clickable live trades, like the user asked.
          Model ver 4; tools/ema_model/t_emx_rule.py 8/8.
+v0.99.645 - 📐 EMA: longs only while BTC is above its daily EMA50 (the market's own uptrend). 2022–26: 766 trades
+         (~3/wk), +0.65R a trade, WR 54%, every year better (+0.60 / +0.55 / +0.83 / +0.59R), the longest losing
+         run 16; on the top-10% check set the growth at an equal drawdown nearly doubles. Also checked and not used:
+         a confirmed entry (the hour closes back above the EMA), hourly / open caps, a model retrained on longs only.
+         Model ver 5; tools/ema_model/t_emx_rule.py 9/9.

@@ -34,3 +34,9 @@ margin of 0.1 (q97 x800 vs x72, q90 x10.1 vs x6.3); not kept — the stop by clo
 other stops 0.5–1.5, breakeven, takes 2 / 2.5 / 3.5 / 6 / none, holds 48 / 96 / 120 h, a deeper limit (needs real limit
 orders, mixed). Deployed (`ema_export4.py`, model ver 4: the same trees, the rule + filters): 2022–26 939 trades
 (3.8/wk), +0.58R, WR 52%, the longest losing run 19 instead of 33. `t_emx_rule.py` 8/8.
+
+v0.99.645 — round 2 (`ema_hyp4.py`, `ema_hyp5.py`, `er_wf_long.py`) on top of v0.99.644. Kept: longs only while BTC is
+above its daily EMA50 (feature `s_b_ema50` > 0) — top 3%: +0.65R instead of +0.58R, WR 54%, a losing run of 16, every
+year better; top 10%: x18.8 instead of x10.1 at an equal drawdown. Not kept: entering on the touch hour's close back
+above the EMA (worse on both sets), at most 2 / 4 entries an hour, at most 6 / 20 open, BTC's 7-day move, and a model
+retrained on longs only (labels 4R and 3R: worse on both sets than the deployed model + the long filter). Model ver 5.

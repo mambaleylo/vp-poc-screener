@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.644"
+APP_VERSION = "0.99.645"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30008,12 +30008,15 @@ def zm_stats():
 # the price is watched every 30 s; the virtual record follows the 1h candles exactly as the research did.
 EMX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_ema_model.json")
 EMX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_ema_model.json"
-EMX_MODEL_VER = 4   # v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
+EMX_MODEL_VER = 5   # v0.99.645 — 5: + the BTC EMA50 filter (the research stats and the backtest list with it); v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
 # v0.99.644 — 4: the same model, a new trading rule from the hypothesis study (tools/ema_model/ema_hyp*.py), better than
 # the old one on the bot's top 3% and on the top 10% check set at an equal drawdown: longs only (on shorts the score does
 # not rank: ~0R at every score), no entry when the price is >= 10 daily ATR above the daily EMA200 (those lost on both
 # sets), a 4h touch only with a score >= the threshold + 0.1 (4h trades are ~0.2R worse than 1d at the same score),
 # take 3R. 2022–26: +0.58R a trade instead of +0.47R, WR 52% instead of 49%, the longest losing run 19 instead of 33.
+# v0.99.645 — and only while BTC is above its daily EMA50 ("s_b_ema50" > 0 for a long): +0.65R instead of +0.58R, WR 54%,
+# better in every year; on the top 10% check set x18.8 instead of x10.1 at an equal drawdown, 2025–26 +0.22R vs +0.06R.
+EMX_BTC_EMA50 = True
 EMX_SIDES = (1,)
 EMX_MAX_D_EMA200 = 10.0
 EMX_TF_MARGIN = {"4h": 0.1}
@@ -30025,7 +30028,9 @@ def emx_pass(m, tf, side, sc, f):
         return False
     if side not in tuple(m.get("sides") or EMX_SIDES):
         return False
-    return float(f.get("s_d_ema200", 0.0)) < float(m.get("max_d_ema200") or EMX_MAX_D_EMA200)
+    if float(f.get("s_d_ema200", 0.0)) >= float(m.get("max_d_ema200") or EMX_MAX_D_EMA200):
+        return False
+    return not m.get("btc_ema50", EMX_BTC_EMA50) or float(f.get("s_b_ema50", 0.0)) > 0
 EMX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_emx_state.json")
 EMX_TFS = ("4h", "1d", "1w", "1M")
 EMX_EMAS = {"4h": (20, 50, 100, 200), "1d": (7, 14, 21, 28, 50, 100, 200), "1w": (7, 14, 21, 28, 50, 100, 200),
@@ -30540,7 +30545,7 @@ def emx_stats():
             "sel": {"coins": sel_n, "of": len(m.get("coins") or {}), "rule": cr, "research": m.get("coin_research"),
                     "n_all": len(rs_all), "avg_all": round(sum(rs_all) / len(rs_all), 3) if rs_all else None},
             "risk": MODULE_RISK_PCT.get("emw") or EMX_RISK_DEFAULT,
-            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap", "sides", "max_d_ema200", "tf_margin")} if m else None,
+            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap", "sides", "max_d_ema200", "tf_margin", "btc_ema50")} if m else None,
             "err": err, "scan": scan, "armed": armed[:40], "armed_n": len(armed),
             "open": [t for t in trades if t["status"] == "OPEN"][-30:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
@@ -39019,7 +39024,7 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>сделка до <b>${Math.round((rule.hold_h || 24))} ч</b></span><span>просадка до <b>${dd}R</b></span></div>
       <div class="zsub">Вход — на EMA, стоп — <b>${rule.stop_datr} дневного хода</b> монеты за EMA, тейк — <b>${rule.take_r} риска</b>. Не больше ${m.side_cap || 12} сделок в одну сторону.
-        ${m.sides ? `${m.sides.length === 1 && m.sides[0] === 1 ? 'Только лонги (на шортах модель не различает хорошие касания от плохих). ' : ''}Не входит, если цена уже дальше ${m.max_d_ema200} дневных ATR над EMA200 дня; касания на 4ч — только самые уверенные.` : ''}</div>
+        ${m.sides ? `${m.sides.length === 1 && m.sides[0] === 1 ? 'Только лонги (на шортах модель не различает хорошие касания от плохих). ' : ''}Не входит, если цена уже дальше ${m.max_d_ema200} дневных ATR над EMA200 дня; касания на 4ч — только самые уверенные.${m.btc_ema50 ? ' Лонги — только пока BTC выше своей дневной EMA50.' : ''}` : ''}</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «EMA» в настройках риска (пусто = ${d.risk}%). Сделок много одновременно: просадка на истории до ${dd}R — держите риск маленьким.</div>`}`;
     const sl = d.sel || {}, cr = sl.rule || {}, rsl = sl.research || {};
     if (sl.of) top += `<div class="zsub">🧮 <b>Авто-отбор монет:</b> торгуются <b>${sl.coins} из ${sl.of}</b> — у которых сделки модели были в среднем ≥ ${cr.min_avg != null ? '+' + cr.min_avg : '+0.1'}R (от ${cr.min_n || 10} сделок, история + живые). Остальные — только виртуально, без сигналов и сделок; монета войдёт в список, когда наберёт результат.${rsl.sel ? ` На истории 2025–26: <b>${sgR(rsl.sel.avg)}</b> на сделку, просадка ${rsl.sel.dd}R (без отбора ${sgR(rsl.all.avg)}, просадка ${rsl.all.dd}R).` : ''}</div>`;
