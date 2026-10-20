@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.648"
+APP_VERSION = "0.99.649"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30406,7 +30406,7 @@ def emx_fire(a, t_touch, live_px=None):
           "direction": direction, "entry": a["lv"], "sl": a["sl"], "tp": a["tp"], "score": a["score"], "t_in": int(t_touch),
           "hour": a["hour"], "until": int(a["hour"] + int(m.get("rule", {}).get("hold_h", 24)) * 3600), "hold": int(m.get("rule", {}).get("hold_h", 24)),
           "status": "OPEN", "result": None,
-          "r": None, "exit": None, "t_out": None, "real": False, "live_px": live_px, "sel": emx_coin_ok(a["symbol"])}
+          "r": None, "exit": None, "t_out": None, "real": False, "live_px": live_px, "sel": emx_coin_ok(a["symbol"]), "rv": EMX_MODEL_VER}
     if AUTOTRADE_ENABLED_EMW and live_px and tr["sel"]:
         try:
             risk = MODULE_RISK_PCT.get("emw") or EMX_RISK_DEFAULT
@@ -30550,6 +30550,7 @@ def emx_stats():
             "open": [t for t in trades if t["status"] == "OPEN"][-30:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
+            "live_check": live_vs_bt("emx", [t["r"] for t in fin_all if t.get("rv") == EMX_MODEL_VER]),
             "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "n", "t_in", "hour", "r", "result", "real", "sel", "entry", "sl", "tp", "exit", "t_out")}
                      for t in sorted(fin_all, key=lambda t: -t["t_in"])[:30]]}
 
@@ -31445,6 +31446,25 @@ def api_bt_trades():
         return jsonify({"trades": [], "err": str(e)[:200]})
 
 
+RBX_RULE_VER = 647   # v0.99.648 — the breakout's trading rule (stop 2 ATR, the channel 15 after +4R) for the live check
+
+
+def live_vs_bt(mod, rs):
+    """v0.99.648 — the live closed trades under the current rule vs the backtest's (the same module's list): the live
+    average against the backtest's minus 1.64 standard errors; under 20 trades — too early to judge"""
+    bt = [float(t["r"]) for t in ((bt_trades() or {}).get(mod) or []) if t.get("r") is not None]
+    if len(bt) < 30:
+        return None
+    mu = sum(bt) / len(bt); sd = (sum((x - mu) ** 2 for x in bt) / len(bt)) ** 0.5
+    wr_bt = round(100 * sum(1 for x in bt if x > 0) / len(bt))
+    n = len(rs)
+    if not n:
+        return {"n": 0, "mu": round(mu, 3), "wr_bt": wr_bt}
+    avg = sum(rs) / n; lo = mu - 1.64 * sd / n ** 0.5
+    return {"n": n, "avg": round(avg, 3), "mu": round(mu, 3), "lo": round(lo, 3), "wr": round(100 * sum(1 for x in rs if x > 0) / n), "wr_bt": wr_bt,
+            "status": "early" if n < 20 else ("ok" if avg >= lo else "below")}
+
+
 def bt_gate_bars(symbol, ch, start, end):
     """Gate's candles of a chart; 12h built from 4h (UTC 00 / 12, like the bot), the forming one flagged"""
     if ch != "12h":
@@ -31716,7 +31736,8 @@ def prx_open(m, c, t_hour, live_px=None):
     hold = int(rule["hold_bars"])
     tr = {"id": f"prx_{sym}_{s}_{hrs}_{t_hour}", "symbol": sym, "side": s, "tf": hrs, "direction": direction, "hour": t_hour,
           "score": c["score"], "risk": soft, "entry": None, "sl": sl, "tp": tp, "px": px, "hold": hold, "take_r": float(rule["take_r"]),
-          "until": t_hour + hold * hrs * 3600, "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False}
+          "until": t_hour + hold * hrs * 3600, "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False,
+          "rv": PRX_MODEL_VER}
     if rule.get("stop_close") and rule.get("hard_atr"):
         # v0.99.641 — the stop by the CLOSE of the trade's bar (a wick through it no longer stops the trade); the exchange
         # holds only the hard stop further away, and the position is sized on it ("risk" = the hard stop's distance)
@@ -31848,6 +31869,7 @@ def prx_stats():
             "open": [t for t in trades if t["status"] == "OPEN"][-30:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
+            "live_check": live_vs_bt("prv", [t["r"] for t in fin if t.get("rv") == PRX_MODEL_VER]),
             "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "hour", "r", "result", "real", "entry", "px", "sl", "tp", "hs", "exit", "t_out")} for t in sorted(fin, key=lambda t: -t["hour"])[:30]]}
 
 
@@ -32028,7 +32050,8 @@ def rbx_open(c, chart, t_bar, live_px=None):
     tp = px + 40 * risk if s > 0 else max(px - 40 * risk, px * 0.05)   # the exit is the 20-bar low / high; a far take only as a guard
     tr = {"id": f"rbx_{chart}_{sym}_{s}_{t_bar}", "symbol": sym, "side": s, "direction": direction, "chart": chart, "hrs": cfg["hrs"],
           "hold": cfg["hold"], "day": t_bar, "risk": risk, "entry": None, "sl": sl, "px": px, "rg": c["rg"], "brk": round(c["brk"], 2),
-          "half": bool(RBX_HALF), "half_done": False, "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False}
+          "half": bool(RBX_HALF), "half_done": False, "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False,
+          "rv": RBX_RULE_VER}
     if AUTOTRADE_ENABLED_RBX and live_px:
         try:
             res = execute_autotrade("rbx", sym, direction, live_px, sl, tp, extra={"пробой": f"{cfg['name']} сжатие {c['rg']}"},
@@ -32209,6 +32232,7 @@ def rbx_stats():
             "err": err, "scan": scan, "watch": watch, "open": [t for t in trades if t["status"] == "OPEN"][-24:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 2) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None,
+            "live_check": live_vs_bt("rbx", [t["r"] for t in fin if t.get("rv") == RBX_RULE_VER and not t.get("half")]),
             "last": [{k: t.get(k) for k in ("symbol", "side", "chart", "day", "r", "result", "real", "entry", "px", "sl", "exit", "t_out")} for t in sorted(fin, key=lambda t: -t["day"])[:30]]}
 
 
@@ -39167,6 +39191,7 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
     ${d.sel && d.sel.n_all > (d.n || 0) ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">выше — монеты в отборе; все монеты вместе: ${d.sel.n_all} сделок, ${sgR(d.sel.avg_all)} в среднем</div>` : ''}
     ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map(row).join('')}</div>` : ''}
+    ${liveCheckHtml(d.live_check)}
     ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromEmx(t), `btLiveOpen('emx', ${Math.min(10, op.length) + i})`)).join('')}</details>` : ''}`);
   window._btLive.emx = op.slice(-10).reverse().map(btFromEmx).concat((d.last || []).map(btFromEmx));
   h += btSection('emx', 'Сделки бэктеста — 2022–2026 (модель каждый год учится только на прошлых)');
@@ -39343,6 +39368,14 @@ function btListHtml(mod) {
   if (idx.length > st.n) h += `<div style="text-align:center;margin-top:6px;"><button class="btnNeutral" onclick="btSet('${mod}', 'n', ${st.n + 60})">ещё ${Math.min(60, idx.length - st.n)}</button></div>`;
   return h;
 }
+function liveCheckHtml(lc) {   // v0.99.648 — the live trades under the current rule vs the backtest
+  if (!lc) return '';
+  const f = v => (v > 0 ? '+' : '') + (+v).toFixed(2) + 'R';
+  if (!lc.n) return `<div class="dim" style="font-size:var(--fs-xs);margin-top:6px;">📏 Живых сделок по текущим правилам пока нет — в бэктесте в среднем ${f(lc.mu)}, WR ${lc.wr_bt}%.</div>`;
+  if (lc.status === 'early') return `<div class="dim" style="font-size:var(--fs-xs);margin-top:6px;">📏 По текущим правилам закрыто ${lc.n} — в среднем ${f(lc.avg)}, WR ${lc.wr}% (бэктест ${f(lc.mu)}, WR ${lc.wr_bt}%). Судить рано: нужно ~20 сделок.</div>`;
+  if (lc.status === 'ok') return `<div style="font-size:var(--fs-xs);margin-top:6px;">✅ Живые сделки в норме: ${lc.n} по текущим правилам, в среднем ${f(lc.avg)}, WR ${lc.wr}% (бэктест ${f(lc.mu)}, WR ${lc.wr_bt}%).</div>`;
+  return `<div class="zbanner warn" style="margin-top:6px;">⚠️ Живые сделки хуже бэктеста: ${lc.n} по текущим правилам, в среднем ${f(lc.avg)} при ожидаемых ${f(lc.mu)} (нижняя граница ${f(lc.lo)}). Рынок мог измениться — снизь риск или поставь на паузу.</div>`;
+}
 window._btg = window._btg || {};
 function btGateHtml(mod) {   // v0.99.648 — the last year's trades re-walked on Gate's candles
   const g = window._btg[mod];
@@ -39476,6 +39509,7 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
   const cap = Object.values(ch).reduce((a, c) => a + 2 * (c.cap || 6), 0);
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, `из ${cap} мест`)}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : '')}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
     ${op.length ? `<div style="margin-top:8px;">${op.slice().reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
+    ${liveCheckHtml(d.live_check)}
     ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromRbx(t), `btLiveOpen('rbx', ${op.length + i})`)).join('')}</details>` : ''}`);
   window._btLive.rbx = op.slice().reverse().map(btFromRbx).concat((d.last || []).map(btFromRbx));
   h += btSection('rbx', 'Сделки бэктеста — день и 12ч, 2021–2026');
@@ -39534,6 +39568,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
       <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry != null ? t.entry : t.px)} · до ${hm(t.until)}</span></div>`;
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
     ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
+    ${liveCheckHtml(d.live_check)}
     ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromPrx(t), `btLiveOpen('prv', ${Math.min(10, op.length) + i})`)).join('')}</details>` : ''}`);
   window._btLive.prv = op.slice(-10).reverse().map(btFromPrx).concat((d.last || []).map(btFromPrx));
   h += btSection('prv', 'Сделки бэктеста — 2023–2026 (окно 24 мес, раз в квартал)');

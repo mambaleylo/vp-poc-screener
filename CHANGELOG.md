@@ -20049,3 +20049,8 @@ v0.99.648 - "🔁 сверить с Gate (12 мес)" in the backtest lists (P/R
          sees the average R and the win rate on Gate vs Binance, how often the outcome matched, and for EMA how
          many limit entries Gate would not have filled. On Binance candles the re-walk gives back the backtest
          exactly (tools/adaptation/t_btgate.py: P/R 84, EMA 167, 📈 192 trades, 100% the same).
+v0.99.649 - Live vs backtest check in the P/R, EMA and 📈 tabs: the closed trades opened under the current rule
+         (new trades carry the rule version) are compared with the module's backtest — "too early" under 20 trades,
+         "in norm", or a warning when the live average falls below the backtest's minus 1.64 standard errors
+         (the market may have changed: lower the risk or pause). Shown in the tab only, no Telegram noise.
+         tools/adaptation/t_live_check.py 6/6.
