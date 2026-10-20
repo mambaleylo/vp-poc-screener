@@ -8,6 +8,7 @@ from common import V, load, D
 from mk import ts
 import nx_feat
 FEE, FUND = 0.001, 0.0003
+RBX_STOP = 2.0      # v0.99.646: the breakout's stop 2 ATR (was 1.5; tools/rr_hunt rb_sim.py)
 OUT = {"ver": 1, "made": int(dt.datetime.now(dt.timezone.utc).timestamp())}
 
 
@@ -28,7 +29,7 @@ def rbx_trades():
             for t, s, f, x, y in pickle.load(open(fn, "rb")):
                 if f["N"] == N0 and f["rg"] < K0 and f["own200"]:
                     ev.append((t, k, s, f["brk"], y))
-        si, xi = rb_tf.STOPS.index(1.5), rb_tf.EXITS.index("dc20")
+        si, xi = rb_tf.STOPS.index(RBX_STOP), rb_tf.EXITS.index("dc20")
         ev.sort(key=lambda e: (e[0], -e[3]))
         busy, act, chosen = {}, [], []
         for t, k, s, brk, y in ev:
@@ -53,7 +54,7 @@ def rbx_trades():
                 cache[sym] = (O, H, L, C, T, atr)
             O, H, L, C, T, atr = cache[sym]
             i = int(np.searchsorted(T, t))
-            e = O[i + 1]; risk = 1.5 * atr[i]; stop = e - s * risk
+            e = O[i + 1]; risk = RBX_STOP * atr[i]; stop = e - s * risk
             hold = rb_tf.HOLD
             kind, kx, ex = "time", hold - 1, C[i + hold]
             for q in range(hold):

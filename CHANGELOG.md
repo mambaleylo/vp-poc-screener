@@ -20034,3 +20034,8 @@ v0.99.645 - 📐 EMA: longs only while BTC is above its daily EMA50 (the market'
          run 16; on the top-10% check set the growth at an equal drawdown nearly doubles. Also checked and not used:
          a confirmed entry (the hour closes back above the EMA), hourly / open caps, a model retrained on longs only.
          Model ver 5; tools/ema_model/t_emx_rule.py 9/9.
+v0.99.646 - 📈 Range breakout: the stop 2 ATR instead of 1.5, after the same study as P/R and EMA (filters, exits,
+         stops judged at an equal drawdown on the bot's breakouts and on a check set). WR 32% instead of 28%, the
+         longest losing run 28 instead of 31, more growth at the same drawdown on both sets; with the "half at
+         +2R" mode on: WR 41% and at most 17 losses in a row. The tab's yearly stats and the backtest list are
+         recomputed with the new stop; the bot = the research on the history (t_rbx_e2e2.py: 0 differences).

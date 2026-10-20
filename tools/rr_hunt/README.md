@@ -22,3 +22,12 @@ Binance 1h history of 127 coins 2020–2026 (`tools/zones_model/dl.py 1h`), fund
    Half at +2R: day +0.83R WR 44%, 12h +0.34R WR 37%. `rbx2_stats.py` writes the stats the bot shows.
 6. `t_rbx_e2e2.py` — the bot's day and 12h signals (79/79, 241/241, 480 random bars) and trade records with the
    trend exit and with half at +2R (148/148, 444/444) = the research's.
+
+v0.99.646 — the win-rate / RR study for 📈 (same method as P/R and EMA). `rb_h.py`: the bot's breakouts (day N 20 /
+2.5, 12h N 30 / 4.0, own EMA200) and a check set (the other range lengths / widths, K < 4); each idea judged at an
+equal 1-in-10 drawdown on both. `rb_diag.py` / `rb_hyp.py`: the filters (BTC 24h / vs EMA50, volume, breakout
+strength, ATR ratio, longs / shorts, day / 12h) are noise or disagree between the sets; fixed takes 2–8R, a chandelier,
+dc10 / dc50 and breakeven are worse. `rb_sim.py` (re-simulated exits, 99.9–100% = the label): the stop 2 ATR beats 1.5
+on both sets (x29 vs x20, check x6.3 vs x4.0; WR 32% vs 28%, a losing run of 28 vs 31), with half at +2R WR 41% and a
+run of 17 at about the same growth; the stop by close, 2.5 and 3 ATR disagree between the sets. Deployed: the stop 2 ATR
+(`rb_export.py` recomputes RBX_RESEARCH / RBX_RESEARCH_MONTHS and the backtest list); `t_rbx_e2e2.py` uses the bot's stop.
