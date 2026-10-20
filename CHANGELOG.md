@@ -20090,3 +20090,8 @@ v0.99.655 - 📈 Breakout: false breakouts (the user: "часто в стопа�
          stops 32% of trades instead of 42%, the longest losing run 13; on the check set x13 vs x11, the run 12 vs 18.
          ~2.7 trades a week instead of 3.7. A confirmation bar, a retest limit, other stops: worse. Stats, the
          backtest list and the Gate check redone.
+v0.99.656 - Zones: the live pullback signals list shows 15 and a "ещё 20" button (all of them were cut at 15). The
+         "🧪 Вход до зоны" hypotheses get stops sized on the way to the line (0.5 / 1 / 1.5 / 2 × the way, a fixed
+         take:stop) next to the % stops — the user asked whether "the price reached the line in 78% of posts" can be
+         traded: with a % stop the take is 1% away on one post and 15% on another. If such a variant is in plus on
+         the whole history and on its last third, the bot signals it as before.
