@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.651"
+APP_VERSION = "0.99.652"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -38954,7 +38954,13 @@ function emwPanel(ctx, box, cs, opt) {
   // v0.99.590 — user: "лейблы — непонятно, где тейк, стоп, а где EMA": each tag on the price scale
   // carries its name (SL / TP / вход / EMA28 …), the scale's own numbers are gone, the legend keeps
   // only the candles and the EMA lines
-  const axisW = Math.min(100, Math.max(70, Math.round(box.w * 0.27))), pw = box.w - axisW;
+  let axisW = Math.min(100, Math.max(70, Math.round(box.w * 0.27)));
+  if (opt.slimTags) {   // v0.99.652 — user: "лейблы занимают много места": the scale is as wide as its longest tag
+    ctx.font = 'bold 10px sans-serif';
+    const ws = (opt.hlines || []).filter(l => l.p != null && isFinite(l.p)).map(l => ctx.measureText((l.tag != null ? l.tag : '') + ' ' + fmtNum(l.p)).width);
+    axisW = Math.round(Math.min(90, Math.max(40, (ws.length ? Math.max(...ws) : 30) + 12)));
+  }
+  const pw = box.w - axisW;
   const okV = v => v != null && isFinite(v) && (!opt.log || v > 0);   // a log scale can't place <= 0
   if (!cs.length) { ctx.fillStyle = mut; ctx.font = '12px sans-serif'; ctx.fillText('нет свечей', box.x + 8, box.y + 20); return; }
   let lo = Infinity, hi = -Infinity;
@@ -39066,7 +39072,7 @@ function emwPanel(ctx, box, cs, opt) {
     if (!t_.off && Math.abs(t_.ty - t_.y) > 1) {   // pushed off its line: a short connector
       ctx.strokeStyle = t_.color; ctx.beginPath(); ctx.moveTo(box.x + pw - 6, t_.y); ctx.lineTo(x, t_.ty); ctx.stroke();
     }
-    let fs = 11;
+    let fs = opt.slimTags ? 10 : 11;
     const num = fmtNum(t_.p);
     ctx.font = `bold ${fs}px sans-serif`;
     const fullW = () => ctx.measureText(t_.name ? t_.name + ' ' + num : num).width;
@@ -39459,10 +39465,11 @@ function btDraw(bars, o) {
   const ei = bars.findIndex(b => b.time >= o.t);
   const xi = o.x ? bars.findIndex(b => b.time >= o.x - sec) : -1;
   const isL = o.d > 0;
-  const hl = [{p: o.e, color: '#ffffff', label: 'вход', width: 2, from: ei}, {p: o.sl, color: '#f87171', label: o.hs != null ? 'стоп (закр.)' : 'стоп', width: 2, from: ei}];
-  if (o.hs != null) hl.push({p: o.hs, color: '#b91c1c', label: 'авар. стоп', width: 1, from: ei});
-  if (o.tp != null) hl.push({p: o.tp, color: '#34d399', label: 'тейк', width: 2, from: ei});
+  const hl = [{p: o.e, color: '#ffffff', label: 'вход', tag: 'вх', width: 2, from: ei}, {p: o.sl, color: '#f87171', label: o.hs != null ? 'стоп (закр.)' : 'стоп', tag: 'SL', width: 2, from: ei}];
+  if (o.hs != null) hl.push({p: o.hs, color: '#b91c1c', label: 'авар. стоп', tag: 'ав', width: 1, from: ei});
+  if (o.tp != null) hl.push({p: o.tp, color: '#34d399', label: 'тейк', tag: 'TP', width: 2, from: ei});
   const zones = [], dots = [], series = [], legend = [{text: (BT_CH[o.c] || o.c) + ' свечи', color: '#a6b0c0'}, {text: isL ? 'лонг' : 'шорт', color: isL ? '#34d399' : '#f87171'}];
+  if (o.hs != null) legend.push({text: 'SL — по закрытию свечи · ав — аварийный', color: '#f87171'});
   if (ei >= 0) {
     zones.push({from: ei, to: xi >= 0 ? xi : bars.length - 1, p1: o.e, p2: o.sl, color: '#f87171'});
     if (o.tp != null) zones.push({from: ei, to: xi >= 0 ? xi : bars.length - 1, p1: o.e, p2: o.tp, color: '#34d399'});
@@ -39481,7 +39488,7 @@ function btDraw(bars, o) {
       (isL ? Math.min(...bars.slice(i - 20, i).map(x => x.low)) : Math.max(...bars.slice(i - 20, i).map(x => x.high)))), color: '#7fd1ff', width: 1.4});
     legend.push({text: `выход: ${isL ? 'минимум' : 'максимум'} 20 свечей`, color: '#7fd1ff'});
   }
-  emwPanel(ctx, {x: 4, y: 4, w: W - 4, h: H - 26}, bars, {dayFmt: sec < 86400, hlines: hl, zones, dots, series, legend, hi: ei});
+  emwPanel(ctx, {x: 4, y: 4, w: W - 4, h: H - 26}, bars, {dayFmt: sec < 86400, hlines: hl, zones, dots, series, legend, hi: ei, slimTags: true, padSlots: 1});
 }
 
 async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h, the trend exit or half at +2R

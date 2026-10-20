@@ -20062,3 +20062,6 @@ v0.99.651 - 🎯 Strong zones: the stop 1.0 daily ATR past the zone instead of 0
          study as the other modules — better on both sets at an equal drawdown, WR 43% instead of 39%, the longest
          losing run 18 instead of 31. Filters by side, chart, BTC and the coin's trend disagreed between the sets.
          Model ver 3 (the same trees, the rule and the yearly stats).
+v0.99.652 - Trade charts (backtest and live): the price tags on the right are as wide as their text (short names:
+         вх / SL / TP / ав) instead of a quarter of the screen, and the candles get the space — the user: "лейблы
+         занимают много места, лучше там график рисовать". A legend line explains SL (by the close) and ав (hard).
