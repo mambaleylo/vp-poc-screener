@@ -20109,3 +20109,9 @@ v0.99.658 - Zones: "ловить сам вынос" (the user: "я думал н
 v0.99.659 - Trade charts: "нет свечей" on older backtest trades — Gate keeps only the last ~9800 candles of a chart
          (1h ≈ 13 months). Such a trade is now drawn on Binance's 1h candles, marked 📒 (the backtests were computed on
          them; the 1000-coins scaled); when Binance does not answer — on Gate's 4h / day candles, marked ⚠️.
+v0.99.660 - Our zones (the user's TRX: a short zone below the price, filled at once): a zone of our finders (🎯
+         Сильные зоны, 🔎 наш поиск, поиск по результату) was made from the closed hour's candles; when the live price
+         had already crossed it within that hour, the "limit" on the wrong side of the price filled at once at the
+         market — a short into support. Now a zone is made only while the live price is still on its own side of the
+         first limit. Research (tools/zones_model zm_x*.py): entering on a visible reaction (a wick into the zone and
+         the close back out) is ~0R vs the ladder's +0.34R; faster stop / take pairs disagree between the sets.

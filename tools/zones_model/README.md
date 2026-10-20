@@ -30,3 +30,12 @@ replays the bot on the label grid, `zm_hyp.py <0.95|0.85>` judges ideas at an eq
 5% and a top-15% check set. Better on both: the stop 1.0 daily ATR past the zone (x12.0 vs x7.7, check x5.2 vs x4.7;
 WR 43% vs 39%, the longest losing run 18 vs 31). Not kept: longs / shorts only, one zone chart, BTC 24h / EMA50, the
 coin's EMA200 trend, other buffer / take pairs (disagree between the sets). `zm_export3.py` -> model ver 3.
+
+v0.99.660 — the user's audit ("стрелка вниз, а зона ниже стрелки", "от наших зон не видно реакции", "отработки
+крайне долгие"). `zm_x1.py`: on the history the price is already in / past the zone at the scan's next open in only
+~4% of candidates (the live case — a zone made from the closed hour while the live price had crossed it — is fixed
+in the bot by a live-price check at the creation). `zm_x2.py`: entering on the reaction (a 1h wick into the zone
+and the close back out, or a close back out after a dip; stop past the reaction / the far edge + 0.25–0.5 daily ATR,
+take 1.5–3R, 24 h–7 d) is ~0R a trade (+0.00…+0.05R) vs the ladder's +0.34R: our zones' edge is in the limits taken
+inside the move, not in a visible bounce. `zm_x3.py`: faster rules (stop 0.75 daily ATR, take 1.5–2R: median 45–55 h
+instead of 155 h) disagree between the sets (the bot's top 5% worse, the top 15% better) — the rule is kept.
