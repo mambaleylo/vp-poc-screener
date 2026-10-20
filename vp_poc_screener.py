@@ -28931,9 +28931,17 @@ def own_scan_once():
                 found.append((best["score"], sym, best))
     found.sort(key=lambda t: -t[0])
     made = 0
+    live = {}
+    for t in tick:
+        try:
+            live[t["contract"]] = float(t.get("last") or 0) or None
+        except (KeyError, TypeError, ValueError):
+            pass
     for score, sym, c in found:
         if made >= ZONES_OWN_MAX_ALERTS:
             break
+        if not zones_ahead_ok(live.get(sym), c["side"], c["lo"], c["hi"]):
+            continue
         with _zones_lock:
             dup = any(z.get("own") and z.get("symbol") == sym and z.get("status") in ("watch", "in_trade")
                       and own_matches({"lo": min(z["levels"]), "hi": max(z["levels"]), "side": z["side"]},
@@ -29698,9 +29706,12 @@ def oc_scan_once():
                 best[c["side"]] = (sc, c)
         found += [(sc, sym, c) for sc, c in best.values()]
     found.sort(key=lambda t: -t[0])
+    live = zones_live_prices() if found else {}
     for sc, sym, c in found:
         if made >= ZONES_OWN_MAX_ALERTS:
             break
+        if not zones_ahead_ok(live.get(sym), c["side"], c["lo"], c["hi"]):
+            continue
         with _zones_lock:   # v0.99.531 — one active zone per coin and side: one move must not stop a whole bunch
             dup = any(z.get("oc") and not z.get("zm") and z.get("symbol") == sym and z.get("side") == c["side"]
                       and z.get("status") in ("watch", "in_trade") for z in ZONES["zones"])
@@ -30003,6 +30014,33 @@ def _zm_closed(sym, tf, sec, n, now):
     return [c for c in cs if c["time"] + sec <= now][-n:]
 
 
+def zones_live_prices():
+    """v0.99.660 — {contract: last price} for the zone guard below ({} when the exchange does not answer)"""
+    out = {}
+    try:
+        for t in get_tickers() or []:
+            try:
+                out[t["contract"]] = float(t.get("last") or 0) or None
+            except (TypeError, ValueError):
+                pass
+    except Exception as e:
+        log_error(f"zones live prices: {e}")
+    return out
+
+
+def zones_ahead_ok(px, side, lo, hi):
+    """v0.99.660 — a new zone of our finders is made only while the live price is still on its own side of the first
+    limit (the user's TRX: a short zone made from the closed hour's candles while the price had already gone up through it
+    within the hour — the short "limit" below the price filled at once at the market, a short into support).
+    No price = no check."""
+    if not px:
+        return True
+    s = 1 if side == "long" else -1
+    near = hi if s > 0 else lo
+    l1 = near * (1 + s * ZONES_LIMIT_OFF / 100)
+    return s * (px - l1) > 0
+
+
 def zm_scan_once():
     """the liquid coins: the bot's zone candidates scored by the model; the best one per coin and side
     above the bar becomes a ladder (one active per coin and side)"""
@@ -30042,7 +30080,10 @@ def zm_scan_once():
                 best[c["side"]] = (sc, c)
         found += [(sc, sym, c, sf["datr"]) for sc, c in best.values()]
     found.sort(key=lambda t: -t[0])
+    live = zones_live_prices() if found else {}
     for sc, sym, c, datr in found:
+        if not zones_ahead_ok(live.get(sym), c["side"], c["lo"], c["hi"]):
+            continue
         with _zones_lock:
             act = [z for z in ZONES["zones"] if z.get("zm") and z.get("status") in ("watch", "in_trade")]
         dup = any(z.get("symbol") == sym and z.get("side") == c["side"] for z in act)
