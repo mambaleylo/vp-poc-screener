@@ -20115,3 +20115,10 @@ v0.99.660 - Our zones (the user's TRX: a short zone below the price, filled at o
          market — a short into support. Now a zone is made only while the live price is still on its own side of the
          first limit. Research (tools/zones_model zm_x*.py): entering on a visible reaction (a wick into the zone and
          the close back out) is ~0R vs the ladder's +0.34R; faster stop / take pairs disagree between the sets.
+v0.99.661 - Night round 2 (the user: "второй заход по всем индикаторам, новые гипотезы"). 📐 EMA: a third of the
+         position off at +1R and the stop to the entry, the take 4R (was 3R): on the bot's set x1234 vs x528 at an
+         equal drawdown, WR 68% vs 54%, losing trades 32% vs 46%, the longest losing run 10 vs 16; the check set x19.9
+         vs x18.8 (model ver 6; real trades: the share closed at market, the stop to the entry). 🧠 Neuro: out after
+         12 h instead of 24 h — x3.0 vs x1.9 and the check x9.7 vs x8.9, 2025–26 +0.14R a trade instead of +0.02R
+         (model ver 4). Checked and not kept: P/R partial takes (WR 84–93% but half the growth), P/R caps and entries
+         per hour, Neuro partials / takes / caps, EMA caps.

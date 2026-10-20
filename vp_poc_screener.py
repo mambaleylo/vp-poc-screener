@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.660"
+APP_VERSION = "0.99.661"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30172,7 +30172,7 @@ def zm_stats():
 # the price is watched every 30 s; the virtual record follows the 1h candles exactly as the research did.
 EMX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_ema_model.json")
 EMX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_ema_model.json"
-EMX_MODEL_VER = 5   # v0.99.645 — 5: + the BTC EMA50 filter (the research stats and the backtest list with it); v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
+EMX_MODEL_VER = 6   # v0.99.661 — 6: a third off at +1R (the stop to the fill), take 4R; v0.99.645 — 5: + the BTC EMA50 filter (the research stats and the backtest list with it); v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
 # v0.99.644 — 4: the same model, a new trading rule from the hypothesis study (tools/ema_model/ema_hyp*.py), better than
 # the old one on the bot's top 3% and on the top 10% check set at an equal drawdown: longs only (on shorts the score does
 # not rank: ~0R at every score), no entry when the price is >= 10 daily ATR above the daily EMA200 (those lost on both
@@ -30570,7 +30570,9 @@ def emx_fire(a, t_touch, live_px=None):
           "direction": direction, "entry": a["lv"], "sl": a["sl"], "tp": a["tp"], "score": a["score"], "t_in": int(t_touch),
           "hour": a["hour"], "until": int(a["hour"] + int(m.get("rule", {}).get("hold_h", 24)) * 3600), "hold": int(m.get("rule", {}).get("hold_h", 24)),
           "status": "OPEN", "result": None,
-          "r": None, "exit": None, "t_out": None, "real": False, "live_px": live_px, "sel": emx_coin_ok(a["symbol"]), "rv": EMX_MODEL_VER}
+          "r": None, "exit": None, "t_out": None, "real": False, "live_px": live_px, "sel": emx_coin_ok(a["symbol"]), "rv": EMX_MODEL_VER,
+          "px": live_px or a["lv"], "part_r": float(m.get("rule", {}).get("part_r") or 0), "part_f": float(m.get("rule", {}).get("part_f") or 0),
+          "part_done": False, "part": False}
     if AUTOTRADE_ENABLED_EMW and live_px and tr["sel"]:
         try:
             risk = MODULE_RISK_PCT.get("emw") or EMX_RISK_DEFAULT
@@ -30589,6 +30591,7 @@ def emx_fire(a, t_touch, live_px=None):
         pct = lambda p: (p - a["lv"]) / a["lv"] * 100
         send_telegram(f"{'🟢' if a['side'] > 0 else '🔴'} {a['symbol'].replace('_USDT', '')} {direction} · EMA {a['n']} ({EMX_TF_NAME[a['tf']]}) — касание\n"
                       f"вход {a['lv']:.6g} · стоп {a['sl']:.6g} ({pct(a['sl']):+.1f}%) · тейк {a['tp']:.6g} ({pct(a['tp']):+.1f}%) · держать до {int(m.get('rule', {}).get('hold_h', 24))} ч\n"
+                      + (f"на {a['lv'] + a['side'] * tr['part_r'] * abs(a['lv'] - a['sl']):.6g} закрыть {round(tr['part_f'] * 100)}% и стоп в безубыток\n" if tr["part_r"] else "") +
                       f"оценка модели {a['score']} · " + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"), category="emw")
 
 
@@ -30640,11 +30643,15 @@ def emx_settle(now=None):
             risk = abs(fill - sl) or 1e-12
             res = None
             hold = int(t.get("hold") or 24)   # v0.99.621 — the rule's hold (72 h since the far take), kept per trade
+            pr, pf = float(t.get("part_r") or 0), float(t.get("part_f") or 0)   # v0.99.661: the partial take
+            st, took = sl, False
             for k, c in enumerate(cs[:hold]):
-                if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
-                    gap = (c["open"] <= sl) if s > 0 else (c["open"] >= sl)
-                    res = ("LOSS", c["open"] if (gap and k > 0) else sl, k)
+                if (c["low"] <= st) if s > 0 else (c["high"] >= st):
+                    gap = (c["open"] <= st) if s > 0 else (c["open"] >= st)
+                    res = ("BREAKEVEN" if took else "LOSS", c["open"] if (gap and k > 0) else st, k)
                     break
+                if pr and k > 0 and not took and ((c["high"] - fill) if s > 0 else (fill - c["low"])) >= pr * risk:
+                    took, st = True, fill
                 if k > 0 and ((c["high"] >= tp) if s > 0 else (c["low"] <= tp)):
                     res = ("WIN", tp, k)
                     break
@@ -30653,19 +30660,52 @@ def emx_settle(now=None):
             if not res:
                 continue
             kind, ex, k = res
-            r = s * (ex - fill) / risk - (EMX_FEE + EMX_FUND * (k + 1) / 24) * fill / risk
+            rest = s * (ex - fill) / risk
+            r = ((pf * pr + (1 - pf) * rest) if took else rest) - (EMX_FEE + EMX_FUND * (k + 1) / 24) * fill / risk
             if kind == "TIME_EXIT" and t.get("real") and AUTOTRADE_ENABLED_EMW:
                 log_error(f"ema time exit {t['symbol']}: {close_position_for_mode('emw', t['symbol'], t['direction'])}")
             with _emx_lock:
-                t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + 3600), "r": round(r, 3)})
+                t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + 3600), "r": round(r, 3), "part": took})
             changed = True
             if t.get("sel", True):
-                notify_trade_result("emw", t["symbol"], t["direction"], fill, ex, kind, round(r, 3), real=bool(t.get("real")),
-                                    note=f"EMA {t['n']} ({EMX_TF_NAME[t['tf']]})")
+                notify_trade_result("emw", t["symbol"], t["direction"], fill, ex, "WIN" if r > 0 and kind == "BREAKEVEN" else kind, round(r, 3), real=bool(t.get("real")),
+                                    note=f"EMA {t['n']} ({EMX_TF_NAME[t['tf']]})" + (f" · {round(pf * 100)}% взято на +{pr:g}R" if took else ""))
         except Exception as e:
             log_error(f"ema trade {t.get('symbol')}: {e}")
     if changed:
         emx_save()
+
+
+def emx_part_tick():
+    """v0.99.661 — the partial take of the real EMA trades: from the hour after the touch (as the research), once the
+    price reached +part_r R from the level — the share off at market, the stop to the entry"""
+    now = time.time()
+    with _emx_lock:
+        todo = [t for t in _EMX["trades"] if t["status"] == "OPEN" and t.get("real") and t.get("part_r") and not t.get("part_done")
+                and now >= t["hour"] + 3600]
+    if not todo:
+        return
+    px = {}
+    for tk in get_tickers() or []:
+        try:
+            px[tk["contract"]] = float(tk.get("last") or 0)
+        except (TypeError, ValueError):
+            pass
+    for t in todo:
+        p = px.get(t["symbol"])
+        s, lvl = t["side"], t["entry"] + t["side"] * float(t["part_r"]) * abs(t["entry"] - t["sl"])
+        if not p or not ((p >= lvl) if s > 0 else (p <= lvl)):
+            continue
+        try:
+            note = part_take_on_exchange("emw", t, float(t["part_f"]))
+            with _emx_lock:
+                t["part_done"] = True
+            log_error(f"ema partial {t['symbol']}: {note} (at ~{p})")
+            if TELEGRAM_ALERTS_EMW and note != "no position":
+                send_telegram(f"📐 {t['symbol'].replace('_USDT', '')}: +{t['part_r']:g}R — {round(t['part_f'] * 100)}% закрыто, стоп в безубытке", category="emw")
+        except Exception as e:
+            log_error(f"ema partial {t['symbol']}: {e}")
+    emx_save()
 
 
 def emx_loop():
@@ -30684,6 +30724,8 @@ def emx_loop():
                     last_hour = h
                 with live_http():
                     emx_watch_tick()
+                    if AUTOTRADE_ENABLED_EMW:
+                        emx_part_tick()
         except Exception as e:
             log_error(f"emx_loop: {e}")
             with _emx_lock:
@@ -30715,7 +30757,7 @@ def emx_stats():
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
             "live_check": live_vs_bt("emx", [t["r"] for t in fin_all if t.get("rv") == EMX_MODEL_VER]),
-            "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "n", "t_in", "hour", "r", "result", "real", "sel", "entry", "sl", "tp", "exit", "t_out")}
+            "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "n", "t_in", "hour", "r", "result", "real", "sel", "entry", "sl", "tp", "exit", "t_out", "part", "part_r")}
                      for t in sorted(fin_all, key=lambda t: -t["t_in"])[:30]]}
 
 
@@ -30740,7 +30782,7 @@ def api_emx_status():
 # the 1h candles exactly as the research labels (stop first, then the take, the 12th close).
 NX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_neuro_model.json")
 NX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_neuro_model.json"
-NX_MODEL_VER = 3   # v0.99.623 — 2: take 3R, out after 48 h (the take sweep)
+NX_MODEL_VER = 4   # v0.99.623 — 2: take 3R, out after 48 h (the take sweep); v0.99.661 — 4: out after 12 h (better on both sets, 2025–26 +0.14R vs +0.02R)
 # v0.99.650 — 3: the same model, ADX < 30 (no entries into a strong trend), BTC's last hour not more than 1% against the
 # trade, out after 24 h — better on the bot's top 0.5% and a top-2% check set at an equal drawdown (tools/neuro_model/nx_hyp*.py);
 # the longest losing run 29 instead of 51. Neuro stays the weakest module: 2025–26 about 0R a trade.
@@ -31717,14 +31759,18 @@ def bt_gate_trade(mod, t):
         if not ((bars[0]["low"] <= e) if s > 0 else (bars[0]["high"] >= e)):
             return 0.0, False
         risk = abs(e - float(t["sl"])); sl = e - s * risk; tp = float(t["tp"])
+        pr = abs(float(t["pt"]) - e) / risk if t.get("pt") is not None else 0.0    # v0.99.661: a third at +1R
+        pf, took = 0.33, False
+        res = lambda ex, k: (((pf * pr + (1 - pf) * s * (ex - e) / risk) if took else s * (ex - e) / risk) - fee(e, k, 1) / risk, True)
         for k, c in enumerate(bars[:hold]):
             if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
-                ex = c["open"] if k and ((c["open"] <= sl) if s > 0 else (c["open"] >= sl)) else sl
-                return (s * (ex - e) - fee(e, k, 1)) / risk, True
+                return res(c["open"] if k and ((c["open"] <= sl) if s > 0 else (c["open"] >= sl)) else sl, k)
+            if pr and k and not took and ((c["high"] - e) if s > 0 else (e - c["low"])) >= pr * risk:
+                took = True; sl = e
             if k and ((c["high"] >= tp) if s > 0 else (c["low"] <= tp)):
-                return (s * (tp - e) - fee(e, k, 1)) / risk, True
+                return res(tp, k)
         k = min(hold, len(bars)) - 1
-        return (s * (bars[k]["close"] - e) - fee(e, k, 1)) / risk, True
+        return res(bars[k]["close"], k)
     hrs = 24 if t["c"] == "1d" else 12; sec = hrs * 3600; hold = RBX_CHARTS[t["c"]]["hold"]
     bars = bt_gate_bars(t["s"], t["c"], t["t"] - (RBX_DC + 4) * sec, min(int(time.time()), t["t"] + (hold + 1) * sec))
     bars = [c for c in bars if not c.get("forming")]
@@ -39889,7 +39935,7 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
     top += `<div class="zsub">Проверка на истории — каждый год модель не видела. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>сделка до <b>${Math.round((rule.hold_h || 24))} ч</b></span><span>просадка до <b>${dd}R</b></span></div>
-      <div class="zsub">Вход — на EMA, стоп — <b>${rule.stop_datr} дневного хода</b> монеты за EMA, тейк — <b>${rule.take_r} риска</b>. Не больше ${m.side_cap || 12} сделок в одну сторону.
+      <div class="zsub">Вход — на EMA, стоп — <b>${rule.stop_datr} дневного хода</b> монеты за EMA${rule.part_r ? `, на <b>+${rule.part_r}R закрыть ${Math.round(rule.part_f * 100)}%</b> и стоп в безубыток` : ''}, тейк — <b>${rule.take_r} риска</b>. Не больше ${m.side_cap || 12} сделок в одну сторону.
         ${m.sides ? `${m.sides.length === 1 && m.sides[0] === 1 ? 'Только лонги (на шортах модель не различает хорошие касания от плохих). ' : ''}Не входит, если цена уже дальше ${m.max_d_ema200} дневных ATR над EMA200 дня; касания на 4ч — только самые уверенные.${m.btc_ema50 ? ' Лонги — только пока BTC выше своей дневной EMA50.' : ''}` : ''}</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «EMA» в настройках риска (пусто = ${d.risk}%). Сделок много одновременно: просадка на истории до ${dd}R — держите риск маленьким.</div>`}`;
     const sl = d.sel || {}, cr = sl.rule || {}, rsl = sl.research || {};
@@ -40134,7 +40180,8 @@ function btFromRbx(t) {   // a live 📈 trade -> the chart's trade
           pt: t.part && t.risk ? e + t.side * (t.part_r || 1) * t.risk : null};
 }
 function btFromEmx(t) {   // v0.99.644 — a live EMA trade -> the chart's trade (shown on 1h candles)
-  return {mod: 'emx', s: t.symbol, d: t.side, c: '1h', tf: t.tf, n: t.n, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+  return {mod: 'emx', s: t.symbol, d: t.side, c: '1h', tf: t.tf, n: t.n, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true,
+          pt: t.part_r && t.entry != null && t.sl != null ? t.entry + t.side * t.part_r * Math.abs(t.entry - t.sl) : null};
 }
 function btFromCas(t) {   // v0.99.653 — a live 🌊 trade -> the chart's trade
   const e = t.entry != null ? t.entry : t.px;

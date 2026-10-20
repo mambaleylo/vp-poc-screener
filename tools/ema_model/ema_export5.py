@@ -1,0 +1,65 @@
+"""EMA v6 (v0.99.661): the deployed rule + a partial take (the night round, ema_x.py): a third of the position off at
++1R, the stop of the rest to the fill, the take 4R (was 3R) — on the bot's set x1234 vs x528 at an equal drawdown,
+WR 68% vs 54%, losing trades 32% vs 46%, the longest losing run 10 vs 16; the check set (q 0.90) x19.9 vs x18.8.
+Writes the model ver 6 (rule + yearly stats) and the backtest trades ("emx")."""
+import json, numpy as np, pandas as pd
+import ema_h as E
+from mk import ts
+from bt_trades import gate_sym
+d = E.d
+SIDES, MAX_E200, MARGIN4H, STOP, TAKE, HOLD, PA, PF = (1,), 10.0, 0.1, 0.75, 4.0, 72, 1.0, 0.33
+def sim(O, H, L, C, j, side, fill, datr):
+    n = len(C); risk = fill * STOP * datr / 100
+    stop = fill - side * risk; tp = fill + side * TAKE * risk; pt = fill + side * PA * risk; took = False
+    e = min(n, j + HOLD); k = e - 1 - j; ex = C[e - 1]; kind = "time"
+    for q in range(e - j):
+        b = j + q
+        if (side > 0 and L[b] <= stop) or (side < 0 and H[b] >= stop):
+            gap = (side > 0 and O[b] <= stop) or (side < 0 and O[b] >= stop)
+            ex = O[b] if (gap and q > 0) else stop; k = q; kind = "be" if took else "stop"; break
+        if q > 0 and not took and ((side > 0 and H[b] >= pt) or (side < 0 and L[b] <= pt)):
+            took = True; stop = fill
+        if q > 0 and ((side > 0 and H[b] >= tp) or (side < 0 and L[b] <= tp)):
+            ex = tp; k = q; kind = "take"; break
+    fee = (0.001 + 0.0003 * (k + 1) / 24) * fill / risk
+    rest = side * (ex - fill) / risk
+    return ((PF * PA + (1 - PF) * rest) if took else rest) - fee, k + 1, kind, ex, took
+side, tf, e200 = d.side.values, d.tf_s.values, d.s_d_ema200.values
+thr = np.array([E.THR[y][0.97] if y in E.THR else np.inf for y in E.YR]); rel = E.SC - thr
+bema = pd.read_parquet(f"{E.D}/er_all.parquet", columns=["s_b_ema50"]).s_b_ema50.values
+mask = np.isin(side, SIDES) & (e200 < MAX_E200) & ((tf != "4h") | (rel >= MARGIN4H)) & (bema > 0)
+idx = E.cand(0.97, mask)
+R = np.full(len(d), np.nan); K = np.zeros(len(d), np.int64); INFO = {}
+for i in idx:
+    O, H, L, C = E.bars(d.sym.values[i])
+    r, k, kind, ex, took = sim(O, H, L, C, int(d.j.values[i]), int(side[i]), float(d.lv.values[i]), float(d.datr.values[i]))
+    R[i], K[i] = r, k; INFO[i] = (kind, ex, took)
+tr = E.replay(idx, R, K)
+years = {}
+for Y in (2022, 2023, 2024, 2025):
+    m = E.YR[tr] == Y; rs = R[tr[m]]
+    o = tr[m][np.argsort(E.T[tr[m]] + K[tr[m]] * 3600)]; c = np.cumsum(R[o])
+    dd = float(np.max(np.maximum.accumulate(np.r_[0, c]) - np.r_[0, c]))
+    wk = ((ts(Y + 1) if Y < 2025 else ts(2026, 10)) - ts(Y)) / 604800
+    years[str(Y)] = {"n": int(m.sum()), "avg": round(float(rs.mean()), 3), "wk": round(float(m.sum() / wk), 1), "sum": round(float(rs.sum()), 1),
+                     "dd": round(dd, 1), "wr": round(float((rs > 0).mean() * 100), 1)}
+    print(Y, years[str(Y)], flush=True)
+o_all = tr[np.argsort(E.T[tr] + K[tr] * 3600)]; run = mx = 0
+for i in o_all: run = run + 1 if R[i] < 0 else 0; mx = max(mx, run)
+out = []
+for i in tr:
+    kind, ex, took = INFO[i]; s = int(side[i]); fill = float(d.lv.values[i])
+    risk = fill * STOP * float(d.datr.values[i]) / 100
+    gs, sc = gate_sym(d.sym.values[i])
+    out.append({"s": gs, "d": s, "c": "1h", "tf": str(tf[i]), "n": int(d.n_i.values[i]), "t": int(E.T[i]), "e": round(fill / sc, 10),
+                "sl": round((fill - s * risk) / sc, 10), "tp": round((fill + s * TAKE * risk) / sc, 10), "pt": round((fill + s * PA * risk) / sc, 10),
+                "x": int(E.T[i] + K[i] * 3600), "xp": round(float(ex) / sc, 10), "r": round(float(R[i]), 3), "k": kind, "part": bool(took)})
+json.dump(out, open("emx_bt_v661.json", "w"), separators=(",", ":"))
+m = json.load(open("/home/user/vp-poc-screener/vp_ema_model.json"))
+m.update({"ver": 6, "rule": {"stop_datr": STOP, "take_r": TAKE, "hold_h": HOLD, "part_r": PA, "part_f": PF}})
+m["research"]["years"] = years; m["research"]["max_losing_streak"] = mx
+m["research"]["filters"] = "лонги при BTC выше EMA50 дня, цена < 10 дн. ATR над EMA200 дня, 4ч с запасом +0.1; 1/3 на +1R → безубыток, тейк 4R"
+json.dump(m, open("vp_ema_model_v6.json", "w"), separators=(",", ":"))
+r = R[tr]
+from collections import Counter
+print("trades", len(out), "avg", round(float(r.mean()), 3), "wr", round(float((r > 0).mean()) * 100, 1), "streak", mx, Counter(t["k"] for t in out))
