@@ -20065,3 +20065,12 @@ v0.99.651 - 🎯 Strong zones: the stop 1.0 daily ATR past the zone instead of 0
 v0.99.652 - Trade charts (backtest and live): the price tags on the right are as wide as their text (short names:
          вх / SL / TP / ав) instead of a quarter of the screen, and the candles get the space — the user: "лейблы
          занимают много места, лучше там график рисовать". A legend line explains SL (by the close) and ав (hard).
+v0.99.653 - New tab 🌊 Каскад — the user's idea: a close through the whole EMA cascade (EMA 5/10/14/20/28, 1h),
+         "pump → fade → break down" and "break up → fall back". On 127 Binance coins 2020–26 the cross itself loses
+         (−0.03…−0.08R a trade every year), so a model (context of the cross + the 89 Neuro features) takes the best
+         0.5% per side: stop at the 24-bar swing ± 0.2 ATR, take 2R, out after 48 h. On the years it never saw:
+         2022 +0.34R, 2023 +0.25R, 2024 +0.83R, 2025–26 +0.39R a trade, ~1.6 a week, WR 56% (another seed +0.40R).
+         The user's "break up and fall back" shorts are its best kind (+0.74R). Months nearly independent of P/R:
+         P/R 4% + cascade 1% grew x95 vs x26 for P/R alone at the same drawdown. Hourly scan, virtual trades, real
+         trades behind their own switch (risk field 🌊, default 0.5%), Telegram, backtest list with the five EMAs on
+         the chart, the live-vs-backtest check and the Gate re-walk. Model vp_cas_model.json ver 1 (tools/cascade).

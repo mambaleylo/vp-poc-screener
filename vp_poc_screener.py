@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.652"
+APP_VERSION = "0.99.653"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1152,6 +1152,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_mirror", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "auto_risk_enabled",
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones", "risk_pct_zm", "risk_pct_rbx", "rbx_enabled", "autotrade_rbx", "telegram_alerts_rbx", "rbx_half",
+                  "cas_enabled", "autotrade_cas", "telegram_alerts_cas", "risk_pct_cas",   # v0.99.653
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
@@ -1232,6 +1233,7 @@ def get_settings():
         "risk_pct_zm": MODULE_RISK_PCT.get("zm"),   # v0.99.616
         "risk_pct_rbx": MODULE_RISK_PCT.get("rbx"), "rbx_enabled": RBX_ENABLED, "autotrade_rbx": AUTOTRADE_ENABLED_RBX,   # v0.99.625
         "telegram_alerts_rbx": TELEGRAM_ALERTS_RBX, "rbx_half": RBX_HALF,
+        "cas_enabled": CAS_ENABLED, "autotrade_cas": AUTOTRADE_ENABLED_CAS, "telegram_alerts_cas": TELEGRAM_ALERTS_CAS, "risk_pct_cas": MODULE_RISK_PCT.get("cas"),   # v0.99.653
         "autotrade_zones": AUTOTRADE_ENABLED_ZONES,
         "autotrade_zones_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
         "zones_own_scan": ZONES_OWN_SCAN, "autotrade_zones_own": AUTOTRADE_ENABLED_ZONES_OWN,   # v0.99.452
@@ -1512,7 +1514,8 @@ def apply_settings(updates):
         globals()["TELEGRAM_TRADE_RESULTS_REAL_ONLY"] = bool(updates["telegram_trade_results_real_only"])
     if "auto_update" in updates:   # v0.99.637
         globals()["AUTO_UPDATE"] = bool(updates["auto_update"])
-    for _k, _g in (("rbx_enabled", "RBX_ENABLED"), ("autotrade_rbx", "AUTOTRADE_ENABLED_RBX"), ("telegram_alerts_rbx", "TELEGRAM_ALERTS_RBX"), ("rbx_half", "RBX_HALF")):   # v0.99.625
+    for _k, _g in (("rbx_enabled", "RBX_ENABLED"), ("autotrade_rbx", "AUTOTRADE_ENABLED_RBX"), ("telegram_alerts_rbx", "TELEGRAM_ALERTS_RBX"), ("rbx_half", "RBX_HALF"),
+                   ("cas_enabled", "CAS_ENABLED"), ("autotrade_cas", "AUTOTRADE_ENABLED_CAS"), ("telegram_alerts_cas", "TELEGRAM_ALERTS_CAS")):   # v0.99.625, v0.99.653
         if _k in updates:
             globals()[_g] = bool(updates[_k])
     if "zones_zm_enabled" in updates:   # v0.99.616
@@ -1544,7 +1547,7 @@ def apply_settings(updates):
             globals()[_g] = bool(updates[_k])
     if updates.get("emw_enabled"):
         EMW_BACKTEST_TRIGGER.set()
-    for _mod in ("neuro", "snr", "prv", "zones", "emw", "zm", "rbx"):   # v0.99.435 — own risk % per module; empty / 0 = the common one
+    for _mod in ("neuro", "snr", "prv", "zones", "emw", "zm", "rbx", "cas"):   # v0.99.435 — own risk % per module; empty / 0 = the common one
         _key = f"risk_pct_{_mod}"
         if _key in updates:
             try:
@@ -7529,6 +7532,7 @@ LOOP_MAX_GAP_SEC = {
     "snr_live_loop": 60 * 60,
     "prx_loop": 60 * 60,   # v0.99.624 — Peak Reversal v2
     "rbx_loop": 3 * 3600,   # v0.99.625 — once a day, beats every minute
+    "cas_loop": 60 * 60,   # v0.99.653 — 🌊 EMA cascade
     "hdg_loop": 10 * 60,   # v0.99.628 — 🪞 hedge mirror, beats every 5 s
     "auto_update_loop": 30 * 60,   # v0.99.637 — beats every 10 min
     "emx_loop": 60 * 60,   # v0.99.618 — «EMA — касания» (the W/M loops no longer run); v0.99.619 — 15 -> 60 min, the hourly levels of 120 coins take longer on the phone (it beats per coin too)
@@ -7545,7 +7549,7 @@ LOOP_MAX_GAP_SEC = {
 LOOP_LABELS = {
     "scan_loop": "Volume скан", "msnr_live_loop": "MSNR живой скан",
     "lsw_live_loop": "Sweep живой скан", "snr_live_loop": "S/R живой скан",
-    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "hdg_loop": "🪞 Хедж", "auto_update_loop": "автообновление", "nx_loop": "Нейро",
+    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "cas_loop": "🌊 Каскад", "hdg_loop": "🪞 Хедж", "auto_update_loop": "автообновление", "nx_loop": "Нейро",
     "reconcile_loop": "сверка позиций (автоторговля)",
     "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
     "snr_backtest_loop": "S/R бэктест",
@@ -9166,7 +9170,7 @@ def kelly_risk(pairs):
             "auto_risk_n": n, "auto_risk_avg_r": round(mean, 3), "auto_risk_cautious_r": round(mean - se, 3)}
 
 
-MODULE_RISK_PCT = {"neuro": None, "snr": None, "prv": None, "zones": None, "emw": None, "zm": None, "rbx": None}   # v0.99.435 — own risk % per module (None = the common one)
+MODULE_RISK_PCT = {"neuro": None, "snr": None, "prv": None, "zones": None, "emw": None, "zm": None, "rbx": None, "cas": None}   # v0.99.435 — own risk % per module (None = the common one)
 RISK_PCT_MAX = 100.0   # v0.99.435 — user: "не ограничивай 50%"
 
 
@@ -26126,7 +26130,7 @@ def _zones_outbox_save():
 
 TELEGRAM_ALERTS_TRADE_RESULTS = os.environ.get("VP_TG_TRADE_RESULTS", "1") == "1"            # v0.99.457
 TELEGRAM_TRADE_RESULTS_REAL_ONLY = os.environ.get("VP_TG_TRADE_RESULTS_REAL", "0") == "1"
-_TRADE_MOD_NAMES = {"rbx": "📈 Пробой", "zones_zm": "🎯 Сильные зоны", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "zones": "Зоны",
+_TRADE_MOD_NAMES = {"rbx": "📈 Пробой", "cas": "🌊 Каскад", "zones_zm": "🎯 Сильные зоны", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "zones": "Зоны",
                     "zones_own": "Зоны · 🔎 наш поиск", "zones_appr": "Зоны · движение к зоне", "zones_pb": "Зоны · 🧪 откат"}
 
 
@@ -31391,7 +31395,8 @@ def model_refresh_once():
     for name, fn, url, ver, lock, st in (("🎯 Сильные зоны", ZM_MODEL_FILE, ZM_MODEL_URL, ZM_MODEL_VER, _zm_lock, _ZM),
                                          ("📐 EMA", EMX_MODEL_FILE, EMX_MODEL_URL, EMX_MODEL_VER, _emx_lock, _EMX),
                                          ("🧠 Нейро", NX_MODEL_FILE, NX_MODEL_URL, NX_MODEL_VER, _nx_lock, _NX),
-                                         ("P/R", PRX_MODEL_FILE, PRX_MODEL_URL, PRX_MODEL_VER, _prx_lock, _PRX)):
+                                         ("P/R", PRX_MODEL_FILE, PRX_MODEL_URL, PRX_MODEL_VER, _prx_lock, _PRX),
+                                         ("🌊 Каскад", CAS_MODEL_FILE, CAS_MODEL_URL, CAS_MODEL_VER, _cas_lock, _CAS)):
         try:
             local = 0
             if os.path.exists(fn):
@@ -31510,6 +31515,19 @@ def bt_gate_trade(mod, t):
     """(R on Gate, filled) for one backtest trade, or None without Gate data"""
     s = int(t["d"]); e_b = float(t["e"])
     fee = lambda e, k, hrs: e * PRX_FEE + e * PRX_FUND * (k + 1) * hrs / 24
+    if mod == "cas":     # v0.99.653 — 🌊 the swing stop (a share of the entry) on touch, the take 2R, 48 bars
+        bars = [c for c in bt_gate_bars(t["s"], "1h", t["t"], t["t"] + 49 * 3600) if c["time"] >= t["t"]]
+        if len(bars) < 2 or bars[0]["time"] != t["t"]:
+            return None
+        e = bars[0]["open"]; risk = e * abs(e_b - float(t["sl"])) / e_b; sl = e - s * risk; tp = e + s * 2.0 * risk
+        for k, c in enumerate(bars[:48]):
+            if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
+                ex = c["open"] if k and ((c["open"] <= sl) if s > 0 else (c["open"] >= sl)) else sl
+                return (s * (ex - e) - fee(e, k, 1)) / risk, True
+            if (c["high"] >= tp) if s > 0 else (c["low"] <= tp):
+                return (s * (tp - e) - fee(e, k, 1)) / risk, True
+        k = min(48, len(bars)) - 1
+        return (s * (bars[k]["close"] - e) - fee(e, k, 1)) / risk, True
     if mod in ("prv", "emx"):
         hold = 48 if mod == "prv" else 72
         bars = [c for c in bt_gate_bars(t["s"], "1h", t["t"], t["t"] + (hold + 1) * 3600) if c["time"] >= t["t"]]
@@ -31598,7 +31616,7 @@ def bt_gate_check(mod, months=12):
 @app.route("/api/bt/gatecheck", methods=["GET", "POST"])
 def api_bt_gatecheck():
     mod = request.args.get("mod", "prv")
-    if mod not in ("prv", "emx", "rbx"):
+    if mod not in ("prv", "emx", "rbx", "cas"):
         return jsonify({"err": "модуль?"})
     with _btg_lock:
         st = dict(_BTG.get(mod) or {})
@@ -31892,6 +31910,344 @@ def api_prx_status():
         return jsonify(prx_stats())
     except Exception as e:
         log_error(f"prx status: {e}")
+        return jsonify({"err": f"статистика не посчиталась: {e}"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v0.99.653 — 🌊 EMA cascade (the user: "индикатор на пробой каскада ема… сначала выше ема, потом затухание роста и
+# пробой… пробой снизу вверх и отбой обратно"). The cascade = EMA 5/10/14/20/28 on 1h; the event = a close through the
+# WHOLE cascade (above the highest EMA = a long, below the lowest = a short). On Binance history of 127 coins 2020–2026
+# (tools/cascade) the cross itself is worth nothing (−0.03…−0.08R a trade every year, the shorts' small plus is just the
+# 2022 bear market), so — like P/R — a model picks the best 0.5% per side from the cross's context (the 48-bar range,
+# the ribbon's order before it, bars since the opposite cross, the excursion past the cascade, BTC) + the 89 Neuro
+# features. Stop at the 24-bar swing extreme ± 0.2 ATR, take 2R, out after 48 bars: on the years the model never saw
+# 2022 +0.34R, 2023 +0.25R, 2024 +0.83R, 2025–26 +0.39R a trade, ~1.6 a week, WR 56%. The user's "break up and fall
+# back" short (an up-cross ≤ 6 bars before) is the model's best kind (+0.74R, WR 66%). Monthly correlation with P/R
+# +0.26: P/R 4% + cascade 1% gave x95 at the same 1-in-10 drawdown as P/R 4% alone (x26).
+CAS_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_cas_model.json")
+CAS_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_cas_model.json"
+CAS_MODEL_VER = 1
+CAS_EMAS = (5, 10, 14, 20, 28)
+CAS_CTX_NAMES = ["rng", "prior", "since_opp", "exc", "move24", "width", "b24", "atrp"]
+CAS_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_cas_state.json")
+CAS_TOP = int(os.environ.get("VP_CAS_TOP", "120"))
+CAS_RISK_DEFAULT = 0.5
+CAS_ENABLED = os.environ.get("VP_CAS", "1") == "1"
+AUTOTRADE_ENABLED_CAS = os.environ.get("VP_AUTOTRADE_CAS", "0") == "1"
+TELEGRAM_ALERTS_CAS = os.environ.get("VP_TG_ALERTS_CAS", "1") == "1"
+_CAS = {"model": None, "err": None, "trades": [], "loaded": False, "scan": None, "last": []}
+_cas_lock = threading.Lock()
+
+
+def cas_event(cs, btc, t_hour):
+    """the cascade cross of the last closed 1h bar (the research's cas_ev.py): (side, the 8 context features, atr,
+    the stop level) or None"""
+    n = len(cs); i = n - 1
+    if n < 300:
+        return None
+    H = [c["high"] for c in cs]; L = [c["low"] for c in cs]; C = [c["close"] for c in cs]
+    E = [rbx_ema(C, k) for k in CAS_EMAS]
+    TOP = [max(e[j] for e in E) for j in range(n)]
+    BOT = [min(e[j] for e in E) for j in range(n)]
+    up = lambda j: C[j] > TOP[j] and C[j - 1] <= TOP[j - 1]
+    dn = lambda j: C[j] < BOT[j] and C[j - 1] >= BOT[j - 1]
+    if up(i):
+        s = 1
+    elif dn(i):
+        s = -1
+    else:
+        return None
+    a = _nx_wilder(_nx_tr(H, L, C), 14)[i]
+    if not a:
+        return None
+    w = range(i - 48, i)
+    # the ribbon ordered the other way (a long: EMA5 < 10 < 14 < 20 < 28 = bearish) on the 48 bars before
+    order = lambda j, sg: all(sg * (E[k][j] - E[k + 1][j]) > 0 for k in range(len(CAS_EMAS) - 1))
+    prior = sum(1 for j in w if order(j, -s))
+    opp = dn if s > 0 else up
+    since = next((i - j for j in range(i - 1, max(1, i - 999), -1) if opp(j)), 999)
+    exc = max((TOP[j] - L[j]) if s > 0 else (H[j] - BOT[j]) for j in w) / a
+    # BTC: the research took the bar that closed an hour before the coin's (searchsorted - 1) — kept as the model saw it
+    bt = {c["time"] + 3600: k for k, c in enumerate(btc or [])}
+    j = bt.get(t_hour - 3600)
+    b24 = s * (btc[j]["close"] / btc[j - 24]["close"] - 1) * 100 if j is not None and j >= 24 else 0.0
+    f = [(max(H[k] for k in w) - min(L[k] for k in w)) / a, float(prior), float(min(since, 999)), exc,
+         s * (C[i] - C[i - 24]) / a, (TOP[i] - BOT[i]) / a, b24, a / C[i] * 100]
+    lo, hi = min(L[i - 23:i + 1]), max(H[i - 23:i + 1])
+    stop = (lo - 0.2 * a) if s > 0 else (hi + 0.2 * a)
+    return s, f, a, stop
+
+
+def cas_model():
+    with _cas_lock:
+        m = _CAS["model"]
+    if m and m.get("ver") == CAS_MODEL_VER:
+        return m
+    m = None
+    try:
+        if os.path.exists(CAS_MODEL_FILE):
+            with open(CAS_MODEL_FILE) as f:
+                m = json.load(f)
+            if m.get("ver") != CAS_MODEL_VER or m.get("feats") != CAS_CTX_NAMES + NX_NAMES:
+                m = None
+    except Exception as e:
+        log_error(f"cascade model read: {e}")
+        m = None
+    if not m:
+        try:
+            r = requests.get(CAS_MODEL_URL.format(ref="main"), params={"nocache": int(time.time())}, timeout=120)
+            r.raise_for_status()
+            m = r.json()
+            if m.get("ver") != CAS_MODEL_VER or not m.get("models"):
+                raise RuntimeError(f"версия модели {m.get('ver')} вместо {CAS_MODEL_VER}")
+            if m.get("feats") != CAS_CTX_NAMES + NX_NAMES:
+                raise RuntimeError("признаки модели не совпадают с кодом бота — нужно обновить бота")
+            tmp = CAS_MODEL_FILE + ".new"
+            with open(tmp, "w") as f:
+                json.dump(m, f, separators=(",", ":"))
+            os.replace(tmp, CAS_MODEL_FILE)
+        except Exception as e:
+            with _cas_lock:
+                _CAS["err"] = f"модель не скачалась: {e}"
+            log_error(f"cascade model download: {e}")
+            return None
+    with _cas_lock:
+        _CAS.update({"model": m, "err": None})
+    return m
+
+
+def cas_load():
+    try:
+        if os.path.exists(CAS_STATE_FILE):
+            with open(CAS_STATE_FILE) as f:
+                d = json.load(f)
+            with _cas_lock:
+                _CAS["trades"] = d.get("trades") or []
+                _CAS["scan"] = d.get("scan")
+                _CAS["last"] = d.get("last") or []
+    except Exception as e:
+        log_error(f"cascade state load: {e}")
+    _CAS["loaded"] = True
+
+
+def cas_save():
+    try:
+        with _cas_lock:
+            data = json.dumps({"trades": _CAS["trades"][-800:], "scan": _CAS["scan"], "last": _CAS["last"]})
+        tmp = CAS_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(data)
+        os.replace(tmp, CAS_STATE_FILE)
+    except Exception as e:
+        log_error(f"cascade state save: {e}")
+
+
+def cas_coin_event(sym, now, ref, t_hour):
+    """the coin's cascade cross of the bar that closed at t_hour: (side, feature row, atr, stop, close) or None"""
+    h1 = _zm_closed(sym, "1h", 3600, 1000, now)
+    if len(h1) < 400 or h1[-1]["time"] + 3600 != t_hour:
+        return None
+    ev = cas_event(h1, ref["btc"], t_hour)
+    if not ev:
+        return None
+    h4 = _zm_closed(sym, "4h", 4 * 3600, 1000, now)
+    d1 = _zm_closed(sym, "1d", 86400, 3000, now)
+    row = nx_series(h1, h4, d1, emw_bars(d1, "1w"), ref["btc"], ref["eth"], _nx_funding(sym, now), start=len(h1) - 1)[-1]
+    if row is None:
+        return None
+    s, f, a, stop = ev
+    return s, f + row, a, stop, h1[-1]["close"]
+
+
+def cas_scan_once():
+    m = cas_model()
+    if not m:
+        return
+    now = time.time()
+    t_hour = int(now // 3600 * 3600)
+    ref = {"btc": _zm_closed("BTC_USDT", "1h", 3600, 1000, now), "eth": _zm_closed("ETH_USDT", "1h", 3600, 1000, now)}
+    cands, coins, events, best = [], 0, 0, []
+    for sym in _own_top_syms(CAS_TOP):
+        heartbeat("cas_loop")
+        try:
+            ev = cas_coin_event(sym, now, ref, t_hour)
+            coins += 1
+            if not ev:
+                continue
+            s, x, atr, stop, px = ev
+            events += 1
+            ms = m["models"][str(s)]
+            sc = sum(zm_tree_pred(t_, x) for t_ in ms) / len(ms)
+            thr = m["thr"][str(s)]
+            best.append((sc / thr if thr > 0 else 0.0, sym, s, round(sc, 3)))
+            if sc >= thr:
+                cands.append({"symbol": sym, "side": s, "score": round(sc, 3), "atr": atr, "stop": stop, "px": px})
+        except Exception as e:
+            log_error(f"cascade scan {sym}: {e}")
+    best.sort(reverse=True)
+    live = {}
+    if cands:
+        for t in get_tickers() or []:
+            try:
+                live[t["contract"]] = float(t.get("last") or 0) or None
+            except (TypeError, ValueError):
+                pass
+    opened, cap = 0, int(m.get("side_cap") or 12)
+    for c in sorted(cands, key=lambda c: -c["score"]):
+        with _cas_lock:
+            opn = [t for t in _CAS["trades"] if t["status"] == "OPEN"]
+        if any(t["symbol"] == c["symbol"] and t["side"] == c["side"] for t in opn) or sum(1 for t in opn if t["side"] == c["side"]) >= cap:
+            continue
+        if cas_open(m, c, t_hour, live.get(c["symbol"])):
+            opened += 1
+    with _cas_lock:
+        _CAS["scan"] = {"t": int(now), "hour": t_hour, "coins": coins, "events": events, "signals": len(cands), "opened": opened}
+        _CAS["last"] = [{"symbol": b[1], "side": b[2], "score": b[3], "pct": round(100 * b[0])} for b in best[:8]]
+    cas_save()
+
+
+def cas_open(m, c, t_hour, live_px=None):
+    rule = m["rule"]
+    s, sym = c["side"], c["symbol"]
+    direction = "LONG" if s > 0 else "SHORT"
+    px = live_px or c["px"]
+    sl = c["stop"]
+    risk = s * (px - sl)
+    if risk <= px * float(rule.get("min_risk_pct", 0.2)) / 100:     # the price already at / past the swing stop
+        return False
+    tp = px + s * float(rule["take_r"]) * risk
+    hold = int(rule["hold_bars"])
+    tr = {"id": f"cas_{sym}_{s}_{t_hour}", "symbol": sym, "side": s, "tf": 1, "direction": direction, "hour": t_hour,
+          "score": c["score"], "risk": risk, "entry": None, "sl": sl, "tp": tp, "px": px, "hold": hold, "take_r": float(rule["take_r"]),
+          "until": t_hour + hold * 3600, "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False,
+          "rv": CAS_MODEL_VER}
+    if AUTOTRADE_ENABLED_CAS and live_px:
+        try:
+            res = execute_autotrade("cas", sym, direction, live_px, sl, tp, extra={"каскад": f"оценка {c['score']}"},
+                                    risk_pct_override=MODULE_RISK_PCT.get("cas") or CAS_RISK_DEFAULT)
+            tr["real"] = (res or {}).get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+            tr["autotrade"] = {"status": (res or {}).get("status"), "detail": str((res or {}).get("detail") or "")[:200]}
+        except Exception as e:
+            log_error(f"cascade autotrade {sym}: {e}")
+    with _cas_lock:
+        if any(t["id"] == tr["id"] for t in _CAS["trades"]):
+            return False
+        _CAS["trades"].append(tr)
+    if TELEGRAM_ALERTS_CAS:
+        pct = lambda p: (p - px) / px * 100
+        send_telegram(f"{'🟢' if s > 0 else '🔴'} {sym.replace('_USDT', '')} {direction} · 🌊 Каскад EMA (1ч)\n"
+                      f"вход по рынку ~{px:.6g} · стоп {sl:.6g} ({pct(sl):+.1f}%) · тейк {tp:.6g} ({pct(tp):+.1f}%) · держать до {hold} ч\n"
+                      f"оценка модели {c['score']} · " + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"), category="cas")
+    return True
+
+
+def cas_settle(now=None):
+    """the open trades on closed 1h candles exactly as the research labels: entry at the signal's next bar open, the
+    swing stop first (a gap through it fills at the open), then the take 2R of that entry's risk, out at the close of
+    the 48th bar; fees and funding"""
+    now = now or time.time()
+    changed = False
+    with _cas_lock:
+        opn = [t for t in _CAS["trades"] if t["status"] == "OPEN"]
+    for t in opn:
+        try:
+            cs = [c for c in (get_candles_range(t["symbol"], "1h", t["hour"], int(now)) or [])
+                  if c["time"] + 3600 <= now and c["time"] >= t["hour"]]
+            if not cs or cs[0]["time"] != t["hour"]:
+                if now > t["until"] + 6 * 3600:
+                    with _cas_lock:
+                        t.update({"status": "CLOSED", "result": "NO_DATA", "r": None, "t_out": int(now)})
+                    changed = True
+                continue
+            s, hold, sl = t["side"], int(t["hold"]), t["sl"]
+            if t.get("entry") is None:
+                e = cs[0]["open"]; risk = s * (e - sl)
+                with _cas_lock:
+                    if risk <= e * 0.002:      # opened through the stop: the research had no such trade
+                        t.update({"status": "CLOSED", "result": "NO_TRADE", "entry": e, "r": None, "t_out": int(cs[0]["time"] + 3600)})
+                    else:
+                        t.update({"entry": e, "risk": risk, "tp": e + s * t["take_r"] * risk})
+                changed = True
+                if risk <= e * 0.002:
+                    if t.get("real") and AUTOTRADE_ENABLED_CAS:
+                        log_error(f"cascade no-trade {t['symbol']}: {close_position_for_mode('cas', t['symbol'], t['direction'])}")
+                    continue
+            e, tp, risk = t["entry"], t["tp"], t["risk"]
+            res = None
+            for k, c in enumerate(cs[:hold]):
+                if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
+                    gap = k > 0 and ((c["open"] <= sl) if s > 0 else (c["open"] >= sl))
+                    res = ("LOSS", c["open"] if gap else sl, k)
+                    break
+                if (c["high"] >= tp) if s > 0 else (c["low"] <= tp):
+                    res = ("WIN", tp, k)
+                    break
+            if not res and len(cs) >= hold:
+                res = ("TIME_EXIT", cs[hold - 1]["close"], hold - 1)
+            if not res:
+                continue
+            kind, ex, k = res
+            r = (s * (ex - e) - e * PRX_FEE - e * PRX_FUND * (k + 1) / 24) / risk
+            if kind == "TIME_EXIT" and t.get("real") and AUTOTRADE_ENABLED_CAS:
+                log_error(f"cascade time exit {t['symbol']}: {close_position_for_mode('cas', t['symbol'], t['direction'])}")
+            with _cas_lock:
+                t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + 3600), "r": round(r, 3)})
+            changed = True
+            notify_trade_result("cas", t["symbol"], t["direction"], e, ex, kind, round(r, 3), real=bool(t.get("real")), note="Каскад 1ч")
+        except Exception as e_:
+            log_error(f"cascade trade {t.get('symbol')}: {e_}")
+    if changed:
+        cas_save()
+
+
+def cas_loop():
+    time.sleep(170)
+    cas_load()
+    last_hour = (_CAS.get("scan") or {}).get("hour")
+    while True:
+        heartbeat("cas_loop")
+        try:
+            if CAS_ENABLED:
+                now = time.time()
+                h = int(now // 3600 * 3600)
+                if h != last_hour and now - h >= 40:
+                    cas_settle(now)
+                    if now - h < 20 * 60:
+                        cas_scan_once()
+                    last_hour = h
+        except Exception as e:
+            log_error(f"cas_loop: {e}")
+            with _cas_lock:
+                _CAS["err"] = str(e)[:200]
+        time.sleep(30)
+
+
+def cas_stats():
+    m = _CAS.get("model") or {}
+    with _cas_lock:
+        trades = list(_CAS["trades"])
+        scan, err, last = _CAS.get("scan"), _CAS.get("err"), list(_CAS.get("last") or [])
+    fin = [t for t in trades if t["status"] == "CLOSED" and t.get("r") is not None]
+    rs = [t["r"] for t in fin]
+    t0 = min((t["hour"] for t in trades), default=None)
+    weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
+    return {"on": CAS_ENABLED, "auto": AUTOTRADE_ENABLED_CAS, "tg": TELEGRAM_ALERTS_CAS,
+            "risk": MODULE_RISK_PCT.get("cas") or CAS_RISK_DEFAULT,
+            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap", "emas")} if m else None,
+            "err": err, "scan": scan, "near": last,
+            "open": [t for t in trades if t["status"] == "OPEN"][-30:],
+            "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
+            "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
+            "live_check": live_vs_bt("cas", [t["r"] for t in fin if t.get("rv") == CAS_MODEL_VER]),
+            "last": [{k: t.get(k) for k in ("symbol", "side", "hour", "r", "result", "real", "entry", "px", "sl", "tp", "exit", "t_out")} for t in sorted(fin, key=lambda t: -t["hour"])[:30]]}
+
+
+@app.route("/api/cas/status")
+def api_cas_status():
+    try:
+        return jsonify(cas_stats())
+    except Exception as e:
+        log_error(f"cascade status: {e}")
         return jsonify({"err": f"статистика не посчиталась: {e}"})
 
 
@@ -35733,6 +36089,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="zones" style="color:#4caf50;">🎯 Зоны</div>
   <div class="tab" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
   <div class="tab" data-tab="rbx" style="color:#ffb74d;">📈 Пробой</div>
+  <div class="tab" data-tab="cas" style="color:#4dd0e1;">🌊 Каскад</div>
   <div class="tab" data-tab="hdg" style="color:#b39ddb;">🪞 Хедж</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
@@ -35754,6 +36111,7 @@ INDEX_HTML = """<!doctype html>
   <div id="amdPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="neuroPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="rbxPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="casPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="hdgPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="snrPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="prvPanel" style="display:block;padding:8px 4px;font-size:var(--fs);"></div>
@@ -35946,6 +36304,23 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">на +2R закрыть половину позиции и перенести стоп в безубыток, остаток — по тренду. Винрейт выше (день: 44% вместо 34%), но средний результат ниже (день: +0.83R вместо +1.40R на сделку). Действует на новые сделки</div>
         </div>
         <label class="switch"><input type="checkbox" id="setRbxHalf"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+
+    <details class="settingsGroup" style="--mod-color:#4dd0e1;"><summary class="settingsGroupTitle">🌊 Каскад EMA</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (1ч — 120 монет)</div>
+          <div class="sub">в начале часа: свеча закрылась за всем каскадом EMA 5/10/14/20/28 и модель оценила пробой выше порога — вход; стоп за экстремумом 24 свечей, тейк 2R, выход через 48 ч; не больше 12 сделок в одну сторону</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setCas"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ 🌊 Каскад в Telegram</div>
+          <div class="sub">новая сделка и её итог</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgCas"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -36173,6 +36548,7 @@ INDEX_HTML = """<!doctype html>
           <input type="number" id="setRiskPctZones" min="0.1" max="100" step="0.5" placeholder="Зоны" title="Зоны" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctZm" min="0.1" max="100" step="0.1" placeholder="🎯 0.5" title="🎯 Сильные зоны: пусто — 0.5% (не общий %!)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctRbx" min="0.1" max="100" step="0.1" placeholder="📈 0.5" title="📈 Пробой: пусто — 0.5% (не общий %)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctCas" min="0.1" max="100" step="0.1" placeholder="🌊 0.5" title="🌊 Каскад: пусто — 0.5% (не общий %)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
         </div>
       </div>
       <div class="settingRow subRow">
@@ -36251,6 +36627,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">реальная сделка по рынку после дневного закрытия: стоп 1.5 ATR сразу на бирже, тейка нет — бот закрывает сделку, когда день закроется за 20-дневным минимумом / максимумом. Риск — поле «📈» выше (пусто = 0.5%)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeRbx"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ 🌊 Каскад EMA</div>
+          <div class="sub">реальная сделка по рынку в начале часа: стоп за экстремумом 24 свечей и тейк 2R сразу на бирже, через 48 ч бот закрывает сделку. Риск — поле «🌊» выше (пусто = 0.5%)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeCas"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -36333,6 +36716,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('amdPanel').style.display = activeTab === 'amd' ? 'block' : 'none';
     document.getElementById('neuroPanel').style.display = activeTab === 'neuro' ? 'block' : 'none';
     document.getElementById('rbxPanel').style.display = activeTab === 'rbx' ? 'block' : 'none';
+    document.getElementById('casPanel').style.display = activeTab === 'cas' ? 'block' : 'none';
     document.getElementById('hdgPanel').style.display = activeTab === 'hdg' ? 'block' : 'none';
     document.getElementById('snrPanel').style.display = activeTab === 'snr' ? 'block' : 'none';
     document.getElementById('prvPanel').style.display = activeTab === 'prv' ? 'block' : 'none';
@@ -36349,6 +36733,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'amd') refreshAmd();
     if (activeTab === 'neuro') refreshNeuro();
     if (activeTab === 'rbx') refreshRbx();
+    if (activeTab === 'cas') refreshCas();
     if (activeTab === 'hdg') refreshHdg();
     if (activeTab === 'snr') refreshSnr();
     if (activeTab === 'prv') refreshPrv();
@@ -39433,18 +39818,21 @@ function btFromRbx(t) {   // a live 📈 trade -> the chart's trade
 function btFromEmx(t) {   // v0.99.644 — a live EMA trade -> the chart's trade (shown on 1h candles)
   return {mod: 'emx', s: t.symbol, d: t.side, c: '1h', tf: t.tf, n: t.n, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
 }
+function btFromCas(t) {   // v0.99.653 — a live 🌊 trade -> the chart's trade
+  return {mod: 'cas', s: t.symbol, d: t.side, c: '1h', t: t.hour, e: t.entry != null ? t.entry : t.px, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+}
 function btFromPrx(t) {
   return {mod: 'prv', s: t.symbol, d: t.side, c: (t.tf || 1) + 'h', t: t.hour, e: t.entry != null ? t.entry : t.px, sl: t.sl, tp: t.tp, hs: t.hs, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
 }
 async function btChart(o) {
   const coin = (o.s || '').replace('_USDT', ''), side = o.d > 0 ? 'ЛОНГ' : 'ШОРТ';
-  document.getElementById('vgiModalTitle').textContent = `${coin} | ${o.mod === 'rbx' ? '📈 Пробой' : (o.mod === 'emx' ? '📐' : 'P/R')} ${btLabel(o)} | ${side}${o.live ? '' : ' · бэктест'}`;
+  document.getElementById('vgiModalTitle').textContent = `${coin} | ${o.mod === 'rbx' ? '📈 Пробой' : (o.mod === 'emx' ? '📐' : (o.mod === 'cas' ? '🌊 Каскад' : 'P/R'))} ${btLabel(o)} | ${side}${o.live ? '' : ' · бэктест'}`;
   document.getElementById('vgiModalParams').textContent = 'загрузка...';
   vgiModal.classList.add('open');
   window._vgiLast = null;
   window._emwRedraw = null;
   let d;
-  try { d = await (await fetch(`/api/btchart/${o.s}?c=${o.c}&t=${o.t}&x=${o.x || 0}&before=${o.mod === 'rbx' ? (o.n || (o.c === '12h' ? 30 : 20)) + 3 : 6}`)).json(); } catch (e) { document.getElementById('vgiModalParams').textContent = 'нет связи'; return; }
+  try { d = await (await fetch(`/api/btchart/${o.s}?c=${o.c}&t=${o.t}&x=${o.x || 0}&before=${o.mod === 'rbx' ? (o.n || (o.c === '12h' ? 30 : 20)) + 3 : (o.mod === 'cas' ? 90 : 6)}`)).json(); } catch (e) { document.getElementById('vgiModalParams').textContent = 'нет связи'; return; }
   if (d.error) { document.getElementById('vgiModalParams').textContent = d.error; return; }
   const res = o.r == null ? ' · открыта' : ` · ${BT_KIND[o.k] || o.k || ''} ${o.r > 0 ? '+' : ''}${(+o.r).toFixed(2)}R${o.xp != null ? ' @ ' + fmtNum(o.xp) : ''}`;
   document.getElementById('vgiModalParams').innerHTML = `${fmtDateTime(o.t)} · вход ${fmtNum(o.e)} · SL ${fmtNum(o.sl)}${o.tp != null ? ' · TP ' + fmtNum(o.tp) : ''}${res}` +
@@ -39454,6 +39842,12 @@ async function btChart(o) {
   draw();
 }
 function btDraw(bars, o) {
+  let casEma = null;
+  if (o.mod === 'cas' && bars.length) {   // v0.99.653 — the cascade EMAs, warmed up on the bars before, the entry kept near the left
+    casEma = [5, 10, 14, 20, 28].map(n => { const k = 2 / (n + 1); let e = null; return bars.map(b => (e = e == null ? b.close : e + k * (b.close - e))); });
+    const cut = Math.max(0, bars.findIndex(b => b.time >= o.t) - 12);
+    bars = bars.slice(cut); casEma = casEma.map(v => v.slice(cut));
+  }
   const canvas = document.getElementById('vgiChartCanvas'), wrap = document.getElementById('vgiChartWrap');
   const dpr = window.devicePixelRatio || 1;
   const W = Math.max(200, wrap.clientWidth - 16), H = Math.max(260, wrap.clientHeight - 16);
@@ -39487,6 +39881,11 @@ function btDraw(bars, o) {
     series.push({vals: bars.map((b, i) => i < ei || i > end || i < 20 ? null :
       (isL ? Math.min(...bars.slice(i - 20, i).map(x => x.low)) : Math.max(...bars.slice(i - 20, i).map(x => x.high)))), color: '#7fd1ff', width: 1.4});
     legend.push({text: `выход: ${isL ? 'минимум' : 'максимум'} 20 свечей`, color: '#7fd1ff'});
+  }
+  if (casEma) {
+    const cols = ['#fff59d', '#ffcc80', '#ffab91', '#ce93d8', '#90caf9'];
+    casEma.forEach((v, j) => series.push({vals: v, color: cols[j], width: 1.2}));
+    legend.push({text: 'EMA 5 / 10 / 14 / 20 / 28', color: '#ffcc80'});
   }
   emwPanel(ctx, {x: 4, y: 4, w: W - 4, h: H - 26}, bars, {dayFmt: sec < 86400, hlines: hl, zones, dots, series, legend, hi: ei, slimTags: true, padSlots: 1});
 }
@@ -39541,6 +39940,54 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
       <div class="zsub">В плюсе ${M.pos_months} месяцев из ${M.all_months}: большинство месяцев — мелкие стопы, год делают один-два месяца с большим трендом.</div></details>`;
   }
   h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как нашёлся</summary><div class="zsub">Проверены все старые индикаторы проекта (Дончиан / Trend, сжатие, Sweep, ретест / Mirror, AMD, MR4, большая свеча, откат к EMA, пробой диапазона) на 1ч, 4ч, 8ч, 12ч и дне у 127 монет за 6 лет, с тейками 2–20R, трейлингами и выходом в безубыток. Устойчив только пробой узкого диапазона по тренду монеты, и только на дне и 12ч: на 4ч и 8ч ложных пробоев слишком много. Фильтр по оценке и признакам Нейро винрейт не поднял (тренд, который даст +50R, заранее не виден) — выше его делает только частичный тейк. Учёт сделок — по свечам своего графика, как в исследовании; комиссии и фандинг учтены.</div></details>`;
+  setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
+}
+
+async function refreshCas() {   // v0.99.653 — 🌊 EMA cascade: the model on the whole-cascade crosses
+  const panel = document.getElementById('casPanel');
+  let d;
+  try { d = await (await fetch('/api/cas/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
+  const card = (title, body) => `<div class="zcard"><div class="zh">${title}</div>${body}</div>`;
+  const tile = (l, v, n) => `<div class="ztile"><div class="zl">${l}</div><div class="zv">${v}</div>${n ? `<div class="zn">${n}</div>` : ''}</div>`;
+  const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  const coin = s => (s || '').replace('_USDT', '');
+  const hm = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
+  const m = d.model, rs = (m && m.research) || {}, rule = (m && m.rule) || {};
+  const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
+  let h = '';
+  let top = `<div class="dim hintx">Каскад EMA 5/10/14/20/28 на 1ч у 120 ликвидных монет. Сигнал — закрытие свечи за всем каскадом: выше верхней EMA — лонг, ниже нижней — шорт. Само пересечение на истории в минусе, поэтому сделку выбирает модель: она смотрит, что было до пробоя (памп и затухание, недавний пробой в другую сторону, ширина каскада, BTC), и ещё 89 параметров рынка, и берёт лучшие ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 0.5}% пробоев.</div>`;
+  if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
+  else {
+    const ys = rs.years || {};
+    const all = Object.values(ys).filter(x => x && x.n);
+    const n = all.reduce((a, x) => a + x.n, 0), avg = n ? all.reduce((a, x) => a + x.avg * x.n, 0) / n : null;
+    const wk = all.length ? all.reduce((a, x) => a + x.wk, 0) / all.length : null, dd = Math.max(0, ...all.map(x => x.dd || 0));
+    top += `<div class="dim" style="font-size:var(--fs-xs);">обучена до ${new Date(m.trained_to * 1000).toLocaleDateString('ru-RU')}</div>
+      <div class="zsub">Проверка на истории 127 монет — каждый год модель не видела. Результат на сделку:</div>
+      ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
+      <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(1)}</b> сделок в неделю</span><span>до <b>${rule.hold_bars || 48}</b> ч</span><span>просадка до <b>${dd}R</b></span></div>
+      <div class="zsub">Вход — по рынку после закрытия свечи, стоп — <b>за экстремумом последних ${rule.swing_bars || 24} свечей</b> (+${rule.swing_pad_atr || 0.2} ATR), тейк — <b>${rule.take_r || 2} риска</b>, через ${rule.hold_bars || 48} ч выход. Не больше ${m.side_cap || 12} сделок в одну сторону.</div>
+      ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «🌊» в настройках риска (пусто = ${d.risk}%).</div>`}`;
+  }
+  h += card(`🌊 Каскад EMA ${pill}`, top);
+  const sc = d.scan, near = d.near || [];
+  const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;">
+      <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.pct}%</span></span>`;
+  h += card('🔎 Последний час', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, `монет · пробоев каскада ${sc.events}`)}${tile('сигналов', sc.signals, '')}${tile('открыто', sc.opened, '')}</div>
+    ${near.length ? `<div class="zsub" style="margin-top:8px;">ближе всех к порогу (100% — сигнал):</div><div>${near.map(chip).join('')}</div>` : ''}
+    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · следующий пересчёт в начале часа</div>`
+    : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
+  const op = d.open || [];
+  const row = (t, i) => `<div onclick="btLiveOpen('cas', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim">${t.real ? ' · 💰' : ''}</span></span>
+      <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry != null ? t.entry : t.px)} · до ${hm(t.until)}</span></div>`;
+  h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
+    ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
+    ${liveCheckHtml(d.live_check)}
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromCas(t), `btLiveOpen('cas', ${Math.min(10, op.length) + i})`)).join('')}</details>` : ''}`);
+  window._btLive.cas = op.slice(-10).reverse().map(btFromCas).concat((d.last || []).map(btFromCas));
+  h += btSection('cas', 'Сделки бэктеста — 2022–2026 (каждый год модель не видела)');
+  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Пять EMA (5, 10, 14, 20, 28) на часовом графике. Событие — свеча закрылась выше всех пяти (лонг) или ниже всех пяти (шорт). Таких пробоев много — на 127 монетах Binance за 6 лет почти миллион, и в среднем они убыточны. Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на них: для каждого — чем кончилась бы сделка со стопом за экстремумом 24 свечей и тейком 2R за 48 ч. Она учитывает и твои картинки: «памп → затухание → пробой вниз» и «пробой вверх → отбой обратно» — последний у модели лучший (шорты после недавнего пробоя вверх: +0.74R, WR 66%). Порог честный: модель учили на прошлых годах и проверяли на следующем. В начале каждого часа бот считает то же самое по только что закрытой свече и открывает сделку, если оценка выше порога (по монете и стороне — одна сделка). Учёт — по свечам 1ч, как в исследовании: вход по открытию следующей свечи, стоп раньше тейка; комиссии и фандинг учтены. Вместе с P/R: месяцы почти независимы (корреляция +0.26), поэтому каскад с риском 1% рядом с P/R 4% на истории растил депозит заметно быстрее при той же просадке.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
 
@@ -40530,6 +40977,7 @@ async function refreshAll() {
   if (activeTab === 'mirror') await refreshMirror();
   if (activeTab === 'neuro') await refreshNeuro();
   if (activeTab === 'rbx') await refreshRbx();
+  if (activeTab === 'cas') await refreshCas();
   if (activeTab === 'hdg') await refreshHdg();
   if (activeTab === 'snr') await refreshSnr();
   if (activeTab === 'prv') await refreshPrv();
@@ -40877,6 +41325,10 @@ const setInputs = {
   telegram_alerts_rbx: document.getElementById('setTgRbx'),
   rbx_half: document.getElementById('setRbxHalf'),
   risk_pct_rbx: document.getElementById('setRiskPctRbx'),
+  cas_enabled: document.getElementById('setCas'),   // v0.99.653
+  autotrade_cas: document.getElementById('setAutotradeCas'),
+  telegram_alerts_cas: document.getElementById('setTgCas'),
+  risk_pct_cas: document.getElementById('setRiskPctCas'),
   autotrade_zones_zm: document.getElementById('setAutotradeZonesZm'),
   telegram_alerts_zones_zm: document.getElementById('setTgZonesZm'),
 };
@@ -42372,6 +42824,7 @@ if __name__ == "__main__":
     # v0.99.624 — the old per-coin Peak Reversal (backtest / live / filter loops) is replaced by the model (prx_loop)
     threading.Thread(target=prx_loop, daemon=True).start()
     threading.Thread(target=rbx_loop, daemon=True).start()   # v0.99.625 — 📈 range breakout
+    threading.Thread(target=cas_loop, daemon=True).start()   # v0.99.653 — 🌊 EMA cascade
     threading.Thread(target=hdg_loop, daemon=True).start()   # v0.99.628 — 🪞 hedge mirror
     threading.Thread(target=model_refresh_loop, daemon=True).start()   # v0.99.636 — retrained models from the repo, daily
     threading.Thread(target=auto_update_loop, daemon=True).start()   # v0.99.637 — a new version on GitHub -> /update by itself
