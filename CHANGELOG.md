@@ -20044,3 +20044,8 @@ v0.99.647 - 📈 Range breakout: once a trade has been +4R, it exits on the clos
          check set for any threshold from +4 to +8R. Also checked and not used: a retest entry, other exit
          channels, closing trades that go nowhere, the EMA200 slope, one signal per coin across the two charts.
          The tab's stats and the backtest list recomputed; t_rbx_e2e2.py checks the new exit (0 differences).
+v0.99.648 - "🔁 сверить с Gate (12 мес)" in the backtest lists (P/R, EMA, 📈): the module's closed backtest trades
+         of the last 12 months are re-walked on Gate's own candles (the research runs on Binance's) and the user
+         sees the average R and the win rate on Gate vs Binance, how often the outcome matched, and for EMA how
+         many limit entries Gate would not have filled. On Binance candles the re-walk gives back the backtest
+         exactly (tools/adaptation/t_btgate.py: P/R 84, EMA 167, 📈 192 trades, 100% the same).

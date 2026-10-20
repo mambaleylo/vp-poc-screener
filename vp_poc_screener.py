@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.647"
+APP_VERSION = "0.99.648"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31445,6 +31445,136 @@ def api_bt_trades():
         return jsonify({"trades": [], "err": str(e)[:200]})
 
 
+def bt_gate_bars(symbol, ch, start, end):
+    """Gate's candles of a chart; 12h built from 4h (UTC 00 / 12, like the bot), the forming one flagged"""
+    if ch != "12h":
+        return get_candles_range(symbol, ch, start, end) or []
+    src = get_candles_range(symbol, "4h", start, end) or []
+    bars, cur, key = [], None, None
+    for c in src:
+        k = c["time"] // 43200
+        if k != key:
+            if cur and cur["n"] == 3:
+                bars.append(cur)
+            key = k
+            cur = {"time": k * 43200, "open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"], "n": 1}
+        else:
+            cur["high"] = max(cur["high"], c["high"]); cur["low"] = min(cur["low"], c["low"]); cur["close"] = c["close"]; cur["n"] += 1
+    if cur and (cur["n"] == 3 or cur["time"] + 43200 > time.time()):
+        cur["forming"] = cur["n"] < 3
+        bars.append(cur)
+    return bars
+
+
+# v0.99.648 — the backtest's trades re-walked on Gate's candles (the user: "проверка на свечах Gate"): the research
+# runs on Binance candles, the bot trades on Gate. Each closed trade of the last months: the same rule from Gate's own
+# entry bar (the stop / take distances as a share of the entry, the module's exits), then Binance R vs Gate R.
+_BTG = {}
+_btg_lock = threading.Lock()
+
+
+def bt_gate_trade(mod, t):
+    """(R on Gate, filled) for one backtest trade, or None without Gate data"""
+    s = int(t["d"]); e_b = float(t["e"])
+    fee = lambda e, k, hrs: e * PRX_FEE + e * PRX_FUND * (k + 1) * hrs / 24
+    if mod in ("prv", "emx"):
+        hold = 48 if mod == "prv" else 72
+        bars = [c for c in bt_gate_bars(t["s"], "1h", t["t"], t["t"] + (hold + 1) * 3600) if c["time"] >= t["t"]]
+        if len(bars) < 2 or bars[0]["time"] != t["t"]:
+            return None
+        if mod == "prv":
+            e = bars[0]["open"]
+            hard = e * abs(e_b - float(t.get("hs") or t["sl"])) / e_b
+            soft = e * abs(e_b - float(t["sl"])) / e_b
+            tp = e + s * e * abs(float(t["tp"]) - e_b) / e_b
+            hs, ss = e - s * hard, e - s * soft
+            for k, c in enumerate(bars[:hold]):
+                if (c["low"] <= hs) if s > 0 else (c["high"] >= hs):
+                    ex = c["open"] if k and ((c["open"] <= hs) if s > 0 else (c["open"] >= hs)) else hs
+                    return (s * (ex - e) - fee(e, k, 1)) / hard, True
+                if (c["high"] >= tp) if s > 0 else (c["low"] <= tp):
+                    return (s * (tp - e) - fee(e, k, 1)) / hard, True
+                if t.get("hs") is not None and ((c["close"] <= ss) if s > 0 else (c["close"] >= ss)):
+                    return (s * (c["close"] - e) - fee(e, k, 1)) / hard, True
+            k = min(hold, len(bars)) - 1
+            return (s * (bars[k]["close"] - e) - fee(e, k, 1)) / hard, True
+        e = e_b   # EMA: the limit at the level — filled only if Gate's touch hour reached it
+        if not ((bars[0]["low"] <= e) if s > 0 else (bars[0]["high"] >= e)):
+            return 0.0, False
+        risk = abs(e - float(t["sl"])); sl = e - s * risk; tp = float(t["tp"])
+        for k, c in enumerate(bars[:hold]):
+            if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
+                ex = c["open"] if k and ((c["open"] <= sl) if s > 0 else (c["open"] >= sl)) else sl
+                return (s * (ex - e) - fee(e, k, 1)) / risk, True
+            if k and ((c["high"] >= tp) if s > 0 else (c["low"] <= tp)):
+                return (s * (tp - e) - fee(e, k, 1)) / risk, True
+        k = min(hold, len(bars)) - 1
+        return (s * (bars[k]["close"] - e) - fee(e, k, 1)) / risk, True
+    hrs = 24 if t["c"] == "1d" else 12; sec = hrs * 3600; hold = RBX_CHARTS[t["c"]]["hold"]
+    bars = bt_gate_bars(t["s"], t["c"], t["t"] - (RBX_DC + 4) * sec, min(int(time.time()), t["t"] + (hold + 1) * sec))
+    bars = [c for c in bars if not c.get("forming")]
+    k0 = next((k for k, c in enumerate(bars) if c["time"] == t["t"]), None)
+    if k0 is None or k0 < RBX_DC:
+        return None
+    e = bars[k0]["open"]; risk = e * abs(e_b - float(t["sl"])) / e_b; sl = e - s * risk; best = 0.0
+    for k in range(k0, min(len(bars), k0 + hold)):
+        c = bars[k]; j = k - k0
+        if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
+            return (s * (sl - e) - fee(e, j, hrs)) / risk, True
+        best = max(best, ((c["high"] - e) if s > 0 else (e - c["low"])) / risk)
+        dc = RBX_TIGHT_DC if RBX_TIGHT_R and best >= RBX_TIGHT_R else RBX_DC
+        lv = min(x["low"] for x in bars[k - dc:k]) if s > 0 else max(x["high"] for x in bars[k - dc:k])
+        if (c["close"] < lv) if s > 0 else (c["close"] > lv):
+            return (s * (c["close"] - e) - fee(e, j, hrs)) / risk, True
+    k = min(len(bars), k0 + hold) - 1
+    return (s * (bars[k]["close"] - e) - fee(e, k - k0, hrs)) / risk, True
+
+
+def bt_gate_check(mod, months=12):
+    """background: the module's closed backtest trades of the last `months` re-walked on Gate"""
+    now = time.time()
+    trades = [t for t in ((bt_trades() or {}).get(mod) or []) if t.get("r") is not None and t["t"] >= now - months * 30.5 * 86400 and t["x"] < now - 3600]
+    with _btg_lock:
+        _BTG[mod] = {"running": True, "done": 0, "of": len(trades), "t": int(now), "res": None, "err": None}
+    rb, rg, unfilled, nodata = [], [], 0, 0
+    try:
+        for t in trades:
+            try:
+                out = bt_gate_trade(mod, t)
+            except Exception as e:
+                out = None; log_error(f"bt gate {mod} {t.get('s')}: {e}")
+            if out is None:
+                nodata += 1
+            elif not out[1]:
+                unfilled += 1
+            else:
+                rb.append(float(t["r"])); rg.append(float(out[0]))
+            with _btg_lock:
+                _BTG[mod]["done"] += 1
+        res = {"n": len(trades), "cmp": len(rb), "unfilled": unfilled, "nodata": nodata,
+               "avg_b": round(sum(rb) / len(rb), 3) if rb else None, "avg_g": round(sum(rg) / len(rg), 3) if rg else None,
+               "wr_b": round(100 * sum(1 for r in rb if r > 0) / len(rb)) if rb else None, "wr_g": round(100 * sum(1 for r in rg if r > 0) / len(rg)) if rg else None,
+               "same": round(100 * sum(1 for a, b in zip(rb, rg) if (a > 0) == (b > 0)) / len(rb)) if rb else None, "months": months}
+        with _btg_lock:
+            _BTG[mod].update({"running": False, "res": res})
+    except Exception as e:
+        with _btg_lock:
+            _BTG[mod].update({"running": False, "err": str(e)[:200]})
+
+
+@app.route("/api/bt/gatecheck", methods=["GET", "POST"])
+def api_bt_gatecheck():
+    mod = request.args.get("mod", "prv")
+    if mod not in ("prv", "emx", "rbx"):
+        return jsonify({"err": "модуль?"})
+    with _btg_lock:
+        st = dict(_BTG.get(mod) or {})
+    if request.method == "POST" and not st.get("running"):
+        threading.Thread(target=bt_gate_check, args=(mod,), daemon=True).start()
+        st = {"running": True, "done": 0, "of": None}
+    return jsonify(st)
+
+
 @app.route("/api/btchart/<symbol>")
 def api_bt_chart(symbol):
     """the candles around one trade (Gate's): the chart's own bars from a few dozen before the entry to a few after
@@ -31460,23 +31590,7 @@ def api_bt_chart(symbol):
         end = min(int(time.time()), max(max(x, t) + after * sec, t + 60 * sec))
         if (end - start) // sec > 600:          # a very long trade: the window shortened from the start
             start = end - 600 * sec
-        if ch == "12h":
-            src = get_candles_range(symbol, "4h", start, end) or []
-            bars, cur, key = [], None, None
-            for c in src:
-                k = c["time"] // 43200
-                if k != key:
-                    if cur and cur["n"] == 3:
-                        bars.append(cur)
-                    key = k
-                    cur = {"time": k * 43200, "open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"], "n": 1}
-                else:
-                    cur["high"] = max(cur["high"], c["high"]); cur["low"] = min(cur["low"], c["low"]); cur["close"] = c["close"]; cur["n"] += 1
-            if cur and (cur["n"] == 3 or cur["time"] + 43200 > time.time()):
-                cur["forming"] = cur["n"] < 3
-                bars.append(cur)
-        else:
-            bars = get_candles_range(symbol, ch, start, end) or []
+        bars = bt_gate_bars(symbol, ch, start, end)
         return jsonify({"bars": [{k: b[k] for k in ("time", "open", "high", "low", "close")} | ({"forming": True} if b.get("forming") else {}) for b in bars]})
     except Exception as e:
         return jsonify({"error": f"свечи не загрузились: {str(e)[:150]}"})
@@ -39223,10 +39337,34 @@ function btListHtml(mod) {
   const rs = idx.map(i => all[i].r), avg = rs.reduce((a, b) => a + b, 0) / (rs.length || 1), wr = rs.filter(r => r > 0).length / (rs.length || 1) * 100;
   const chip = (k, lbl, n) => `<span onclick="btSet('${mod}', 'f', '${k}')" style="display:inline-block;padding:3px 9px;margin:0 6px 6px 0;border-radius:999px;cursor:pointer;border:1px solid var(--line);${st.f === k ? 'background:var(--card);color:var(--tx);' : 'color:var(--tx-3);'}">${lbl} · ${n}</span>`;
   let h = `<div>${chip('all', 'все', all.length)}${charts.length > 1 ? charts.map(c => chip(c, BT_EMA_TF[c] || BT_CH[c] || c, all.filter(t => btKey(t) === c).length)).join('') : ''}</div>
-    <div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">${idx.length} сделок · в среднем ${avg > 0 ? '+' : ''}${avg.toFixed(2)}R · WR ${wr.toFixed(0)}% · тап по сделке — график</div>`;
+    <div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">${idx.length} сделок · в среднем ${avg > 0 ? '+' : ''}${avg.toFixed(2)}R · WR ${wr.toFixed(0)}% · тап по сделке — график</div>
+    <div id="btg_${mod}" style="font-size:var(--fs-xs);margin-bottom:6px;">${btGateHtml(mod)}</div>`;
   h += idx.slice(0, st.n).map(i => btRowHtml(all[i], `btOpen('${mod}', ${i})`)).join('');
   if (idx.length > st.n) h += `<div style="text-align:center;margin-top:6px;"><button class="btnNeutral" onclick="btSet('${mod}', 'n', ${st.n + 60})">ещё ${Math.min(60, idx.length - st.n)}</button></div>`;
   return h;
+}
+window._btg = window._btg || {};
+function btGateHtml(mod) {   // v0.99.648 — the last year's trades re-walked on Gate's candles
+  const g = window._btg[mod];
+  const btn = `<span onclick="btGateStart('${mod}')" style="cursor:pointer;color:var(--accent,#7fd1ff);">🔁 сверить с Gate (12 мес)</span>`;
+  if (!g) return btn;
+  if (g.running) return `<span class="dim">сверяю со свечами Gate… ${g.done || 0}${g.of ? ' из ' + g.of : ''}</span>`;
+  if (g.err) return `<span class="loss">сверка не удалась: ${g.err}</span> · ${btn}`;
+  const r = g.res;
+  if (!r || !r.cmp) return `<span class="dim">за 12 мес сравнить нечего</span> · ${btn}`;
+  const f = v => (v > 0 ? '+' : '') + (+v).toFixed(2) + 'R';
+  return `<b>На свечах Gate</b> (${r.cmp} сделок за ${r.months} мес): в среднем <b>${f(r.avg_g)}</b> против ${f(r.avg_b)} на Binance · WR ${r.wr_g}% / ${r.wr_b}% · исход совпал в ${r.same}%`
+    + (r.unfilled ? ` · ${r.unfilled} лимиток не исполнились бы` : '') + (r.nodata ? ` · ${r.nodata} без данных` : '') + ` · ${btn}`;
+}
+async function btGateStart(mod) {
+  try { window._btg[mod] = await (await fetch('/api/bt/gatecheck?mod=' + mod, {method: 'POST'})).json(); } catch (e) { return; }
+  const poll = async () => {
+    const box = document.getElementById('btg_' + mod);
+    try { window._btg[mod] = await (await fetch('/api/bt/gatecheck?mod=' + mod)).json(); } catch (e) {}
+    if (box) box.innerHTML = btGateHtml(mod);
+    if (window._btg[mod] && window._btg[mod].running) setTimeout(poll, 3000);
+  };
+  poll();
 }
 function btRowHtml(t, onclick) {
   const d = new Date(t.t * 1000).toLocaleDateString('ru-RU', {day: '2-digit', month: '2-digit', year: '2-digit'});
