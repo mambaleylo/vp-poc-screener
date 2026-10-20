@@ -20106,3 +20106,6 @@ v0.99.658 - Zones: "ловить сам вынос" (the user: "я думал н
          (against the zone) with the take 0.5 / 1 / 2% further and the stop 0.5 / 1 / 2% back; the line reached first
          = no trade; fees counted (0.1% is 0.2R on a 0.5% take). Its best line is shown under the verdict; if it
          holds on the history and its last third (and later live), the bot signals it like the other variants.
+v0.99.659 - Trade charts: "нет свечей" on older backtest trades — Gate keeps only the last ~9800 candles of a chart
+         (1h ≈ 13 months). Such a trade is now drawn on Binance's 1h candles, marked 📒 (the backtests were computed on
+         them; the 1000-coins scaled); when Binance does not answer — on Gate's 4h / day candles, marked ⚠️.

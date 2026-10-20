@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.658"
+APP_VERSION = "0.99.659"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31759,6 +31759,29 @@ def api_bt_gatecheck():
     return jsonify(st)
 
 
+def binance_klines(symbol, interval, start, end):
+    """v0.99.659 — Binance USDT-M candles of a Gate contract (the backtests were computed on them): "X_USDT" -> XUSDT, or
+    1000XUSDT with the prices divided by 1000 (the 1000-coins). [] when Binance does not answer (blocked, unknown coin)."""
+    base = symbol.replace("_USDT", "")
+    sec = {"1h": 3600, "4h": 14400, "12h": 43200, "1d": 86400}.get(interval, 3600)
+    for sym, scl in ((base + "USDT", 1.0), ("1000" + base + "USDT", 1000.0)):
+        try:
+            r = requests.get("https://fapi.binance.com/fapi/v1/klines", params={"symbol": sym, "interval": interval, "startTime": int(start) * 1000,
+                                                                               "endTime": int(end) * 1000, "limit": 1500}, timeout=15)
+            if r.status_code != 200:
+                continue
+            rows = r.json()
+            if not rows:
+                continue
+            now = time.time()
+            return [{"time": int(k[0]) // 1000, "open": float(k[1]) / scl, "high": float(k[2]) / scl, "low": float(k[3]) / scl, "close": float(k[4]) / scl}
+                    | ({"forming": True} if int(k[0]) // 1000 + sec > now else {}) for k in rows]
+        except Exception as e:
+            log_error(f"binance klines {sym}: {e}")
+            return []
+    return []
+
+
 @app.route("/api/btchart/<symbol>")
 def api_bt_chart(symbol):
     """the candles around one trade (Gate's): the chart's own bars from a few dozen before the entry to a few after
@@ -31775,7 +31798,22 @@ def api_bt_chart(symbol):
         if (end - start) // sec > 600:          # a very long trade: the window shortened from the start
             start = end - 600 * sec
         bars = bt_gate_bars(symbol, ch, start, end)
-        return jsonify({"bars": [{k: b[k] for k in ("time", "open", "high", "low", "close")} | ({"forming": True} if b.get("forming") else {}) for b in bars]})
+        used, src = ch, "gate"
+        if not bars and ch in ("1h", "4h"):   # the user: "может с бинанса тогда подгружать? просто указывать это"
+            bars = binance_klines(symbol, ch, start, end)
+            src = "binance" if bars else "gate"
+        if not bars and ch in ("1h", "4h"):
+            # v0.99.659 — Gate keeps only the last ~9800 candles of a chart (1h ≈ 13 months): an older trade is drawn on 4h / day
+            for alt in (("4h", "1d") if ch == "1h" else ("1d",)):
+                a_sec = {"4h": 4, "1d": 24}[alt] * 3600
+                a_start = t - max(6, before * sec // a_sec) * a_sec
+                a_end = min(int(time.time()), max(max(x, t) + after * a_sec, t + 60 * a_sec))
+                bars = bt_gate_bars(symbol, alt, a_start, a_end)
+                if bars:
+                    used = alt
+                    break
+        return jsonify({"bars": [{k: b[k] for k in ("time", "open", "high", "low", "close")} | ({"forming": True} if b.get("forming") else {}) for b in bars],
+                        "c": used, "src": src})
     except Exception as e:
         return jsonify({"error": f"свечи не загрузились: {str(e)[:150]}"})
 
@@ -40075,16 +40113,20 @@ async function btChart(o) {
   let d;
   try { d = await (await fetch(`/api/btchart/${o.s}?c=${o.c}&t=${o.t}&x=${o.x || 0}&before=${o.mod === 'rbx' ? (o.n || (o.c === '12h' ? 30 : 20)) + 3 : (o.mod === 'cas' ? 90 : 6)}`)).json(); } catch (e) { document.getElementById('vgiModalParams').textContent = 'нет связи'; return; }
   if (d.error) { document.getElementById('vgiModalParams').textContent = d.error; return; }
+  const coarse = d.c && d.c !== o.c;   // v0.99.659 — Gate has no 1h candles that old: drawn on 4h / day
+  if (coarse) o = Object.assign({}, o, {c: d.c, c0: o.c});
   const res = o.r == null ? ' · открыта' : ` · ${BT_KIND[o.k] || o.k || ''} ${o.r > 0 ? '+' : ''}${(+o.r).toFixed(2)}R${o.xp != null ? ' @ ' + fmtNum(o.xp) : ''}`;
   document.getElementById('vgiModalParams').innerHTML = `${fmtDateTime(o.t)} · вход ${fmtNum(o.e)} · SL ${fmtNum(o.sl)}${o.tp != null ? ' · TP ' + fmtNum(o.tp) : ''}${res}` +
-    (o.live ? '' : `<br><span style="font-size:var(--fs-xs);">свечи Gate; сделка посчитана на свечах Binance — цены могут чуть отличаться</span>`);
+    (o.live ? '' : (d.src === 'binance' ? `<br><span style="font-size:var(--fs-xs);">📒 свечи Binance — часовых за эту дату у Gate уже нет (хранит ~13 мес); сделка и посчитана на Binance</span>`
+      : `<br><span style="font-size:var(--fs-xs);">свечи Gate; сделка посчитана на свечах Binance — цены могут чуть отличаться</span>`)) +
+    (coarse ? `<br><span style="font-size:var(--fs-xs);">⚠️ свечи ${BT_CH[o.c] || o.c}: часовых свечей за эту дату у Gate уже нет (хранит ~13 мес), Binance не ответил</span>` : '');
   const draw = () => btDraw(d.bars || [], o);
   window._emwRedraw = draw;
   draw();
 }
 function btDraw(bars, o) {
   let casEma = null;
-  if (o.mod === 'cas' && bars.length) {   // v0.99.653 — the cascade EMAs, warmed up on the bars before, the entry kept near the left
+  if (o.mod === 'cas' && o.c === '1h' && bars.length) {   // v0.99.653 — the cascade EMAs, warmed up on the bars before, the entry kept near the left
     casEma = [5, 10, 14, 20, 28].map(n => { const k = 2 / (n + 1); let e = null; return bars.map(b => (e = e == null ? b.close : e + k * (b.close - e))); });
     const cut = Math.max(0, bars.findIndex(b => b.time >= o.t) - 12);
     bars = bars.slice(cut); casEma = casEma.map(v => v.slice(cut));
