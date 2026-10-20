@@ -29,3 +29,11 @@ Chosen rule: stop at the 24-bar swing ± 0.2 ATR, take 2R, out after 48 h, top 0
 user's "отбой") are the best kind (+0.74R, WR 66%). Alone it is weaker than P/R at an equal drawdown (2% risk →
 x13 over 2023–26 vs P/R 8% → x363), but its months are nearly independent of P/R (+0.26): P/R 4% + cascade 1%
 → x95 vs P/R 4% alone → x26 at the same 1-in-10 drawdown (23%).
+
+## Fewer losing trades (v0.99.659 research, nothing deployed)
+`cas_loss.py exits|filters`, `cas_loss2.py`, `cas_meta.py`, `cas_lab_part.py` + `LAB=cas_lab_part.npy cas_sel3.py`:
+on the deployed rule ~30% of the bot's trades lose (check set 37%). Early exits (no progress, back into the cascade)
+turn stops into more small losses and lower the growth; a partial at +0.5R gives 24–25% losers at about half the
+growth; single filters (BTC, ADX, trend, RSI, volume, hour, funding, caps, a stricter score) leave 26–33%; a meta model
+of P(loss) on the cascade's own candidates ranks losers in 2024–25 but inverts in 2023 and 2026; retraining on the
+deployed rule's label (regression or P(win)) is worse. The losers are not visible at the entry with these features.

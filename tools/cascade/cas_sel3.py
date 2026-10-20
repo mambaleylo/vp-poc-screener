@@ -21,7 +21,7 @@ if FEAT2:
     F2 = np.concatenate(F2); assert len(F2) == len(X)
     X = np.hstack([X, F2])
 cols = slice(0, None) if ONE else slice(1, None)
-lab = Y[:, 3, 1, 1]
+lab = np.load(E("LAB", "")) if E("LAB", "") else Y[:, 3, 1, 1]   # LAB: another label (cas_lab_part.py)
 def month_add(t, k):
     d = dt.datetime.fromtimestamp(int(t), dt.timezone.utc); m = d.month - 1 + k
     return int(dt.datetime(d.year + m // 12, m % 12 + 1, 1, tzinfo=dt.timezone.utc).timestamp())
@@ -30,7 +30,7 @@ def mdl(seed):
               colsample_bytree=0.5, reg_lambda=10.0, verbose=-1, n_jobs=4, random_state=seed)
     return lgb.LGBMClassifier(**kw) if CLS else lgb.LGBMRegressor(**kw)
 def fit(idx):
-    y = (lab[idx] > 0).astype(int) if CLS else lab[idx].clip(-1.5, 4)
+    y = (lab[idx] > 0).astype(int) if CLS else lab[idx].clip(-1.5, 4 if not E("LAB", "") else 2)
     return [mdl(1 + k).fit(X[idx][:, cols], y) for k in range(SEEDS)]
 def pred(ms, idx):
     return sum((m.predict_proba(X[idx][:, cols])[:, 1] if CLS else m.predict(X[idx][:, cols])) for m in ms) / len(ms)
