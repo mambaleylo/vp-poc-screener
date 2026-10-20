@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.662"
+APP_VERSION = "0.99.663"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30782,7 +30782,7 @@ def api_emx_status():
 # the 1h candles exactly as the research labels (stop first, then the take, the 12th close).
 NX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_neuro_model.json")
 NX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_neuro_model.json"
-NX_MODEL_VER = 4   # v0.99.623 — 2: take 3R, out after 48 h (the take sweep); v0.99.661 — 4: out after 12 h (better on both sets, 2025–26 +0.14R vs +0.02R)
+NX_MODEL_VER = 5   # v0.99.663 — 5: the entry by a limit 0.3 ATR better than the open (3 h); v0.99.623 — 2: take 3R, out after 48 h (the take sweep); v0.99.661 — 4: out after 12 h (better on both sets, 2025–26 +0.14R vs +0.02R)
 # v0.99.650 — 3: the same model, ADX < 30 (no entries into a strong trend), BTC's last hour not more than 1% against the
 # trade, out after 24 h — better on the bot's top 0.5% and a top-2% check set at an equal drawdown (tools/neuro_model/nx_hyp*.py);
 # the longest losing run 29 instead of 51. Neuro stays the weakest module: 2025–26 about 0R a trade.
@@ -31280,7 +31280,7 @@ def nx_coin_row(sym, now, ref):
 
 def _nx_open_count():
     with _nx_lock:
-        opn = [t for t in _NX["trades"] if t["status"] == "OPEN"]
+        opn = [t for t in _NX["trades"] if t["status"] in ("OPEN", "PENDING")]   # v0.99.663: a pending limit takes its slot
     return opn
 
 
@@ -31346,8 +31346,11 @@ def nx_open(m, c, t_hour, live_px=None):
     tr = {"id": f"nx_{sym}_{s}_{t_hour}", "symbol": sym, "side": s, "direction": direction, "hour": t_hour, "score": c["score"],
           "risk": risk, "entry": None, "sl": sl, "tp": tp, "px": px, "until": t_hour + int(rule["hold_h"]) * 3600,
           "hold": int(rule["hold_h"]), "take_r": float(rule["take_r"]),
-          "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False}
-    if AUTOTRADE_ENABLED_NEURO and live_px:
+          "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False, "atr": c["atr"]}
+    lim = float(rule.get("entry_lim_atr") or 0)
+    if lim:   # v0.99.663 — the entry by a limit lim ATR better than the hour's open, waiting entry_wait hours
+        tr.update({"status": "PENDING", "lim_atr": lim, "wait": int(rule.get("entry_wait") or 3), "lv": px - s * lim * c["atr"]})
+    if AUTOTRADE_ENABLED_NEURO and live_px and not lim:
         try:
             res = execute_autotrade("neuro", sym, direction, live_px, sl, tp, extra={"neuro": f"v3 {c['score']}"},
                                     risk_pct_override=MODULE_RISK_PCT.get("neuro") or NX_RISK_DEFAULT)
@@ -31362,7 +31365,7 @@ def nx_open(m, c, t_hour, live_px=None):
     if TELEGRAM_ALERTS_NEURO:
         pct = lambda p: (p - px) / px * 100
         send_telegram(f"{'🟢' if s > 0 else '🔴'} {sym.replace('_USDT', '')} {direction} · 🧠 Нейро\n"
-                      f"вход по рынку ~{px:.6g} · стоп {sl:.6g} ({pct(sl):+.1f}%) · тейк {tp:.6g} ({pct(tp):+.1f}%) · держать до {int(rule['hold_h'])} ч\n"
+                      + (f"вход лимиткой ~{tr['lv']:.6g} ({pct(tr['lv']):+.2f}%, ждать до {tr['wait']} ч)" if lim else f"вход по рынку ~{px:.6g}") + f" · стоп {sl:.6g} ({pct(sl):+.1f}%) · тейк {tp:.6g} ({pct(tp):+.1f}%) · держать до {int(rule['hold_h'])} ч\n"
                       f"оценка модели {c['score']} · " + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"), category="neuro")
 
 
@@ -31384,16 +31387,34 @@ def nx_settle(now=None):
                     changed = True
                 continue
             s, risk = t["side"], t["risk"]
+            k0 = int(t.get("k0") or 0)
             if t.get("entry") is None:
-                e = cs[0]["open"]
+                lim = float(t.get("lim_atr") or 0)
+                if lim and t.get("atr"):   # v0.99.663 — the limit lim ATR better than the hour's open, entry_wait hours
+                    lv = cs[0]["open"] - s * lim * float(t["atr"]); wait = int(t.get("wait") or 3)
+                    f = next((k for k, c in enumerate(cs[:wait]) if ((c["low"] <= lv) if s > 0 else (c["high"] >= lv))), None)
+                    if f is None:
+                        if len(cs) >= wait:
+                            with _nx_lock:
+                                t.update({"status": "CLOSED", "result": "NO_FILL", "r": None, "lv": lv, "t_out": int(cs[wait - 1]["time"] + 3600)})
+                            changed = True
+                            if t.get("real") and AUTOTRADE_ENABLED_NEURO:
+                                log_error(f"neuro no-fill {t['symbol']}: {close_position_for_mode('neuro', t['symbol'], t['direction'])}")
+                        continue
+                    e = min(lv, cs[f]["open"]) if s > 0 else max(lv, cs[f]["open"]); k0 = f
+                else:
+                    e = cs[0]["open"]
                 with _nx_lock:
-                    t.update({"entry": e, "sl": e - s * risk, "tp": e + s * take_r * risk})
+                    t.update({"entry": e, "sl": e - s * risk, "tp": e + s * take_r * risk, "k0": k0, "status": "OPEN",
+                              "until": int(cs[k0]["time"] + hold * 3600)})
                 changed = True
             e, sl, tp = t["entry"], t["sl"], t["tp"]
             res = None
+            cs = cs[k0:]
             for k, c in enumerate(cs[:hold]):
                 if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
-                    res = ("LOSS", sl, k)
+                    gap = k > 0 and ((c["open"] <= sl) if s > 0 else (c["open"] >= sl))   # v0.99.663: a gap fills at the open
+                    res = ("LOSS", c["open"] if gap else sl, k)
                     break
                 if (c["high"] >= tp) if s > 0 else (c["low"] <= tp):
                     res = ("WIN", tp, k)
@@ -31416,6 +31437,40 @@ def nx_settle(now=None):
         nx_save()
 
 
+def nx_watch_tick():
+    """v0.99.663 — the Neuro limit on the exchange: a pending signal whose price reached its limit within the wait opens the
+    real trade at market (the stop / take from the fill)"""
+    now = time.time()
+    rule = (_NX.get("model") or {}).get("rule") or {}
+    with _nx_lock:
+        todo = [t for t in _NX["trades"] if t["status"] == "PENDING" and not t.get("rt") and t.get("lv")
+                and now < t["hour"] + int(t.get("wait") or 3) * 3600]
+    if not todo or not rule:
+        return
+    px = {}
+    for tk in get_tickers() or []:
+        try:
+            px[tk["contract"]] = float(tk.get("last") or 0)
+        except (TypeError, ValueError):
+            pass
+    for t in todo:
+        p = px.get(t["symbol"]); s = t["side"]
+        if not p or not ((p <= t["lv"]) if s > 0 else (p >= t["lv"])):
+            continue
+        with _nx_lock:
+            t["rt"] = True
+        risk = t["risk"]
+        try:
+            res = execute_autotrade("neuro", t["symbol"], t["direction"], p, p - s * risk, p + s * float(t["take_r"]) * risk,
+                                    extra={"neuro": f"лимитка {t['score']}"}, risk_pct_override=MODULE_RISK_PCT.get("neuro") or NX_RISK_DEFAULT)
+            with _nx_lock:
+                t["real"] = (res or {}).get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+                t["autotrade"] = {"status": (res or {}).get("status"), "detail": str((res or {}).get("detail") or "")[:200]}
+        except Exception as e:
+            log_error(f"neuro limit autotrade {t['symbol']}: {e}")
+    nx_save()
+
+
 def nx_loop():
     time.sleep(120)
     nx_load()
@@ -31431,6 +31486,8 @@ def nx_loop():
                     if now - h < 20 * 60:   # entry at the hour's open — too late into the hour, skip it
                         nx_scan_once()
                     last_hour = h
+                if AUTOTRADE_ENABLED_NEURO:
+                    nx_watch_tick()
         except Exception as e:
             log_error(f"nx_loop: {e}")
             with _nx_lock:
@@ -31451,7 +31508,7 @@ def nx_stats():
             "risk": MODULE_RISK_PCT.get("neuro") or NX_RISK_DEFAULT,
             "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap")} if m else None,
             "n_feats": len(NX_NAMES), "err": err, "scan": scan, "near": last,
-            "open": [t for t in trades if t["status"] == "OPEN"][-30:],
+            "open": [t for t in trades if t["status"] in ("OPEN", "PENDING")][-30:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
             "last": [{k: t.get(k) for k in ("symbol", "side", "hour", "r", "result", "real")} for t in sorted(fin, key=lambda t: -t["hour"])[:30]]}
@@ -31664,7 +31721,7 @@ def api_bt_trades():
         return jsonify({"trades": [], "err": str(e)[:200]})
 
 
-RBX_RULE_VER = 655   # v0.99.648 — the breakout's trading rule (stop 2 ATR, the channel 15 after +4R) for the live check; 654 — the partial take; 655 — strong only + the failed-breakout exit
+RBX_RULE_VER = 663   # 663 — the limit entry; v0.99.648 — the breakout's trading rule (stop 2 ATR, the channel 15 after +4R) for the live check; 654 — the partial take; 655 — strong only + the failed-breakout exit
 
 
 def live_vs_bt(mod, rs):
@@ -32642,6 +32699,9 @@ RBX_PART_R, RBX_PART_F = 1.0, 0.25
 # 42%, the longest losing run 13 vs 14; the check set x13 vs x11, the run 12 vs 18; ~2.7 trades a week instead of 3.7.
 # A confirmation bar, a retest entry, other stops: worse (tools/rr_hunt/rb_fail.py, rb_part2.py).
 RBX_MIN_BRK, RBX_FAIL_K = 0.6, 2
+# v0.99.663 — the entry by a limit 0.2 ATR better than the entry bar's open, waiting 3 bars of the chart (no fill = no trade):
+# the bot's set +0.60R a trade vs +0.53R, x103 vs x54 at an equal drawdown; the check set +0.40R vs +0.29R (tools/rr_hunt/rb_lim.py)
+RBX_LIM_ATR, RBX_LIM_WAIT = 0.2, 3
 RBX_CHARTS = {"1d": {"hrs": 24, "n": 20, "k": 2.5, "hold": 180, "cap": 6, "name": "день"},
               "12h": {"hrs": 12, "n": 30, "k": 4.0, "hold": 360, "cap": 6, "name": "12ч"}}
 # v0.99.646 — the stop 2 ATR (was 1.5): better on the bot's breakouts and on a check set (the other range lengths) at
@@ -32654,7 +32714,7 @@ RBX_TOP = int(os.environ.get("VP_RBX_TOP", "120"))
 RBX_RISK_DEFAULT = 0.5
 RBX_FEE, RBX_FUND = 0.001, 0.0003
 RBX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_rbx_state.json")
-RBX_RESEARCH = json.loads('''{"24_part":{"years":{"2021":{"n":20,"avg":1.59,"wk":0.4,"sum":31.9,"dd":7.5,"wr":25.0,"days":21.0,"best":32.1},"2022":{"n":31,"avg":1.27,"wk":0.6,"sum":39.5,"dd":5.8,"wr":64.5,"days":47.0,"best":17.7},"2023":{"n":33,"avg":-0.08,"wk":0.6,"sum":-2.8,"dd":7.1,"wr":48.5,"days":32.0,"best":1.7},"2024":{"n":47,"avg":2.04,"wk":0.9,"sum":95.7,"dd":10.8,"wr":55.3,"days":25.0,"best":36.5},"2025":{"n":56,"avg":0.32,"wk":0.6,"sum":18.0,"dd":12.7,"wr":51.8,"days":32.0,"best":11.4}},"max_losing_streak":9},"12_part":{"years":{"2021":{"n":107,"avg":0.64,"wk":2.1,"sum":68.4,"dd":17.8,"wr":48.6,"days":9.0,"best":33.7},"2022":{"n":80,"avg":0.33,"wk":1.5,"sum":26.8,"dd":7.0,"wr":72.5,"days":13.0,"best":6.2},"2023":{"n":110,"avg":0.41,"wk":2.1,"sum":44.7,"dd":8.9,"wr":60.9,"days":12.0,"best":13.9},"2024":{"n":116,"avg":0.11,"wk":2.2,"sum":13.3,"dd":17.8,"wr":53.4,"days":11.0,"best":12.9},"2025":{"n":213,"avg":0.44,"wk":2.3,"sum":92.9,"dd":19.4,"wr":49.8,"days":13.0,"best":82.8}},"max_losing_streak":12},"24_dc20":{"years":{"2021":{"n":20,"avg":2.4,"wk":0.4,"sum":48.0,"dd":7.2,"wr":15.0,"days":27.0,"best":42.5},"2022":{"n":30,"avg":1.59,"wk":0.6,"sum":47.6,"dd":9.0,"wr":46.7,"days":49.0,"best":23.3},"2023":{"n":33,"avg":-0.12,"wk":0.6,"sum":-3.9,"dd":11.1,"wr":36.4,"days":34.0,"best":2.2},"2024":{"n":45,"avg":2.61,"wk":0.9,"sum":117.5,"dd":19.9,"wr":26.7,"days":29.0,"best":48.4},"2025":{"n":53,"avg":0.68,"wk":0.6,"sum":35.9,"dd":17.5,"wr":37.7,"days":38.0,"best":15.0}},"max_losing_streak":15},"24_half2dc20":{"years":{"2021":{"n":34,"avg":1.55,"wk":0.7,"sum":52.7,"dd":10.2,"wr":47.1,"days":35.0,"best":22.2},"2022":{"n":39,"avg":0.73,"wk":0.7,"sum":28.5,"dd":3.9,"wr":66.7,"days":46.0,"best":2.9},"2023":{"n":44,"avg":0.43,"wk":0.8,"sum":18.9,"dd":12.0,"wr":38.6,"days":38.0,"best":7.8},"2024":{"n":59,"avg":0.59,"wk":1.1,"sum":34.8,"dd":12.8,"wr":39.0,"days":27.0,"best":25.2},"2025":{"n":97,"avg":0.62,"wk":1.1,"sum":59.9,"dd":12.6,"wr":42.3,"days":34.0,"best":38.1}},"max_losing_streak":14},"12_dc20":{"years":{"2021":{"n":92,"avg":1.01,"wk":1.8,"sum":92.7,"dd":25.4,"wr":23.9,"days":13.0,"best":44.7},"2022":{"n":68,"avg":0.47,"wk":1.3,"sum":31.8,"dd":11.0,"wr":42.6,"days":20.0,"best":8.6},"2023":{"n":88,"avg":0.62,"wk":1.7,"sum":54.4,"dd":18.6,"wr":37.5,"days":18.0,"best":18.2},"2024":{"n":105,"avg":0.12,"wk":2.0,"sum":12.4,"dd":28.6,"wr":30.5,"days":16.0,"best":17.0},"2025":{"n":192,"avg":0.62,"wk":2.1,"sum":119.9,"dd":28.4,"wr":33.3,"days":16.0,"best":110.1}},"max_losing_streak":21},"12_half2dc20":{"years":{"2021":{"n":119,"avg":0.39,"wk":2.3,"sum":46.0,"dd":17.4,"wr":39.5,"days":15.0,"best":14.2},"2022":{"n":94,"avg":0.35,"wk":1.8,"sum":33.3,"dd":14.7,"wr":46.8,"days":19.0,"best":4.0},"2023":{"n":135,"avg":0.19,"wk":2.6,"sum":25.3,"dd":25.5,"wr":33.3,"days":15.0,"best":10.1},"2024":{"n":143,"avg":0.41,"wk":2.7,"sum":58.5,"dd":25.1,"wr":35.7,"days":14.0,"best":40.7},"2025":{"n":269,"avg":0.3,"wk":3.0,"sum":81.2,"dd":27.6,"wr":40.9,"days":15.0,"best":56.1}},"max_losing_streak":13}}''')   # {"24_dc20" | "24_half2dc20" | "12_dc20" | "12_half2dc20": {"years", "max_losing_streak"}}
+RBX_RESEARCH = json.loads('''{"24_part":{"years":{"2021":{"n":19,"avg":1.75,"wk":0.4,"sum":33.2,"dd":6.7,"wr":26.3,"days":24.0,"best":32.2},"2022":{"n":24,"avg":1.09,"wk":0.5,"sum":26.2,"dd":4.1,"wr":62.5,"days":38.0,"best":17.8},"2023":{"n":34,"avg":-0.17,"wk":0.7,"sum":-5.6,"dd":11.1,"wr":44.1,"days":30.0,"best":1.9},"2024":{"n":42,"avg":1.32,"wk":0.8,"sum":55.3,"dd":12.1,"wr":45.2,"days":22.0,"best":36.6},"2025":{"n":53,"avg":0.5,"wk":0.6,"sum":26.5,"dd":10.4,"wr":58.5,"days":34.0,"best":11.5}},"max_losing_streak":9},"12_part":{"years":{"2021":{"n":104,"avg":0.51,"wk":2.0,"sum":53.1,"dd":15.4,"wr":52.9,"days":9.0,"best":33.8},"2022":{"n":77,"avg":0.29,"wk":1.5,"sum":22.0,"dd":9.4,"wr":67.5,"days":12.0,"best":6.3},"2023":{"n":104,"avg":0.44,"wk":2.0,"sum":45.3,"dd":10.1,"wr":59.6,"days":13.0,"best":13.9},"2024":{"n":105,"avg":0.75,"wk":2.0,"sum":78.4,"dd":12.4,"wr":55.2,"days":12.0,"best":58.0},"2025":{"n":202,"avg":0.62,"wk":2.2,"sum":124.3,"dd":15.6,"wr":50.5,"days":14.0,"best":82.9}},"max_losing_streak":12},"24_dc20":{"years":{"2021":{"n":19,"avg":2.61,"wk":0.4,"sum":49.6,"dd":6.5,"wr":15.8,"days":30.0,"best":42.6},"2022":{"n":24,"avg":1.27,"wk":0.5,"sum":30.5,"dd":6.5,"wr":37.5,"days":41.0,"best":23.4},"2023":{"n":33,"avg":-0.26,"wk":0.6,"sum":-8.6,"dd":15.0,"wr":24.2,"days":33.0,"best":2.3},"2024":{"n":38,"avg":2.68,"wk":0.7,"sum":101.8,"dd":17.6,"wr":21.1,"days":26.0,"best":48.5},"2025":{"n":53,"avg":0.82,"wk":0.6,"sum":43.3,"dd":14.0,"wr":43.4,"days":37.0,"best":15.1}},"max_losing_streak":17},"24_half2dc20":{"years":{"2021":{"n":34,"avg":1.55,"wk":0.7,"sum":52.7,"dd":10.2,"wr":47.1,"days":35.0,"best":22.2},"2022":{"n":39,"avg":0.73,"wk":0.7,"sum":28.5,"dd":3.9,"wr":66.7,"days":46.0,"best":2.9},"2023":{"n":44,"avg":0.43,"wk":0.8,"sum":18.9,"dd":12.0,"wr":38.6,"days":38.0,"best":7.8},"2024":{"n":59,"avg":0.59,"wk":1.1,"sum":34.8,"dd":12.8,"wr":39.0,"days":27.0,"best":25.2},"2025":{"n":97,"avg":0.62,"wk":1.1,"sum":59.9,"dd":12.6,"wr":42.3,"days":34.0,"best":38.1}},"max_losing_streak":14},"12_dc20":{"years":{"2021":{"n":87,"avg":0.83,"wk":1.7,"sum":72.1,"dd":18.0,"wr":26.4,"days":13.0,"best":44.8},"2022":{"n":70,"avg":0.29,"wk":1.3,"sum":20.4,"dd":13.2,"wr":37.1,"days":17.0,"best":8.7},"2023":{"n":86,"avg":0.66,"wk":1.6,"sum":56.4,"dd":16.9,"wr":37.2,"days":19.0,"best":18.3},"2024":{"n":96,"avg":0.3,"wk":1.8,"sum":28.8,"dd":30.1,"wr":28.1,"days":16.0,"best":17.1},"2025":{"n":194,"avg":0.64,"wk":2.1,"sum":124.7,"dd":23.4,"wr":30.4,"days":16.0,"best":110.2}},"max_losing_streak":24},"12_half2dc20":{"years":{"2021":{"n":119,"avg":0.39,"wk":2.3,"sum":46.0,"dd":17.4,"wr":39.5,"days":15.0,"best":14.2},"2022":{"n":94,"avg":0.35,"wk":1.8,"sum":33.3,"dd":14.7,"wr":46.8,"days":19.0,"best":4.0},"2023":{"n":135,"avg":0.19,"wk":2.6,"sum":25.3,"dd":25.5,"wr":33.3,"days":15.0,"best":10.1},"2024":{"n":143,"avg":0.41,"wk":2.7,"sum":58.5,"dd":25.1,"wr":35.7,"days":14.0,"best":40.7},"2025":{"n":269,"avg":0.3,"wk":3.0,"sum":81.2,"dd":27.6,"wr":40.9,"days":15.0,"best":56.1}},"max_losing_streak":13}}''')   # {"24_dc20" | "24_half2dc20" | "12_dc20" | "12_half2dc20": {"years", "max_losing_streak"}}
 RBX_RESEARCH_MONTHS = json.loads('''{"months":[["2025-01",1,12.8],["2025-02",1,-0.5],["2025-03",3,2.4],["2025-04",7,8.3],["2025-05",5,-2.9],["2025-06",4,0.5],["2025-07",6,-3.9],["2025-08",6,-1.2],["2025-09",7,-7.2],["2025-11",4,84.6],["2026-01",7,2.2],["2026-02",2,-0.8],["2026-03",3,10.3],["2026-04",8,-1.8],["2026-05",8,-3.2],["2026-07",7,1.8],["2026-08",11,-6.2],["2026-09",4,-4.1],["2026-10",4,20.1]],"pos_months":29,"all_months":69}''')   # the daily trend exit, month by month (2025–26)
 _RBX = {"trades": [], "loaded": False, "scan": None, "watch": [], "err": None}
 _rbx_lock = threading.Lock()
@@ -32774,7 +32834,7 @@ def rbx_scan_once(chart):
         if c["brk"] < RBX_MIN_BRK:     # v0.99.655: a weak breakout (the close barely beyond the range)
             continue
         with _rbx_lock:
-            opn = [t for t in _RBX["trades"] if t["status"] == "OPEN"]
+            opn = [t for t in _RBX["trades"] if t["status"] in ("OPEN", "PENDING")]
         if any(t["symbol"] == c["symbol"] and t["side"] == c["side"] for t in opn) or \
                 sum(1 for t in opn if t["side"] == c["side"] and t.get("chart", "1d") == chart) >= cfg["cap"]:
             continue
@@ -32800,9 +32860,10 @@ def rbx_open(c, chart, t_bar, live_px=None):
     tr = {"id": f"rbx_{chart}_{sym}_{s}_{t_bar}", "symbol": sym, "side": s, "direction": direction, "chart": chart, "hrs": cfg["hrs"],
           "hold": cfg["hold"], "day": t_bar, "risk": risk, "entry": None, "sl": sl, "px": px, "rg": c["rg"], "brk": round(c["brk"], 2),
           "half": False, "half_done": False, "part": bool(RBX_PART), "part_r": RBX_PART_R, "part_f": RBX_PART_F, "part_done": False,
-          "lvl": c["hh"] if s > 0 else c["ll"], "fail_k": RBX_FAIL_K, "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False,
+          "lvl": c["hh"] if s > 0 else c["ll"], "fail_k": RBX_FAIL_K, "status": "PENDING" if RBX_LIM_ATR else "OPEN",
+          "lim_atr": RBX_LIM_ATR, "wait": RBX_LIM_WAIT, "lv": px - s * RBX_LIM_ATR * c["atr"], "result": None, "r": None, "exit": None, "t_out": None, "real": False,
           "rv": RBX_RULE_VER}
-    if AUTOTRADE_ENABLED_RBX and live_px:
+    if AUTOTRADE_ENABLED_RBX and live_px and not RBX_LIM_ATR:
         try:
             res = execute_autotrade("rbx", sym, direction, live_px, sl, tp, extra={"пробой": f"{cfg['name']} сжатие {c['rg']}"},
                                     risk_pct_override=MODULE_RISK_PCT.get("rbx") or RBX_RISK_DEFAULT)
@@ -32819,7 +32880,8 @@ def rbx_open(c, chart, t_bar, live_px=None):
                    f"выход, когда свеча {cfg['name']} закроется {'ниже 20-свечного минимума' if s > 0 else 'выше 20-свечного максимума'} (после +{RBX_TIGHT_R:g}R — {RBX_TIGHT_DC}-свечного)" + \
                    (f"; если в первые {RBX_FAIL_K} свечи закроется обратно в коридор — выход сразу" if RBX_FAIL_K else "")
         send_telegram(f"{'🟢' if s > 0 else '🔴'} {sym.replace('_USDT', '')} {direction} · 📈 Пробой ({cfg['name']})\n"
-                      f"вход по рынку ~{px:.6g} · стоп {sl:.6g} ({(sl - px) / px * 100:+.1f}%)" +
+                      + (f"вход лимиткой ~{tr['lv']:.6g} ({(tr['lv'] - px) / px * 100:+.2f}%, ждать {RBX_LIM_WAIT} свечи — не дойдёт, сделки нет)" if RBX_LIM_ATR else f"вход по рынку ~{px:.6g}")
+                      + f" · стоп {sl:.6g} ({(sl - px) / px * 100:+.1f}%)" +
                       (f" · {round(RBX_PART_F * 100)}% на {px + s * RBX_PART_R * risk:.6g}" if tr["part"] else "") + f"\n{exit_txt}\n"
                       f"{cfg['n']} свечей цена шла в коридоре {c['rg']} среднего хода · " + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"),
                       category="rbx")
@@ -32892,7 +32954,7 @@ def rbx_settle(now=None):
     now = now or time.time()
     changed = False
     with _rbx_lock:
-        opn = [t for t in _RBX["trades"] if t["status"] == "OPEN"]
+        opn = [t for t in _RBX["trades"] if t["status"] in ("OPEN", "PENDING")]
     for t in opn:
         try:
             chart = t.get("chart", "1d")
@@ -32903,10 +32965,27 @@ def rbx_settle(now=None):
             if k0 is None or k0 < RBX_DC:
                 continue
             if t.get("entry") is None:
-                e = cs[k0]["open"]
+                lim = float(t.get("lim_atr") or 0)
+                kf = k0
+                if lim:   # v0.99.663 — the limit lim ATR better than the entry bar's open, `wait` bars
+                    s_ = t["side"]; lv = cs[k0]["open"] - s_ * lim * t["risk"] / RBX_STOP_ATR; wait = int(t.get("wait") or 3)
+                    kf = next((k for k in range(k0, min(len(cs), k0 + wait)) if ((cs[k]["low"] <= lv) if s_ > 0 else (cs[k]["high"] >= lv))), None)
+                    if kf is None:
+                        if len(cs) - k0 >= wait:
+                            with _rbx_lock:
+                                t.update({"status": "CLOSED", "result": "NO_FILL", "r": None, "lv": lv, "t_out": int(cs[k0 + wait - 1]["time"] + sec)})
+                            changed = True
+                            if t.get("real") and AUTOTRADE_ENABLED_RBX:
+                                log_error(f"rbx no-fill {t['symbol']}: {close_position_for_mode('rbx', t['symbol'], t['direction'])}")
+                        continue
+                    e = min(lv, cs[kf]["open"]) if s_ > 0 else max(lv, cs[kf]["open"])
+                else:
+                    e = cs[k0]["open"]
                 with _rbx_lock:
-                    t.update({"entry": e, "sl": e - t["side"] * t["risk"]})
+                    t.update({"entry": e, "sl": e - t["side"] * t["risk"], "kf_t": cs[kf]["time"], "status": "OPEN"})
                 changed = True
+            if t.get("kf_t") is not None:
+                k0 = next((k for k, c in enumerate(cs) if c["time"] == t["kf_t"]), k0)
             res = rbx_walk(cs, k0, t)
             if not res:
                 continue
@@ -32982,6 +33061,41 @@ def rbx_half_tick():
     rbx_save()
 
 
+def rbx_watch_tick():
+    """v0.99.663 — the breakout limit on the exchange: a pending signal whose price reached its limit within the wait opens
+    the real trade at market (the stop 2 ATR from the fill, the far guard take)"""
+    now = time.time()
+    with _rbx_lock:
+        todo = [t for t in _RBX["trades"] if t["status"] == "PENDING" and not t.get("rt") and t.get("lv")
+                and now < t["day"] + int(t.get("wait") or 3) * int(t.get("hrs") or 24) * 3600]
+    if not todo:
+        return
+    px = {}
+    for tk in get_tickers() or []:
+        try:
+            px[tk["contract"]] = float(tk.get("last") or 0)
+        except (TypeError, ValueError):
+            pass
+    for t in todo:
+        p = px.get(t["symbol"]); s = t["side"]
+        if not p or not ((p <= t["lv"]) if s > 0 else (p >= t["lv"])):
+            continue
+        with _rbx_lock:
+            t["rt"] = True
+        risk = t["risk"]; sl = p - s * risk
+        tp = p + 40 * risk if s > 0 else max(p - 40 * risk, p * 0.05)
+        try:
+            res = execute_autotrade("rbx", t["symbol"], t["direction"], p, sl, tp, extra={"пробой": f"лимитка {t.get('chart')}"},
+                                    risk_pct_override=MODULE_RISK_PCT.get("rbx") or RBX_RISK_DEFAULT)
+            with _rbx_lock:
+                t["real"] = (res or {}).get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+                t["px"] = p    # the partial take's trigger and the break-even from the real fill
+                t["autotrade"] = {"status": (res or {}).get("status"), "detail": str((res or {}).get("detail") or "")[:200]}
+        except Exception as e:
+            log_error(f"rbx limit autotrade {t['symbol']}: {e}")
+    rbx_save()
+
+
 def rbx_loop():
     time.sleep(200)
     rbx_load()
@@ -33001,6 +33115,7 @@ def rbx_loop():
                         rbx_scan_once("12h")
                     last_bar = b
                 if AUTOTRADE_ENABLED_RBX:
+                    rbx_watch_tick()
                     rbx_half_tick()
         except Exception as e:
             log_error(f"rbx_loop: {e}")
@@ -33017,7 +33132,7 @@ def rbx_stats():
     rs = [t["r"] for t in fin]
     return {"on": RBX_ENABLED, "auto": AUTOTRADE_ENABLED_RBX, "tg": TELEGRAM_ALERTS_RBX, "half": False, "part": RBX_PART, "part_r": RBX_PART_R, "part_f": RBX_PART_F, "risk": MODULE_RISK_PCT.get("rbx") or RBX_RISK_DEFAULT,
             "min_brk": RBX_MIN_BRK, "fail_k": RBX_FAIL_K, "research": RBX_RESEARCH, "months": RBX_RESEARCH_MONTHS, "charts": RBX_CHARTS, "stop_atr": RBX_STOP_ATR, "dc": RBX_DC, "half_r": RBX_HALF_R, "tight_r": RBX_TIGHT_R, "tight_dc": RBX_TIGHT_DC,
-            "err": err, "scan": scan, "watch": watch, "open": [t for t in trades if t["status"] == "OPEN"][-24:],
+            "err": err, "scan": scan, "watch": watch, "open": [t for t in trades if t["status"] in ("OPEN", "PENDING")][-24:], "lim_atr": RBX_LIM_ATR, "lim_wait": RBX_LIM_WAIT,
             "n": len(rs), "avg": round(sum(rs) / len(rs), 2) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None,
             "live_check": live_vs_bt("rbx", [t["r"] for t in fin if t.get("rv") == RBX_RULE_VER and t.get("part")]),
@@ -38148,7 +38263,7 @@ async function refreshNeuro() {   // v0.99.619 — Neuro v3: the model, the year
     top += `<div class="zsub">Проверка на истории 127 монет — каждый год модель не видела. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>сделка до <b>${rule.hold_h || 12} ч</b></span><span>просадка до <b>${Math.round(dd)}R</b></span></div>
-      <div class="zsub">Вход — по рынку в начале часа, стоп — <b>${rule.stop_atr} ATR</b> часового графика, тейк — <b>${rule.take_r} риска</b>, через ${rule.hold_h} ч выход. Не больше ${m.side_cap || 12} сделок в одну сторону.</div>
+      <div class="zsub">Вход — ${rule.entry_lim_atr ? `<b>лимиткой на ${rule.entry_lim_atr} ATR лучше цены</b> в начале часа (ждёт до ${rule.entry_wait} ч; не дошла — сделки нет)` : 'по рынку в начале часа'}, стоп — <b>${rule.stop_atr} ATR</b> часового графика, тейк — <b>${rule.take_r} риска</b>, через ${rule.hold_h} ч выход. Не больше ${m.side_cap || 12} сделок в одну сторону.</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «Neuro» в настройках риска (пусто = ${d.risk}%). Сделок бывает много одновременно — держите риск маленьким.</div>`}`;
   }
   h += card(`🧠 Нейро ${pill}`, top);
@@ -40342,7 +40457,7 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
             wk: all.length ? all.reduce((a, x) => a + x.wk, 0) / all.length : null, dd: Math.max(0, ...all.map(x => x.dd || 0)),
             days: n ? all.reduce((a, x) => a + (x.days || 0) * x.n, 0) / n : null, streak: (R[key] || {}).max_losing_streak}; };
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
-  let top = `<div class="dim hintx">Монета идёт в узком коридоре (день — ${(ch['1d'] || {}).n || 20} свечей, 12ч — ${(ch['12h'] || {}).n || 30}), потом свеча закрывается за ним — в сторону её собственного тренда (EMA200). Вход сразу после закрытия, стоп ${d.stop_atr || 1.5} ATR. ${d.part ? `<b>На +${d.part_r}R закрывается ${Math.round(d.part_f * 100)}%</b>, стоп переносится в безубыток, остаток идёт по тренду — без тейка, пока тренд жив.` : 'Тейка нет: сделка держится, пока тренд жив.'} Выход — свеча закрылась за ${d.dc || 20}-свечным минимумом (для шорта — максимумом)${d.tight_r ? `; после +${d.tight_r}R — за ${d.tight_dc}-свечным, чтобы сохранить большую часть прибыли` : ''}.${d.min_brk ? ` Берутся только сильные пробои — свеча закрылась за границей на ${d.min_brk} ATR и дальше; если в первые ${d.fail_k} свечи цена закрылась обратно в коридор — выход сразу, не дожидаясь стопа (ложный пробой).` : ''}</div>
+  let top = `<div class="dim hintx">Монета идёт в узком коридоре (день — ${(ch['1d'] || {}).n || 20} свечей, 12ч — ${(ch['12h'] || {}).n || 30}), потом свеча закрывается за ним — в сторону её собственного тренда (EMA200). Вход ${d.lim_atr ? `лимиткой на ${d.lim_atr} ATR лучше цены после закрытия (ждёт до ${d.lim_wait} свечей; не дошла — сделки нет)` : 'сразу после закрытия'}, стоп ${d.stop_atr || 1.5} ATR. ${d.part ? `<b>На +${d.part_r}R закрывается ${Math.round(d.part_f * 100)}%</b>, стоп переносится в безубыток, остаток идёт по тренду — без тейка, пока тренд жив.` : 'Тейка нет: сделка держится, пока тренд жив.'} Выход — свеча закрылась за ${d.dc || 20}-свечным минимумом (для шорта — максимумом)${d.tight_r ? `; после +${d.tight_r}R — за ${d.tight_dc}-свечным, чтобы сохранить большую часть прибыли` : ''}.${d.min_brk ? ` Берутся только сильные пробои — свеча закрылась за границей на ${d.min_brk} ATR и дальше; если в первые ${d.fail_k} свечи цена закрылась обратно в коридор — выход сразу, не дожидаясь стопа (ложный пробой).` : ''}</div>
     <div class="zsub">Проверка на истории 127 монет Binance, 2021–2026; правило выбрано по 2021–23, 2024 и 2025–26 — проверка. Результат на сделку в текущем режиме:</div>`;
   for (const [tf, hk] of [['1d', 24], ['12h', 12]]) {
     const s = sum(`${hk}_${mode}`), o = sum(`${hk}_${d.part ? 'dc20' : 'part'}`);
@@ -40359,7 +40474,7 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
     + `<div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">${['1d', '12h'].map(c => sc[c] ? `${c === '1d' ? 'день' : '12ч'}: проверка ${dd(sc[c].t)}, ${sc[c].coins} монет, пробоев ${sc[c].signals}${sc[c].weak ? ` (+${sc[c].weak} слабых пропущено)` : ''}, открыто ${sc[c].opened}` : '').filter(Boolean).join(' · ')}${sc.t ? ' · ' : ''}следующая — в 03:00 и 15:00 МСК</div>`);
   const op = d.open || [];
   const row = (t, i) => `<div onclick="btLiveOpen('rbx', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
-      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${t.chart === '12h' ? '12ч' : 'день'}${t.half ? (t.half_done ? ' · ½ взята' : ' · ½ на +2R') : ''}${t.part ? (t.part_done ? ' · ¼ взята' : ` · ¼ на +${t.part_r || 1}R`) : ''}${t.real ? ' · 💰' : ''}</span></span>
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${t.chart === '12h' ? '12ч' : 'день'}${t.half ? (t.half_done ? ' · ½ взята' : ' · ½ на +2R') : ''}${t.part ? (t.part_done ? ' · ¼ взята' : ` · ¼ на +${t.part_r || 1}R`) : ''}${t.status === 'PENDING' ? ' · ⏳ лимитка ' + fmtNum(t.lv) : ''}${t.real ? ' · 💰' : ''}</span></span>
       <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry != null ? t.entry : t.px)} · стоп ${fmtNum(t.sl)}</span></div>`;
   const cap = Object.values(ch).reduce((a, c) => a + 2 * (c.cap || 6), 0);
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, `из ${cap} мест`)}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : '')}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>

@@ -20127,3 +20127,10 @@ v0.99.662 - P/R: the entry by a limit 0.3 ATR better than the next bar's open, w
          vs 77%, ~14% fewer trades; the check set +0.049R vs +0.040R; every neighbour (−0.2…−0.4 ATR, 1–6 h) beats the
          market entry too. Real trades: the bot watches the price and opens at market when it reaches the limit within
          the wait. Model ver 7, the backtest list and the stats redone (tools/adaptation pr_lab_x / pr_x* / pr_export_lim).
+v0.99.663 - Limit entries for 🧠 Neuro and 📈 Breakout (no fill within the wait = no trade). Neuro: a limit 0.3 ATR
+         better than the next bar's open, 3 h — the bot's set +0.365R a trade vs +0.281R, x4.9 vs x3.2 at an equal
+         drawdown; the check set +0.257R vs +0.180R, x15.3 vs x9.1 (model ver 5). Breakout: 0.2 ATR better, 3 bars —
+         the bot's set +0.60R vs +0.53R, x103 vs x54; the check set +0.40R vs +0.29R, x65 vs x12.8 (the backtest list
+         redone, 764 trades). Real trades: the bot watches the price and opens at market when it reaches the limit.
+         Checked and not kept: the same limit for 🌊 Cascade (worse on both sets). Tests: tools/neuro_model t_nx_lim
+         146/146, tools/rr_hunt t_rbx_lim 197/200 (two still open at the data's end, one flat-candle coin).

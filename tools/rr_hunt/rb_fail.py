@@ -44,6 +44,13 @@ def run(mask, cap=6, part=True, fail_k=0, fail_buf=0.0, entry="next", retest=0, 
         if entry == "confirm":       # the next bar must close beyond the level too; in at the open after it
             if (s > 0 and C[j + 1] <= lvl) or (s < 0 and C[j + 1] >= lvl): continue
             i0, e = j + 2, O[j + 2]
+        elif entry == "lim":         # v0.99.662 night: a limit `retest` ATR x 0.1 better than the next open, 3 bars
+            lv_ = O[j + 1] - s * (retest / 10.0) * a; q0 = -1
+            for q in range(1, 4):
+                if j + q >= len(C): break
+                if (s > 0 and L[j + q] <= lv_) or (s < 0 and H[j + q] >= lv_): q0 = q; break
+            if q0 < 0: continue
+            i0 = j + q0; e = min(O[i0], lv_) if s > 0 else max(O[i0], lv_)
         elif entry == "retest":      # a limit at the level, waiting `retest` bars
             q0 = -1
             for q in range(1, retest + 1):
