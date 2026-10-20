@@ -27,8 +27,11 @@ def trades(nm, q, side=(1, -1), mask=None, take=None, stop=None, hold=None):
     ev = []
     for s in side:
         sc = S[f"sc_{nm}_{s}"]
-        thr = np.array([S.get(f"thr_{nm}_{s}_{q}_{y}", np.inf) if f"thr_{nm}_{s}_{q}_{y}" in S.files else np.inf for y in range(2000, 2030)])
-        m = (SD == s) & ~np.isnan(sc) & (sc >= thr[np.clip(YR - 2000, 0, 29)])
+        if f"thrv_{nm}_{s}_{q}" in S.files: tv = S[f"thrv_{nm}_{s}_{q}"]     # cas_sel3: a threshold per event (its fold)
+        else:
+            thr = np.array([S[f"thr_{nm}_{s}_{q}_{y}"] if f"thr_{nm}_{s}_{q}_{y}" in S.files else np.inf for y in range(2000, 2030)])
+            tv = thr[np.clip(YR - 2000, 0, 29)]
+        m = (SD == s) & ~np.isnan(sc) & (sc >= tv)
         if mask is not None: m &= mask
         for r in np.where(m)[0]: ev.append((int(T[r]), -float(sc[r]), int(SY[r]), s, int(r)))
     ev.sort(); busy, act, out = {}, [], []

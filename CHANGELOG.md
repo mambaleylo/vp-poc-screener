@@ -20074,3 +20074,12 @@ v0.99.653 - New tab 🌊 Каскад — the user's idea: a close through the w
          P/R 4% + cascade 1% grew x95 vs x26 for P/R alone at the same drawdown. Hourly scan, virtual trades, real
          trades behind their own switch (risk field 🌊, default 0.5%), Telegram, backtest list with the five EMAs on
          the chart, the live-vs-backtest check and the Gate re-walk. Model vp_cas_model.json ver 1 (tools/cascade).
+v0.99.654 - Win rate and losing runs (the user: "очень не нравится подряд по 15 сделок в минус"). 🌊 Cascade: a third
+         of the position off at +0.7R and the stop to the entry, the rest to the take 2.5R (was 2R), at most 6 per
+         side (was 12) — on the 3-model walk-forward WR 53% -> 70%, the longest losing run 16 -> 7, the growth at an
+         equal drawdown x6 -> x14; the check set WR 48% -> 63%, the run 29 -> 14. Model ver 2 (the same trees, the
+         rule and honest stats of the averaged model: 2022 +0.35R, 2023 +0.31R, 2024 +0.59R, 2025–26 +0.20R).
+         📈 Breakout: the "half at +2R" mode replaced by a quarter off at +1R with the stop to the entry (on by
+         default): WR 33% -> 54%, the longest losing run 26 -> 14 at about the same growth; the check set x13 vs x8.
+         Real trades: the share closed at market and the stop moved to the entry on the exchange. Pauses after
+         losses, break-even alone, filters (BTC, ADX, trend, hour): worse. Backtest lists and the Gate check redone.

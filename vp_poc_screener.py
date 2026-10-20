@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.653"
+APP_VERSION = "0.99.654"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1151,7 +1151,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "nq_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_mirror", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "auto_risk_enabled",
-                  "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones", "risk_pct_zm", "risk_pct_rbx", "rbx_enabled", "autotrade_rbx", "telegram_alerts_rbx", "rbx_half",
+                  "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones", "risk_pct_zm", "risk_pct_rbx", "rbx_enabled", "autotrade_rbx", "telegram_alerts_rbx", "rbx_part",
                   "cas_enabled", "autotrade_cas", "telegram_alerts_cas", "risk_pct_cas",   # v0.99.653
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
@@ -1232,7 +1232,7 @@ def get_settings():
         "risk_pct_zones": MODULE_RISK_PCT["zones"],   # v0.99.438
         "risk_pct_zm": MODULE_RISK_PCT.get("zm"),   # v0.99.616
         "risk_pct_rbx": MODULE_RISK_PCT.get("rbx"), "rbx_enabled": RBX_ENABLED, "autotrade_rbx": AUTOTRADE_ENABLED_RBX,   # v0.99.625
-        "telegram_alerts_rbx": TELEGRAM_ALERTS_RBX, "rbx_half": RBX_HALF,
+        "telegram_alerts_rbx": TELEGRAM_ALERTS_RBX, "rbx_part": RBX_PART,
         "cas_enabled": CAS_ENABLED, "autotrade_cas": AUTOTRADE_ENABLED_CAS, "telegram_alerts_cas": TELEGRAM_ALERTS_CAS, "risk_pct_cas": MODULE_RISK_PCT.get("cas"),   # v0.99.653
         "autotrade_zones": AUTOTRADE_ENABLED_ZONES,
         "autotrade_zones_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
@@ -1514,7 +1514,7 @@ def apply_settings(updates):
         globals()["TELEGRAM_TRADE_RESULTS_REAL_ONLY"] = bool(updates["telegram_trade_results_real_only"])
     if "auto_update" in updates:   # v0.99.637
         globals()["AUTO_UPDATE"] = bool(updates["auto_update"])
-    for _k, _g in (("rbx_enabled", "RBX_ENABLED"), ("autotrade_rbx", "AUTOTRADE_ENABLED_RBX"), ("telegram_alerts_rbx", "TELEGRAM_ALERTS_RBX"), ("rbx_half", "RBX_HALF"),
+    for _k, _g in (("rbx_enabled", "RBX_ENABLED"), ("autotrade_rbx", "AUTOTRADE_ENABLED_RBX"), ("telegram_alerts_rbx", "TELEGRAM_ALERTS_RBX"), ("rbx_part", "RBX_PART"),
                    ("cas_enabled", "CAS_ENABLED"), ("autotrade_cas", "AUTOTRADE_ENABLED_CAS"), ("telegram_alerts_cas", "TELEGRAM_ALERTS_CAS")):   # v0.99.625, v0.99.653
         if _k in updates:
             globals()[_g] = bool(updates[_k])
@@ -31464,7 +31464,7 @@ def api_bt_trades():
         return jsonify({"trades": [], "err": str(e)[:200]})
 
 
-RBX_RULE_VER = 647   # v0.99.648 — the breakout's trading rule (stop 2 ATR, the channel 15 after +4R) for the live check
+RBX_RULE_VER = 654   # v0.99.648 — the breakout's trading rule (stop 2 ATR, the channel 15 after +4R) for the live check; 654 — the partial take
 
 
 def live_vs_bt(mod, rs):
@@ -31519,15 +31519,21 @@ def bt_gate_trade(mod, t):
         bars = [c for c in bt_gate_bars(t["s"], "1h", t["t"], t["t"] + 49 * 3600) if c["time"] >= t["t"]]
         if len(bars) < 2 or bars[0]["time"] != t["t"]:
             return None
-        e = bars[0]["open"]; risk = e * abs(e_b - float(t["sl"])) / e_b; sl = e - s * risk; tp = e + s * 2.0 * risk
+        rb = abs(e_b - float(t["sl"]))
+        e = bars[0]["open"]; risk = e * rb / e_b; sl = e - s * risk
+        tp = e + s * (abs(float(t["tp"]) - e_b) / rb if t.get("tp") is not None else 2.0) * risk
+        pr = abs(float(t["pt"]) - e_b) / rb if t.get("pt") is not None else 0.0     # v0.99.654: the partial take (a third)
+        pf, took = 0.33, False
+        res = lambda ex, k: (((pf * pr + (1 - pf) * s * (ex - e) / risk) if took else s * (ex - e) / risk) - fee(e, k, 1) / risk, True)
         for k, c in enumerate(bars[:48]):
             if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
-                ex = c["open"] if k and ((c["open"] <= sl) if s > 0 else (c["open"] >= sl)) else sl
-                return (s * (ex - e) - fee(e, k, 1)) / risk, True
+                return res(c["open"] if k and ((c["open"] <= sl) if s > 0 else (c["open"] >= sl)) else sl, k)
+            if pr and not took and ((c["high"] - e) if s > 0 else (e - c["low"])) >= pr * risk:
+                took = True; sl = e
             if (c["high"] >= tp) if s > 0 else (c["low"] <= tp):
-                return (s * (tp - e) - fee(e, k, 1)) / risk, True
+                return res(tp, k)
         k = min(48, len(bars)) - 1
-        return (s * (bars[k]["close"] - e) - fee(e, k, 1)) / risk, True
+        return res(bars[k]["close"], k)
     if mod in ("prv", "emx"):
         hold = 48 if mod == "prv" else 72
         bars = [c for c in bt_gate_bars(t["s"], "1h", t["t"], t["t"] + (hold + 1) * 3600) if c["time"] >= t["t"]]
@@ -31568,17 +31574,23 @@ def bt_gate_trade(mod, t):
     if k0 is None or k0 < RBX_DC:
         return None
     e = bars[k0]["open"]; risk = e * abs(e_b - float(t["sl"])) / e_b; sl = e - s * risk; best = 0.0
+    pr = abs(float(t["pt"]) - e_b) / abs(e_b - float(t["sl"])) if t.get("pt") is not None else 0.0   # v0.99.654: the partial take
+    pf, took = RBX_PART_F, False
+    res = lambda ex, j: (((pf * pr + (1 - pf) * s * (ex - e) / risk) if took else s * (ex - e) / risk) - fee(e, j, hrs) / risk, True)
     for k in range(k0, min(len(bars), k0 + hold)):
         c = bars[k]; j = k - k0
         if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
-            return (s * (sl - e) - fee(e, j, hrs)) / risk, True
+            gap = j > 0 and ((c["open"] <= sl) if s > 0 else (c["open"] >= sl))
+            return res(c["open"] if gap else sl, j)
         best = max(best, ((c["high"] - e) if s > 0 else (e - c["low"])) / risk)
+        if pr and not took and best >= pr:
+            took = True; sl = e
         dc = RBX_TIGHT_DC if RBX_TIGHT_R and best >= RBX_TIGHT_R else RBX_DC
         lv = min(x["low"] for x in bars[k - dc:k]) if s > 0 else max(x["high"] for x in bars[k - dc:k])
         if (c["close"] < lv) if s > 0 else (c["close"] > lv):
-            return (s * (c["close"] - e) - fee(e, j, hrs)) / risk, True
+            return res(c["close"], j)
     k = min(len(bars), k0 + hold) - 1
-    return (s * (bars[k]["close"] - e) - fee(e, k - k0, hrs)) / risk, True
+    return res(bars[k]["close"], k - k0)
 
 
 def bt_gate_check(mod, months=12):
@@ -31926,7 +31938,11 @@ def api_prx_status():
 # +0.26: P/R 4% + cascade 1% gave x95 at the same 1-in-10 drawdown as P/R 4% alone (x26).
 CAS_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_cas_model.json")
 CAS_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_cas_model.json"
-CAS_MODEL_VER = 1
+CAS_MODEL_VER = 2   # v0.99.654 — 2: the same trees, the rule with the partial take (the stats of the 3-model walk-forward)
+# v0.99.654 (the user: "очень не нравится подряд по 15 сделок в минус"): a third of the position off at +0.7R, the stop to
+# the entry, the rest to the take 2.5R, at most 6 per side. On the 3-model walk-forward (= the exported model): WR 53% -> 70%,
+# the longest losing run 16 -> 7, the growth at an equal drawdown x6 -> x14; on the check set WR 48% -> 63%, the run
+# 29 -> 14 at about the same growth (tools/cascade/cas_wr.py, cas_part.py).
 CAS_EMAS = (5, 10, 14, 20, 28)
 CAS_CTX_NAMES = ["rng", "prior", "since_opp", "exc", "move24", "width", "b24", "atrp"]
 CAS_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_cas_state.json")
@@ -32117,8 +32133,10 @@ def cas_open(m, c, t_hour, live_px=None):
         return False
     tp = px + s * float(rule["take_r"]) * risk
     hold = int(rule["hold_bars"])
+    pr, pf = float(rule.get("part_r") or 0), float(rule.get("part_f") or 0)
     tr = {"id": f"cas_{sym}_{s}_{t_hour}", "symbol": sym, "side": s, "tf": 1, "direction": direction, "hour": t_hour,
-          "score": c["score"], "risk": risk, "entry": None, "sl": sl, "tp": tp, "px": px, "hold": hold, "take_r": float(rule["take_r"]),
+          "score": c["score"], "risk": risk, "risk_px": risk, "entry": None, "sl": sl, "tp": tp, "px": px, "hold": hold, "take_r": float(rule["take_r"]),
+          "part_r": pr, "part_f": pf, "part_done": False, "part": False,
           "until": t_hour + hold * 3600, "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False,
           "rv": CAS_MODEL_VER}
     if AUTOTRADE_ENABLED_CAS and live_px:
@@ -32137,6 +32155,7 @@ def cas_open(m, c, t_hour, live_px=None):
         pct = lambda p: (p - px) / px * 100
         send_telegram(f"{'🟢' if s > 0 else '🔴'} {sym.replace('_USDT', '')} {direction} · 🌊 Каскад EMA (1ч)\n"
                       f"вход по рынку ~{px:.6g} · стоп {sl:.6g} ({pct(sl):+.1f}%) · тейк {tp:.6g} ({pct(tp):+.1f}%) · держать до {hold} ч\n"
+                      + (f"на {px + s * pr * risk:.6g} ({pct(px + s * pr * risk):+.1f}%) закрыть {round(pf * 100)}% и стоп в безубыток\n" if pr else "") +
                       f"оценка модели {c['score']} · " + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"), category="cas")
     return True
 
@@ -32173,12 +32192,15 @@ def cas_settle(now=None):
                         log_error(f"cascade no-trade {t['symbol']}: {close_position_for_mode('cas', t['symbol'], t['direction'])}")
                     continue
             e, tp, risk = t["entry"], t["tp"], t["risk"]
-            res = None
+            pr, pf = float(t.get("part_r") or 0), float(t.get("part_f") or 0)
+            res, st, took = None, sl, False
             for k, c in enumerate(cs[:hold]):
-                if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
-                    gap = k > 0 and ((c["open"] <= sl) if s > 0 else (c["open"] >= sl))
-                    res = ("LOSS", c["open"] if gap else sl, k)
+                if (c["low"] <= st) if s > 0 else (c["high"] >= st):
+                    gap = k > 0 and ((c["open"] <= st) if s > 0 else (c["open"] >= st))
+                    res = ("BREAKEVEN" if took else "LOSS", c["open"] if gap else st, k)
                     break
+                if pr and not took and ((c["high"] - e) if s > 0 else (e - c["low"])) >= pr * risk:   # v0.99.654: the partial take
+                    took, st = True, e
                 if (c["high"] >= tp) if s > 0 else (c["low"] <= tp):
                     res = ("WIN", tp, k)
                     break
@@ -32187,17 +32209,49 @@ def cas_settle(now=None):
             if not res:
                 continue
             kind, ex, k = res
-            r = (s * (ex - e) - e * PRX_FEE - e * PRX_FUND * (k + 1) / 24) / risk
+            rest = s * (ex - e) / risk
+            r = ((pf * pr + (1 - pf) * rest) if took else rest) - (e * PRX_FEE + e * PRX_FUND * (k + 1) / 24) / risk
             if kind == "TIME_EXIT" and t.get("real") and AUTOTRADE_ENABLED_CAS:
                 log_error(f"cascade time exit {t['symbol']}: {close_position_for_mode('cas', t['symbol'], t['direction'])}")
             with _cas_lock:
-                t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + 3600), "r": round(r, 3)})
+                t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + 3600), "r": round(r, 3), "part": took})
             changed = True
-            notify_trade_result("cas", t["symbol"], t["direction"], e, ex, kind, round(r, 3), real=bool(t.get("real")), note="Каскад 1ч")
+            notify_trade_result("cas", t["symbol"], t["direction"], e, ex, "WIN" if r > 0 and kind == "BREAKEVEN" else kind, round(r, 3), real=bool(t.get("real")),
+                                note="Каскад 1ч" + (f" · {round(pf * 100)}% взято на +{pr:g}R" if took else ""))
         except Exception as e_:
             log_error(f"cascade trade {t.get('symbol')}: {e_}")
     if changed:
         cas_save()
+
+
+def cas_part_tick():
+    """v0.99.654 — the partial take of the real trades: once the price reached +part_r R from the real entry — the share
+    off at market, the stop to the entry (the take stays for the rest)"""
+    with _cas_lock:
+        todo = [t for t in _CAS["trades"] if t["status"] == "OPEN" and t.get("real") and t.get("part_r") and not t.get("part_done")]
+    if not todo:
+        return
+    px = {}
+    for tk in get_tickers() or []:
+        try:
+            px[tk["contract"]] = float(tk.get("last") or 0)
+        except (TypeError, ValueError):
+            pass
+    for t in todo:
+        p = px.get(t["symbol"])
+        s, e0, lvl = t["side"], t["px"], float(t["part_r"]) * float(t.get("risk_px") or t["risk"])
+        if not p or not ((p >= e0 + s * lvl) if s > 0 else (p <= e0 + s * lvl)):
+            continue
+        try:
+            note = part_take_on_exchange("cas", t, float(t["part_f"]))
+            with _cas_lock:
+                t["part_done"] = True
+            log_error(f"cascade partial {t['symbol']}: {note} (at ~{p})")
+            if TELEGRAM_ALERTS_CAS and note != "no position":
+                send_telegram(f"🌊 {t['symbol'].replace('_USDT', '')}: +{t['part_r']:g}R — {round(t['part_f'] * 100)}% закрыто, стоп в безубытке ({e0:.6g})", category="cas")
+        except Exception as e:
+            log_error(f"cascade partial {t['symbol']}: {e}")
+    cas_save()
 
 
 def cas_loop():
@@ -32215,6 +32269,8 @@ def cas_loop():
                     if now - h < 20 * 60:
                         cas_scan_once()
                     last_hour = h
+                if AUTOTRADE_ENABLED_CAS:
+                    cas_part_tick()
         except Exception as e:
             log_error(f"cas_loop: {e}")
             with _cas_lock:
@@ -32239,7 +32295,7 @@ def cas_stats():
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
             "live_check": live_vs_bt("cas", [t["r"] for t in fin if t.get("rv") == CAS_MODEL_VER]),
-            "last": [{k: t.get(k) for k in ("symbol", "side", "hour", "r", "result", "real", "entry", "px", "sl", "tp", "exit", "t_out")} for t in sorted(fin, key=lambda t: -t["hour"])[:30]]}
+            "last": [{k: t.get(k) for k in ("symbol", "side", "hour", "r", "result", "real", "entry", "px", "sl", "tp", "exit", "t_out", "part", "part_r", "risk")} for t in sorted(fin, key=lambda t: -t["hour"])[:30]]}
 
 
 @app.route("/api/cas/status")
@@ -32264,7 +32320,13 @@ def api_cas_status():
 RBX_ENABLED = os.environ.get("VP_RBX", "1") == "1"
 AUTOTRADE_ENABLED_RBX = os.environ.get("VP_AUTOTRADE_RBX", "0") == "1"
 TELEGRAM_ALERTS_RBX = os.environ.get("VP_TG_ALERTS_RBX", "1") == "1"
-RBX_HALF = os.environ.get("VP_RBX_HALF", "0") == "1"
+RBX_HALF = False   # v0.99.654 — the "half at +2R" mode replaced by the partial take below (open trades of the old mode finish as they were)
+# v0.99.654 — the partial take (the user: "очень не нравится подряд по 15 сделок в минус"): a quarter of the position off
+# at +1R, the stop to the entry, the rest by the trend. On the bot's breakouts WR 33% -> 54%, the longest losing run 26 -> 14,
+# the growth at an equal 1-in-10 drawdown about the same (x38 vs x33–39); on the check set WR 29% -> 51%, x13 vs x8
+# (tools/rr_hunt/rb_wr.py, rb_part.py). A third / a half at +1R, +0.75R, +1.5R, break-even alone, a pause after losses: worse.
+RBX_PART = os.environ.get("VP_RBX_PART", "1") == "1"
+RBX_PART_R, RBX_PART_F = 1.0, 0.25
 RBX_CHARTS = {"1d": {"hrs": 24, "n": 20, "k": 2.5, "hold": 180, "cap": 6, "name": "день"},
               "12h": {"hrs": 12, "n": 30, "k": 4.0, "hold": 360, "cap": 6, "name": "12ч"}}
 # v0.99.646 — the stop 2 ATR (was 1.5): better on the bot's breakouts and on a check set (the other range lengths) at
@@ -32277,7 +32339,7 @@ RBX_TOP = int(os.environ.get("VP_RBX_TOP", "120"))
 RBX_RISK_DEFAULT = 0.5
 RBX_FEE, RBX_FUND = 0.001, 0.0003
 RBX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_rbx_state.json")
-RBX_RESEARCH = json.loads('''{"24_dc20":{"years":{"2021":{"n":32,"avg":2.85,"wk":0.6,"sum":91.1,"dd":10.2,"wr":34.4,"days":40.0,"best":42.5},"2022":{"n":39,"avg":0.6,"wk":0.7,"sum":23.4,"dd":6.1,"wr":59.0,"days":46.0,"best":3.8},"2023":{"n":44,"avg":0.7,"wk":0.8,"sum":30.7,"dd":12.1,"wr":36.4,"days":38.0,"best":13.6},"2024":{"n":58,"avg":1.12,"wk":1.1,"sum":65.1,"dd":23.5,"wr":25.9,"days":29.0,"best":48.4},"2025":{"n":97,"avg":1.02,"wk":1.1,"sum":98.5,"dd":14.7,"wr":37.1,"days":35.0,"best":74.2}},"max_losing_streak":18},"24_half2dc20":{"years":{"2021":{"n":34,"avg":1.55,"wk":0.7,"sum":52.7,"dd":10.2,"wr":47.1,"days":35.0,"best":22.2},"2022":{"n":39,"avg":0.73,"wk":0.7,"sum":28.5,"dd":3.9,"wr":66.7,"days":46.0,"best":2.9},"2023":{"n":44,"avg":0.43,"wk":0.8,"sum":18.9,"dd":12.0,"wr":38.6,"days":38.0,"best":7.8},"2024":{"n":59,"avg":0.59,"wk":1.1,"sum":34.8,"dd":12.8,"wr":39.0,"days":27.0,"best":25.2},"2025":{"n":97,"avg":0.62,"wk":1.1,"sum":59.9,"dd":12.6,"wr":42.3,"days":34.0,"best":38.1}},"max_losing_streak":14},"12_dc20":{"years":{"2021":{"n":113,"avg":0.74,"wk":2.2,"sum":84.1,"dd":17.8,"wr":34.5,"days":16.0,"best":26.4},"2022":{"n":92,"avg":0.31,"wk":1.8,"sum":28.4,"dd":19.3,"wr":35.9,"days":20.0,"best":8.6},"2023":{"n":126,"avg":0.48,"wk":2.4,"sum":60.2,"dd":34.1,"wr":27.8,"days":17.0,"best":18.2},"2024":{"n":137,"avg":0.89,"wk":2.6,"sum":122.0,"dd":32.7,"wr":29.2,"days":15.0,"best":79.4},"2025":{"n":265,"avg":0.39,"wk":2.9,"sum":102.9,"dd":43.7,"wr":29.8,"days":16.0,"best":110.1}},"max_losing_streak":18},"12_half2dc20":{"years":{"2021":{"n":119,"avg":0.39,"wk":2.3,"sum":46.0,"dd":17.4,"wr":39.5,"days":15.0,"best":14.2},"2022":{"n":94,"avg":0.35,"wk":1.8,"sum":33.3,"dd":14.7,"wr":46.8,"days":19.0,"best":4.0},"2023":{"n":135,"avg":0.19,"wk":2.6,"sum":25.3,"dd":25.5,"wr":33.3,"days":15.0,"best":10.1},"2024":{"n":143,"avg":0.41,"wk":2.7,"sum":58.5,"dd":25.1,"wr":35.7,"days":14.0,"best":40.7},"2025":{"n":269,"avg":0.3,"wk":3.0,"sum":81.2,"dd":27.6,"wr":40.9,"days":15.0,"best":56.1}},"max_losing_streak":13}}''')   # {"24_dc20" | "24_half2dc20" | "12_dc20" | "12_half2dc20": {"years", "max_losing_streak"}}
+RBX_RESEARCH = json.loads('''{"24_part":{"years":{"2021":{"n":32,"avg":1.11,"wk":0.6,"sum":35.6,"dd":9.9,"wr":46.9,"days":23.0,"best":32.1},"2022":{"n":41,"avg":1.07,"wk":0.8,"sum":43.8,"dd":4.7,"wr":70.7,"days":42.0,"best":17.7},"2023":{"n":48,"avg":0.16,"wk":0.9,"sum":7.7,"dd":9.7,"wr":47.9,"days":35.0,"best":6.9},"2024":{"n":71,"avg":0.78,"wk":1.4,"sum":55.1,"dd":15.7,"wr":56.3,"days":23.0,"best":36.5},"2025":{"n":98,"avg":0.82,"wk":1.1,"sum":80.2,"dd":11.3,"wr":56.1,"days":33.0,"best":55.9}},"max_losing_streak":11},"12_part":{"years":{"2021":{"n":129,"avg":0.4,"wk":2.5,"sum":51.4,"dd":17.0,"wr":54.3,"days":12.0,"best":20.1},"2022":{"n":108,"avg":0.08,"wk":2.1,"sum":8.7,"dd":13.3,"wr":60.2,"days":14.0,"best":4.4},"2023":{"n":156,"avg":0.16,"wk":3.0,"sum":25.6,"dd":23.0,"wr":53.8,"days":12.0,"best":13.9},"2024":{"n":151,"avg":0.76,"wk":2.9,"sum":114.6,"dd":19.8,"wr":51.7,"days":14.0,"best":59.7},"2025":{"n":282,"avg":0.37,"wk":3.1,"sum":104.5,"dd":33.6,"wr":51.1,"days":14.0,"best":82.8}},"max_losing_streak":12},"24_dc20":{"years":{"2021":{"n":32,"avg":2.85,"wk":0.6,"sum":91.1,"dd":10.2,"wr":34.4,"days":40.0,"best":42.5},"2022":{"n":39,"avg":0.6,"wk":0.7,"sum":23.4,"dd":6.1,"wr":59.0,"days":46.0,"best":3.8},"2023":{"n":44,"avg":0.7,"wk":0.8,"sum":30.7,"dd":12.1,"wr":36.4,"days":38.0,"best":13.6},"2024":{"n":58,"avg":1.12,"wk":1.1,"sum":65.1,"dd":23.5,"wr":25.9,"days":29.0,"best":48.4},"2025":{"n":97,"avg":1.02,"wk":1.1,"sum":98.5,"dd":14.7,"wr":37.1,"days":35.0,"best":74.2}},"max_losing_streak":18},"24_half2dc20":{"years":{"2021":{"n":34,"avg":1.55,"wk":0.7,"sum":52.7,"dd":10.2,"wr":47.1,"days":35.0,"best":22.2},"2022":{"n":39,"avg":0.73,"wk":0.7,"sum":28.5,"dd":3.9,"wr":66.7,"days":46.0,"best":2.9},"2023":{"n":44,"avg":0.43,"wk":0.8,"sum":18.9,"dd":12.0,"wr":38.6,"days":38.0,"best":7.8},"2024":{"n":59,"avg":0.59,"wk":1.1,"sum":34.8,"dd":12.8,"wr":39.0,"days":27.0,"best":25.2},"2025":{"n":97,"avg":0.62,"wk":1.1,"sum":59.9,"dd":12.6,"wr":42.3,"days":34.0,"best":38.1}},"max_losing_streak":14},"12_dc20":{"years":{"2021":{"n":113,"avg":0.74,"wk":2.2,"sum":84.1,"dd":17.8,"wr":34.5,"days":16.0,"best":26.4},"2022":{"n":92,"avg":0.31,"wk":1.8,"sum":28.4,"dd":19.3,"wr":35.9,"days":20.0,"best":8.6},"2023":{"n":126,"avg":0.48,"wk":2.4,"sum":60.2,"dd":34.1,"wr":27.8,"days":17.0,"best":18.2},"2024":{"n":137,"avg":0.89,"wk":2.6,"sum":122.0,"dd":32.7,"wr":29.2,"days":15.0,"best":79.4},"2025":{"n":265,"avg":0.39,"wk":2.9,"sum":102.9,"dd":43.7,"wr":29.8,"days":16.0,"best":110.1}},"max_losing_streak":18},"12_half2dc20":{"years":{"2021":{"n":119,"avg":0.39,"wk":2.3,"sum":46.0,"dd":17.4,"wr":39.5,"days":15.0,"best":14.2},"2022":{"n":94,"avg":0.35,"wk":1.8,"sum":33.3,"dd":14.7,"wr":46.8,"days":19.0,"best":4.0},"2023":{"n":135,"avg":0.19,"wk":2.6,"sum":25.3,"dd":25.5,"wr":33.3,"days":15.0,"best":10.1},"2024":{"n":143,"avg":0.41,"wk":2.7,"sum":58.5,"dd":25.1,"wr":35.7,"days":14.0,"best":40.7},"2025":{"n":269,"avg":0.3,"wk":3.0,"sum":81.2,"dd":27.6,"wr":40.9,"days":15.0,"best":56.1}},"max_losing_streak":13}}''')   # {"24_dc20" | "24_half2dc20" | "12_dc20" | "12_half2dc20": {"years", "max_losing_streak"}}
 RBX_RESEARCH_MONTHS = json.loads('''{"months":[["2025-01",1,12.8],["2025-02",1,-0.5],["2025-03",3,2.4],["2025-04",7,8.3],["2025-05",5,-2.9],["2025-06",4,0.5],["2025-07",6,-3.9],["2025-08",6,-1.2],["2025-09",7,-7.2],["2025-11",4,84.6],["2026-01",7,2.2],["2026-02",2,-0.8],["2026-03",3,10.3],["2026-04",8,-1.8],["2026-05",8,-3.2],["2026-07",7,1.8],["2026-08",11,-6.2],["2026-09",4,-4.1],["2026-10",4,20.1]],"pos_months":29,"all_months":69}''')   # the daily trend exit, month by month (2025–26)
 _RBX = {"trades": [], "loaded": False, "scan": None, "watch": [], "err": None}
 _rbx_lock = threading.Lock()
@@ -32419,7 +32481,7 @@ def rbx_open(c, chart, t_bar, live_px=None):
     tp = px + 40 * risk if s > 0 else max(px - 40 * risk, px * 0.05)   # the exit is the 20-bar low / high; a far take only as a guard
     tr = {"id": f"rbx_{chart}_{sym}_{s}_{t_bar}", "symbol": sym, "side": s, "direction": direction, "chart": chart, "hrs": cfg["hrs"],
           "hold": cfg["hold"], "day": t_bar, "risk": risk, "entry": None, "sl": sl, "px": px, "rg": c["rg"], "brk": round(c["brk"], 2),
-          "half": bool(RBX_HALF), "half_done": False, "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False,
+          "half": False, "half_done": False, "part": bool(RBX_PART), "part_r": RBX_PART_R, "part_f": RBX_PART_F, "part_done": False, "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False,
           "rv": RBX_RULE_VER}
     if AUTOTRADE_ENABLED_RBX and live_px:
         try:
@@ -32434,11 +32496,11 @@ def rbx_open(c, chart, t_bar, live_px=None):
             return
         _RBX["trades"].append(tr)
     if TELEGRAM_ALERTS_RBX:
-        exit_txt = (f"на +{RBX_HALF_R:g}R закрыть половину и стоп в безубыток, остаток — " if tr["half"] else "тейка нет: ") + \
+        exit_txt = (f"на +{RBX_PART_R:g}R закрыть {round(RBX_PART_F * 100)}% и стоп в безубыток, остаток — " if tr["part"] else "тейка нет: ") + \
                    f"выход, когда свеча {cfg['name']} закроется {'ниже 20-свечного минимума' if s > 0 else 'выше 20-свечного максимума'} (после +{RBX_TIGHT_R:g}R — {RBX_TIGHT_DC}-свечного)"
         send_telegram(f"{'🟢' if s > 0 else '🔴'} {sym.replace('_USDT', '')} {direction} · 📈 Пробой ({cfg['name']})\n"
                       f"вход по рынку ~{px:.6g} · стоп {sl:.6g} ({(sl - px) / px * 100:+.1f}%)" +
-                      (f" · половина на {px + s * RBX_HALF_R * risk:.6g}" if tr["half"] else "") + f"\n{exit_txt}\n"
+                      (f" · {round(RBX_PART_F * 100)}% на {px + s * RBX_PART_R * risk:.6g}" if tr["part"] else "") + f"\n{exit_txt}\n"
                       f"{cfg['n']} свечей цена шла в коридоре {c['rg']} среднего хода · " + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"),
                       category="rbx")
 
@@ -32449,6 +32511,31 @@ def rbx_walk(cs, k0, t):
     Returns (result, exit, bars held, R) or None while open."""
     s, risk, e, sl = t["side"], t["risk"], t["entry"], t["sl"]
     hold, hrs = int(t["hold"]), int(t["hrs"])
+    if t.get("part"):   # v0.99.654 — the partial take, exactly as tools/rr_hunt/rb_part.py
+        pr, pf = float(t.get("part_r") or RBX_PART_R), float(t.get("part_f") or RBX_PART_F)
+        st, took, best = sl, False, 0.0
+
+        def fin2(k, ex):
+            fee = (e * RBX_FEE + e * RBX_FUND * (k + 1) * hrs / 24) / risk
+            rest = s * (ex - e) / risk
+            return ((pf * pr + (1 - pf) * rest) if took else rest) - fee
+        for k in range(k0, min(len(cs), k0 + hold)):
+            c = cs[k]; j = k - k0
+            if (c["low"] <= st) if s > 0 else (c["high"] >= st):
+                gap = j > 0 and ((c["open"] <= st) if s > 0 else (c["open"] >= st))
+                ex = c["open"] if gap else st
+                return ("BREAKEVEN" if took else "LOSS"), ex, j, fin2(j, ex)
+            best = max(best, ((c["high"] - e) if s > 0 else (e - c["low"])) / risk)
+            if not took and best >= pr:
+                took = True; st = e
+            dc = RBX_TIGHT_DC if RBX_TIGHT_R and best >= RBX_TIGHT_R else RBX_DC
+            lv = min(x["low"] for x in cs[k - dc:k]) if s > 0 else max(x["high"] for x in cs[k - dc:k])
+            if (c["close"] < lv) if s > 0 else (c["close"] > lv):
+                return "TREND_END", c["close"], j, fin2(j, c["close"])
+        if len(cs) - k0 >= hold:
+            ex = cs[k0 + hold - 1]["close"]
+            return "TIME_EXIT", ex, hold - 1, fin2(hold - 1, ex)
+        return None
     fin = lambda k, ex, part=1.0, fee=1.0: (s * (ex - e) - e * RBX_FEE * fee - e * RBX_FUND * (k + 1) * hrs / 24) / risk * part
     half_at = None
     best = 0.0
@@ -32514,11 +32601,37 @@ def rbx_settle(now=None):
         rbx_save()
 
 
+def part_take_on_exchange(mode, t, frac):
+    """v0.99.654 — the partial take of a real trade: `frac` of the position off at market (none when the position is a
+    single contract), the stop moved to the entry; the take order, if any, stays for the rest. -> a note for the log"""
+    s, e0 = t["side"], t["px"]
+    with using_account(mode), live_http():
+        pos = next((q for q in (get_open_positions() or []) if q.get("contract") == t["symbol"]), None)
+        size = float((pos or {}).get("size", 0) or 0)
+        if not size or ("LONG" if size > 0 else "SHORT") != t["direction"]:
+            return "no position"
+        n = int(round(abs(size) * frac)) if abs(size) >= 2 else 0
+        if n >= 1:
+            place_market_order(t["symbol"], "SHORT" if s > 0 else "LONG", n, reduce_only=True)
+        for o in (get_open_price_orders() or []):   # the old stop out, a stop at the entry in
+            ini = o.get("initial", {})
+            if ini.get("contract") == t["symbol"] and o.get("trigger", {}).get("rule") == (2 if s > 0 else 1):
+                cancel_price_order(o.get("id"))
+        try:
+            tick = get_contract_spec(t["symbol"]).get("order_price_round")
+        except Exception:
+            tick = None
+        be = round_to_tick_directional(e0, tick, round_up=(s < 0))
+        place_close_trigger_order(t["symbol"], t["direction"], be, 2 if s > 0 else 1, tick)
+    return f"{n} of {abs(size)} off, the stop at the entry {e0}"
+
+
 def rbx_half_tick():
-    """the half mode on the exchange: once the price reached +2R from the real entry — half of the position off at
-    market, the remaining stop moved to the entry (the far guard take stays)"""
+    """the partial take on the exchange: once the price reached the level from the real entry — the share off at market,
+    the stop to the entry. v0.99.654: a quarter at +1R (the old "half at +2R" trades finish as they were)"""
     with _rbx_lock:
-        todo = [t for t in _RBX["trades"] if t["status"] == "OPEN" and t.get("real") and t.get("half") and not t.get("half_done")]
+        todo = [t for t in _RBX["trades"] if t["status"] == "OPEN" and t.get("real")
+                and ((t.get("half") and not t.get("half_done")) or (t.get("part") and not t.get("part_done")))]
     if not todo:
         return
     px = {}
@@ -32529,37 +32642,20 @@ def rbx_half_tick():
             pass
     for t in todo:
         p = px.get(t["symbol"])
-        s, e0 = t["side"], t["px"]
-        if not p or not ((p >= e0 + s * RBX_HALF_R * t["risk"]) if s > 0 else (p <= e0 + s * RBX_HALF_R * t["risk"])):
+        s, e0, half = t["side"], t["px"], bool(t.get("half"))
+        lvl_r = RBX_HALF_R if half else float(t.get("part_r") or RBX_PART_R)
+        frac = 0.5 if half else float(t.get("part_f") or RBX_PART_F)
+        if not p or not ((p >= e0 + s * lvl_r * t["risk"]) if s > 0 else (p <= e0 + s * lvl_r * t["risk"])):
             continue
         try:
-            with using_account("rbx"), live_http():
-                pos = next((q for q in (get_open_positions() or []) if q.get("contract") == t["symbol"]), None)
-                size = float((pos or {}).get("size", 0) or 0)
-                if not size or ("LONG" if size > 0 else "SHORT") != t["direction"]:
-                    with _rbx_lock:
-                        t["half_done"] = True
-                    continue
-                half = int(abs(size) // 2)
-                if half >= 1:
-                    place_market_order(t["symbol"], "SHORT" if s > 0 else "LONG", half, reduce_only=True)
-                for o in (get_open_price_orders() or []):   # the old stop out, a stop at the entry in
-                    ini = o.get("initial", {})
-                    if ini.get("contract") == t["symbol"] and o.get("trigger", {}).get("rule") == (2 if s > 0 else 1):
-                        cancel_price_order(o.get("id"))
-                try:
-                    tick = get_contract_spec(t["symbol"]).get("order_price_round")
-                except Exception:
-                    tick = None
-                be = round_to_tick_directional(e0, tick, round_up=(s < 0))
-                place_close_trigger_order(t["symbol"], t["direction"], be, 2 if s > 0 else 1, tick)
+            note = part_take_on_exchange("rbx", t, frac)
             with _rbx_lock:
-                t["half_done"] = True
-            log_error(f"rbx half {t['symbol']}: half of {abs(size)} off at ~{p}, the stop at the entry {e0}")
-            if TELEGRAM_ALERTS_RBX:
-                send_telegram(f"📈 {t['symbol'].replace('_USDT', '')}: +{RBX_HALF_R:g}R — половина закрыта, стоп в безубытке ({e0:.6g})", category="rbx")
+                t["half_done" if half else "part_done"] = True
+            log_error(f"rbx partial {t['symbol']}: {note} (at ~{p})")
+            if TELEGRAM_ALERTS_RBX and note != "no position":
+                send_telegram(f"📈 {t['symbol'].replace('_USDT', '')}: +{lvl_r:g}R — {round(frac * 100)}% закрыто, стоп в безубытке ({e0:.6g})", category="rbx")
         except Exception as e:
-            log_error(f"rbx half {t['symbol']}: {e}")
+            log_error(f"rbx partial {t['symbol']}: {e}")
     rbx_save()
 
 
@@ -32596,13 +32692,13 @@ def rbx_stats():
         scan, watch, err = _RBX.get("scan"), list(_RBX.get("watch") or []), _RBX.get("err")
     fin = [t for t in trades if t["status"] == "CLOSED" and t.get("r") is not None]
     rs = [t["r"] for t in fin]
-    return {"on": RBX_ENABLED, "auto": AUTOTRADE_ENABLED_RBX, "tg": TELEGRAM_ALERTS_RBX, "half": RBX_HALF, "risk": MODULE_RISK_PCT.get("rbx") or RBX_RISK_DEFAULT,
+    return {"on": RBX_ENABLED, "auto": AUTOTRADE_ENABLED_RBX, "tg": TELEGRAM_ALERTS_RBX, "half": False, "part": RBX_PART, "part_r": RBX_PART_R, "part_f": RBX_PART_F, "risk": MODULE_RISK_PCT.get("rbx") or RBX_RISK_DEFAULT,
             "research": RBX_RESEARCH, "months": RBX_RESEARCH_MONTHS, "charts": RBX_CHARTS, "stop_atr": RBX_STOP_ATR, "dc": RBX_DC, "half_r": RBX_HALF_R, "tight_r": RBX_TIGHT_R, "tight_dc": RBX_TIGHT_DC,
             "err": err, "scan": scan, "watch": watch, "open": [t for t in trades if t["status"] == "OPEN"][-24:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 2) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None,
-            "live_check": live_vs_bt("rbx", [t["r"] for t in fin if t.get("rv") == RBX_RULE_VER and not t.get("half")]),
-            "last": [{k: t.get(k) for k in ("symbol", "side", "chart", "day", "r", "result", "real", "entry", "px", "sl", "exit", "t_out")} for t in sorted(fin, key=lambda t: -t["day"])[:30]]}
+            "live_check": live_vs_bt("rbx", [t["r"] for t in fin if t.get("rv") == RBX_RULE_VER and t.get("part")]),
+            "last": [{k: t.get(k) for k in ("symbol", "side", "chart", "day", "r", "result", "real", "entry", "px", "sl", "exit", "t_out", "part", "part_r", "risk")} for t in sorted(fin, key=lambda t: -t["day"])[:30]]}
 
 
 @app.route("/api/rbx/status")
@@ -36300,10 +36396,10 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow subRow">
         <div>
-          <div class="label">↳ Половина на +2R</div>
-          <div class="sub">на +2R закрыть половину позиции и перенести стоп в безубыток, остаток — по тренду. Винрейт выше (день: 44% вместо 34%), но средний результат ниже (день: +0.83R вместо +1.40R на сделку). Действует на новые сделки</div>
+          <div class="label">↳ Четверть на +1R</div>
+          <div class="sub">на +1R закрыть четверть позиции и перенести стоп в безубыток, остаток — по тренду. Винрейт 54% вместо 33%, стопов подряд до 14 вместо 26, рост депозита при той же просадке — как без неё. Действует на новые сделки</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setRbxHalf"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" id="setRbxPart"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -39738,7 +39834,7 @@ const BT_CH = {'1d': 'день', '12h': '12ч', '1h': '1ч', '4h': '4ч'};
 const BT_EMA_TF = {'4h': '4ч', '1d': 'день', '1w': 'неделя', '1M': 'месяц'};
 const btLabel = t => t.tf ? `EMA ${t.n} · ${BT_EMA_TF[t.tf] || t.tf}` : (BT_CH[t.c] || t.c);
 const btKey = t => t.tf || t.c;
-const BT_KIND = {stop: 'стоп', hard: 'аварийный стоп', STOP_CLOSE: 'стоп по закрытию', HARD_STOP: 'аварийный стоп', take: 'тейк', trend: 'конец тренда', time: 'по времени', LOSS: 'стоп', WIN: 'тейк', TREND_END: 'конец тренда',
+const BT_KIND = {be: 'безубыток после частичной', stop: 'стоп', hard: 'аварийный стоп', STOP_CLOSE: 'стоп по закрытию', HARD_STOP: 'аварийный стоп', take: 'тейк', trend: 'конец тренда', time: 'по времени', LOSS: 'стоп', WIN: 'тейк', TREND_END: 'конец тренда',
   TIME_EXIT: 'по времени', BREAKEVEN: 'безубыток', TIME: 'по времени'};
 function btSection(mod, title) {
   const body = window._btData[mod] ? btListHtml(mod) : '<div class="dim">загружаю…</div>';
@@ -39813,13 +39909,17 @@ function btRowHtml(t, onclick) {
 function btOpen(mod, i) { const t = (window._btData[mod] || [])[i]; if (t) btChart(Object.assign({mod}, t)); }
 function btLiveOpen(mod, i) { const t = (window._btLive[mod] || [])[i]; if (t) btChart(t); }
 function btFromRbx(t) {   // a live 📈 trade -> the chart's trade
-  return {mod: 'rbx', s: t.symbol, d: t.side, c: t.chart || '1d', t: t.day, e: t.entry != null ? t.entry : t.px, sl: t.sl, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+  const e = t.entry != null ? t.entry : t.px;
+  return {mod: 'rbx', s: t.symbol, d: t.side, c: t.chart || '1d', t: t.day, e, sl: t.sl, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true,
+          pt: t.part && t.risk ? e + t.side * (t.part_r || 1) * t.risk : null};
 }
 function btFromEmx(t) {   // v0.99.644 — a live EMA trade -> the chart's trade (shown on 1h candles)
   return {mod: 'emx', s: t.symbol, d: t.side, c: '1h', tf: t.tf, n: t.n, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
 }
 function btFromCas(t) {   // v0.99.653 — a live 🌊 trade -> the chart's trade
-  return {mod: 'cas', s: t.symbol, d: t.side, c: '1h', t: t.hour, e: t.entry != null ? t.entry : t.px, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+  const e = t.entry != null ? t.entry : t.px;
+  return {mod: 'cas', s: t.symbol, d: t.side, c: '1h', t: t.hour, e, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true,
+          pt: t.part_r && t.risk ? e + t.side * t.part_r * t.risk : null};
 }
 function btFromPrx(t) {
   return {mod: 'prv', s: t.symbol, d: t.side, c: (t.tf || 1) + 'h', t: t.hour, e: t.entry != null ? t.entry : t.px, sl: t.sl, tp: t.tp, hs: t.hs, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
@@ -39862,8 +39962,10 @@ function btDraw(bars, o) {
   const hl = [{p: o.e, color: '#ffffff', label: 'вход', tag: 'вх', width: 2, from: ei}, {p: o.sl, color: '#f87171', label: o.hs != null ? 'стоп (закр.)' : 'стоп', tag: 'SL', width: 2, from: ei}];
   if (o.hs != null) hl.push({p: o.hs, color: '#b91c1c', label: 'авар. стоп', tag: 'ав', width: 1, from: ei});
   if (o.tp != null) hl.push({p: o.tp, color: '#34d399', label: 'тейк', tag: 'TP', width: 2, from: ei});
+  if (o.pt != null) hl.push({p: o.pt, color: '#a7f3d0', label: 'частичная', tag: 'ч', width: 1, from: ei});   // v0.99.654
   const zones = [], dots = [], series = [], legend = [{text: (BT_CH[o.c] || o.c) + ' свечи', color: '#a6b0c0'}, {text: isL ? 'лонг' : 'шорт', color: isL ? '#34d399' : '#f87171'}];
   if (o.hs != null) legend.push({text: 'SL — по закрытию свечи · ав — аварийный', color: '#f87171'});
+  if (o.pt != null) legend.push({text: `ч — частичная фиксация (${o.mod === 'rbx' ? '¼' : '⅓'}), дальше стоп в безубытке`, color: '#a7f3d0'});
   if (ei >= 0) {
     zones.push({from: ei, to: xi >= 0 ? xi : bars.length - 1, p1: o.e, p2: o.sl, color: '#f87171'});
     if (o.tp != null) zones.push({from: ei, to: xi >= 0 ? xi : bars.length - 1, p1: o.e, p2: o.tp, color: '#34d399'});
@@ -39899,22 +40001,22 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
   const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
   const coin = s => (s || '').replace('_USDT', '');
   const dd = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
-  const R = d.research || {}, ch = d.charts || {}, mode = d.half ? 'half2dc20' : 'dc20';
+  const R = d.research || {}, ch = d.charts || {}, mode = d.part ? 'part' : 'dc20';
   const sum = key => { const ys = (R[key] || {}).years || {}; const all = Object.values(ys).filter(x => x && x.n);
     const n = all.reduce((a, x) => a + x.n, 0);
     return {ys, n, avg: n ? all.reduce((a, x) => a + x.avg * x.n, 0) / n : null, wr: n ? all.reduce((a, x) => a + x.wr * x.n, 0) / n : null,
             wk: all.length ? all.reduce((a, x) => a + x.wk, 0) / all.length : null, dd: Math.max(0, ...all.map(x => x.dd || 0)),
             days: n ? all.reduce((a, x) => a + (x.days || 0) * x.n, 0) / n : null, streak: (R[key] || {}).max_losing_streak}; };
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
-  let top = `<div class="dim hintx">Монета идёт в узком коридоре (день — ${(ch['1d'] || {}).n || 20} свечей, 12ч — ${(ch['12h'] || {}).n || 30}), потом свеча закрывается за ним — в сторону её собственного тренда (EMA200). Вход сразу после закрытия, стоп ${d.stop_atr || 1.5} ATR. ${d.half ? `<b>Режим «половина на +${d.half_r}R»</b>: на +${d.half_r}R половина закрывается, стоп переносится в безубыток, остаток идёт по тренду.` : 'Тейка нет: сделка держится, пока тренд жив.'} Выход — свеча закрылась за ${d.dc || 20}-свечным минимумом (для шорта — максимумом)${d.tight_r ? `; после +${d.tight_r}R — за ${d.tight_dc}-свечным, чтобы сохранить большую часть прибыли` : ''}.</div>
+  let top = `<div class="dim hintx">Монета идёт в узком коридоре (день — ${(ch['1d'] || {}).n || 20} свечей, 12ч — ${(ch['12h'] || {}).n || 30}), потом свеча закрывается за ним — в сторону её собственного тренда (EMA200). Вход сразу после закрытия, стоп ${d.stop_atr || 1.5} ATR. ${d.part ? `<b>На +${d.part_r}R закрывается ${Math.round(d.part_f * 100)}%</b>, стоп переносится в безубыток, остаток идёт по тренду — без тейка, пока тренд жив.` : 'Тейка нет: сделка держится, пока тренд жив.'} Выход — свеча закрылась за ${d.dc || 20}-свечным минимумом (для шорта — максимумом)${d.tight_r ? `; после +${d.tight_r}R — за ${d.tight_dc}-свечным, чтобы сохранить большую часть прибыли` : ''}.</div>
     <div class="zsub">Проверка на истории 127 монет Binance, 2021–2026; правило выбрано по 2021–23, 2024 и 2025–26 — проверка. Результат на сделку в текущем режиме:</div>`;
   for (const [tf, hk] of [['1d', 24], ['12h', 12]]) {
-    const s = sum(`${hk}_${mode}`), o = sum(`${hk}_${d.half ? 'dc20' : 'half2dc20'}`);
+    const s = sum(`${hk}_${mode}`), o = sum(`${hk}_${d.part ? 'dc20' : 'part'}`);
     top += `<div class="zsub" style="margin-top:8px;"><b>${tf === '1d' ? '📅 День' : '🕛 12 часов'}</b> · в среднем ${sgR(s.avg == null ? null : +s.avg.toFixed(2))} · WR ${s.wr == null ? '—' : Math.round(s.wr)}% · ~${s.wk == null ? '—' : s.wk.toFixed(1)}/нед · держится ~${s.days == null ? '—' : Math.round(s.days)} дн · просадка до ${Math.round(s.dd)}R · до ${s.streak || '—'} стопов подряд</div>
       ${zBars(Object.keys(s.ys).sort().map(y => { const x = s.ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `${x.n} сделок · WR ${Math.round(x.wr)}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
-      <div class="dim" style="font-size:var(--fs-xs);">в другом режиме (${d.half ? 'весь выход по тренду' : `половина на +${d.half_r}R`}): ${sgR(o.avg == null ? null : +o.avg.toFixed(2))} на сделку, WR ${o.wr == null ? '—' : Math.round(o.wr)}%</div>`;
+      <div class="dim" style="font-size:var(--fs-xs);">${d.part ? 'без частичной фиксации' : `с фиксацией ${Math.round((d.part_f || 0.25) * 100)}% на +${d.part_r || 1}R`}: ${sgR(o.avg == null ? null : +o.avg.toFixed(2))} на сделку, WR ${o.wr == null ? '—' : Math.round(o.wr)}%, до ${o.streak || '—'} стопов подряд</div>`;
   }
-  top += `<div class="zbanner warn hintx">Трендовая система: большинство сделок — стоп, бывают длинные серии стопов, а плюс дают редкие сделки на +20…+100R${d.half ? ' (в режиме половины их часть отдаётся за винрейт)' : ''}. Риск держите маленьким (поле «📈», пусто = ${d.risk}%) и не выключайте после серии стопов. 12ч слабее дня (${sgR(+(sum(`12_${mode}`).avg || 0).toFixed(2))} против ${sgR(+(sum(`24_${mode}`).avg || 0).toFixed(2))} на сделку) — зато сделок втрое больше.</div>`;
+  top += `<div class="zbanner warn hintx">Трендовая система: большинство сделок — стоп, бывают длинные серии стопов, а плюс дают редкие сделки на +20…+100R${d.part ? ' (частичная фиксация отдаёт их малую часть за винрейт и короткие серии стопов)' : ''}. Риск держите маленьким (поле «📈», пусто = ${d.risk}%) и не выключайте после серии стопов. 12ч слабее дня (${sgR(+(sum(`12_${mode}`).avg || 0).toFixed(2))} против ${sgR(+(sum(`24_${mode}`).avg || 0).toFixed(2))} на сделку) — зато сделок втрое больше.</div>`;
   let h = card(`📈 Пробой диапазона ${pill}`, top);
   const w = d.watch || [];
   const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;"><b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.chart === '12h' ? '12ч' : 'день'} · коридор ${a.rg} · до пробоя ${a.dist > 0 ? '+' : ''}${a.dist}%</span></span>`;
@@ -39923,7 +40025,7 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
     + `<div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">${['1d', '12h'].map(c => sc[c] ? `${c === '1d' ? 'день' : '12ч'}: проверка ${dd(sc[c].t)}, ${sc[c].coins} монет, пробоев ${sc[c].signals}, открыто ${sc[c].opened}` : '').filter(Boolean).join(' · ')}${sc.t ? ' · ' : ''}следующая — в 03:00 и 15:00 МСК</div>`);
   const op = d.open || [];
   const row = (t, i) => `<div onclick="btLiveOpen('rbx', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
-      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${t.chart === '12h' ? '12ч' : 'день'}${t.half ? (t.half_done ? ' · ½ взята' : ' · ½ на +2R') : ''}${t.real ? ' · 💰' : ''}</span></span>
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${t.chart === '12h' ? '12ч' : 'день'}${t.half ? (t.half_done ? ' · ½ взята' : ' · ½ на +2R') : ''}${t.part ? (t.part_done ? ' · ¼ взята' : ` · ¼ на +${t.part_r || 1}R`) : ''}${t.real ? ' · 💰' : ''}</span></span>
       <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry != null ? t.entry : t.px)} · стоп ${fmtNum(t.sl)}</span></div>`;
   const cap = Object.values(ch).reduce((a, c) => a + 2 * (c.cap || 6), 0);
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, `из ${cap} мест`)}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : '')}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
@@ -39966,7 +40068,7 @@ async function refreshCas() {   // v0.99.653 — 🌊 EMA cascade: the model on 
       <div class="zsub">Проверка на истории 127 монет — каждый год модель не видела. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(1)}</b> сделок в неделю</span><span>до <b>${rule.hold_bars || 48}</b> ч</span><span>просадка до <b>${dd}R</b></span></div>
-      <div class="zsub">Вход — по рынку после закрытия свечи, стоп — <b>за экстремумом последних ${rule.swing_bars || 24} свечей</b> (+${rule.swing_pad_atr || 0.2} ATR), тейк — <b>${rule.take_r || 2} риска</b>, через ${rule.hold_bars || 48} ч выход. Не больше ${m.side_cap || 12} сделок в одну сторону.</div>
+      <div class="zsub">Вход — по рынку после закрытия свечи, стоп — <b>за экстремумом последних ${rule.swing_bars || 24} свечей</b> (+${rule.swing_pad_atr || 0.2} ATR)${rule.part_r ? `, на <b>+${rule.part_r}R закрыть ${Math.round(rule.part_f * 100)}%</b> и стоп в безубыток` : ''}, тейк — <b>${rule.take_r || 2} риска</b>, через ${rule.hold_bars || 48} ч выход. Не больше ${m.side_cap || 12} сделок в одну сторону.${rs.max_losing_streak ? ` Самая длинная серия минусов на истории — ${rs.max_losing_streak}.` : ''}</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «🌊» в настройках риска (пусто = ${d.risk}%).</div>`}`;
   }
   h += card(`🌊 Каскад EMA ${pill}`, top);
@@ -39979,7 +40081,7 @@ async function refreshCas() {   // v0.99.653 — 🌊 EMA cascade: the model on 
     : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
   const op = d.open || [];
   const row = (t, i) => `<div onclick="btLiveOpen('cas', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
-      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim">${t.real ? ' · 💰' : ''}</span></span>
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim">${t.part_r ? (t.part_done ? ' · ⅓ взята' : ` · ⅓ на +${t.part_r}R`) : ''}${t.real ? ' · 💰' : ''}</span></span>
       <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry != null ? t.entry : t.px)} · до ${hm(t.until)}</span></div>`;
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
     ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
@@ -39987,7 +40089,7 @@ async function refreshCas() {   // v0.99.653 — 🌊 EMA cascade: the model on 
     ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromCas(t), `btLiveOpen('cas', ${Math.min(10, op.length) + i})`)).join('')}</details>` : ''}`);
   window._btLive.cas = op.slice(-10).reverse().map(btFromCas).concat((d.last || []).map(btFromCas));
   h += btSection('cas', 'Сделки бэктеста — 2022–2026 (каждый год модель не видела)');
-  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Пять EMA (5, 10, 14, 20, 28) на часовом графике. Событие — свеча закрылась выше всех пяти (лонг) или ниже всех пяти (шорт). Таких пробоев много — на 127 монетах Binance за 6 лет почти миллион, и в среднем они убыточны. Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на них: для каждого — чем кончилась бы сделка со стопом за экстремумом 24 свечей и тейком 2R за 48 ч. Она учитывает и твои картинки: «памп → затухание → пробой вниз» и «пробой вверх → отбой обратно» — последний у модели лучший (шорты после недавнего пробоя вверх: +0.74R, WR 66%). Порог честный: модель учили на прошлых годах и проверяли на следующем. В начале каждого часа бот считает то же самое по только что закрытой свече и открывает сделку, если оценка выше порога (по монете и стороне — одна сделка). Учёт — по свечам 1ч, как в исследовании: вход по открытию следующей свечи, стоп раньше тейка; комиссии и фандинг учтены. Вместе с P/R: месяцы почти независимы (корреляция +0.26), поэтому каскад с риском 1% рядом с P/R 4% на истории растил депозит заметно быстрее при той же просадке.</div></details>`;
+  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Пять EMA (5, 10, 14, 20, 28) на часовом графике. Событие — свеча закрылась выше всех пяти (лонг) или ниже всех пяти (шорт). Таких пробоев много — на 127 монетах Binance за 6 лет почти миллион, и в среднем они убыточны. Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на них: для каждого — чем кончилась бы сделка со стопом за экстремумом 24 свечей и тейком 2R за 48 ч. Торгуется с частичной фиксацией: треть на +0.7R и стоп в безубыток, остаток до 2.5R — так винрейт ~70% вместо ~53%, а серии минусов вдвое короче. Она учитывает и твои картинки: «памп → затухание → пробой вниз» и «пробой вверх → отбой обратно» — последний у модели лучший (шорты после недавнего пробоя вверх: +0.74R, WR 66%). Порог честный: модель учили на прошлых годах и проверяли на следующем. В начале каждого часа бот считает то же самое по только что закрытой свече и открывает сделку, если оценка выше порога (по монете и стороне — одна сделка). Учёт — по свечам 1ч, как в исследовании: вход по открытию следующей свечи, стоп раньше тейка; комиссии и фандинг учтены. Вместе с P/R: месяцы почти независимы (корреляция +0.26), поэтому каскад с риском 1% рядом с P/R 4% на истории растил депозит заметно быстрее при той же просадке.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
 
@@ -41323,7 +41425,7 @@ const setInputs = {
   rbx_enabled: document.getElementById('setRbx'),   // v0.99.625
   autotrade_rbx: document.getElementById('setAutotradeRbx'),
   telegram_alerts_rbx: document.getElementById('setTgRbx'),
-  rbx_half: document.getElementById('setRbxHalf'),
+  rbx_part: document.getElementById('setRbxPart'),
   risk_pct_rbx: document.getElementById('setRiskPctRbx'),
   cas_enabled: document.getElementById('setCas'),   // v0.99.653
   autotrade_cas: document.getElementById('setAutotradeCas'),
