@@ -22,3 +22,15 @@ ATR × take 4 / 5 / 6 / 8 R × hold 1 / 3 / 7 days; `er_final.py <labels>` judge
 rule's +0.15R (+127R, dd 52R). Take 8R / 7 days was unstable (2024 negative). The coin auto-selection is not used
 with this rule: too few trades per coin to judge (it would keep ~1 trade a week). `EXPORT=1 python3 er_export2.py`
 exports it; `t_emx_e2e2.py` checks the bot (47/48 levels, 74/75 trades — the one open at the data's end).
+
+v0.99.644 — the win-rate / RR study (the user: "поднятие винрейта, не ухудшая rr, все гипотезы, фильтры и тп"), same
+method as P/R: `ema_h.py` re-simulates the exits on 1h bars from the yearly walk-forward scores (`er_sc_<LAB>.npz`,
+matches the label 100%), the replay keeps a slot until the real exit; every idea is judged at an equal 1-in-10
+drawdown on the bot's top 3% and on the top 10% check set. `ema_diag.py`: 4h +0.32R vs 1d +0.74R, shorts +0.09R vs longs
++0.59R, a loss at >= 10 daily ATR above the daily EMA200, 59% of the stops were wicks. `ema_rank.py`: R rises with the
+score on 4h / 1d / 1w and for longs, but not for shorts (~0R at every score), and 4h is ~0.2R below 1d at the same score.
+`ema_hyp.py` / `ema_hyp2.py` / `ema_hyp3.py`: better on both sets — the EMA200 filter, take 3R, longs + 4h with a score
+margin of 0.1 (q97 x800 vs x72, q90 x10.1 vs x6.3); not kept — the stop by close (WR 57% but worse on the check set),
+other stops 0.5–1.5, breakeven, takes 2 / 2.5 / 3.5 / 6 / none, holds 48 / 96 / 120 h, a deeper limit (needs real limit
+orders, mixed). Deployed (`ema_export4.py`, model ver 4: the same trees, the rule + filters): 2022–26 939 trades
+(3.8/wk), +0.58R, WR 52%, the longest losing run 19 instead of 33. `t_emx_rule.py` 8/8.

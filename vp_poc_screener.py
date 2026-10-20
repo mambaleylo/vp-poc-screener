@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.643"
+APP_VERSION = "0.99.644"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30008,7 +30008,24 @@ def zm_stats():
 # the price is watched every 30 s; the virtual record follows the 1h candles exactly as the research did.
 EMX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_ema_model.json")
 EMX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_ema_model.json"
-EMX_MODEL_VER = 3   # v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
+EMX_MODEL_VER = 4   # v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
+# v0.99.644 — 4: the same model, a new trading rule from the hypothesis study (tools/ema_model/ema_hyp*.py), better than
+# the old one on the bot's top 3% and on the top 10% check set at an equal drawdown: longs only (on shorts the score does
+# not rank: ~0R at every score), no entry when the price is >= 10 daily ATR above the daily EMA200 (those lost on both
+# sets), a 4h touch only with a score >= the threshold + 0.1 (4h trades are ~0.2R worse than 1d at the same score),
+# take 3R. 2022–26: +0.58R a trade instead of +0.47R, WR 52% instead of 49%, the longest losing run 19 instead of 33.
+EMX_SIDES = (1,)
+EMX_MAX_D_EMA200 = 10.0
+EMX_TF_MARGIN = {"4h": 0.1}
+
+
+def emx_pass(m, tf, side, sc, f):
+    """v0.99.644 — the rule's filters on a scored touch (the model's own fields override the defaults)"""
+    if sc < m["thr"] + float((m.get("tf_margin") or EMX_TF_MARGIN).get(tf, 0.0)):
+        return False
+    if side not in tuple(m.get("sides") or EMX_SIDES):
+        return False
+    return float(f.get("s_d_ema200", 0.0)) < float(m.get("max_d_ema200") or EMX_MAX_D_EMA200)
 EMX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_emx_state.json")
 EMX_TFS = ("4h", "1d", "1w", "1M")
 EMX_EMAS = {"4h": (20, 50, 100, 200), "1d": (7, 14, 21, 28, 50, 100, 200), "1w": (7, 14, 21, 28, 50, 100, 200),
@@ -30302,7 +30319,7 @@ def emx_levels(sym, h1, h4, d1, t_hour, m, bt):
                 continue
             x = [float(f.get(k, 0.0)) for k in m["feats"]]
             sc = sum(zm_tree_pred(t_, x) for t_ in m["models"]) / len(m["models"])
-            if sc >= m["thr"]:
+            if emx_pass(m, tf, side, sc, f):
                 risk = lv * m["rule"]["stop_datr"] * f["datr"] / 100
                 out.append({"symbol": sym, "tf": tf, "n": n, "side": side, "lv": lv, "score": round(sc, 3), "datr": f["datr"],
                             "sl": lv - side * risk, "tp": lv + side * m["rule"]["take_r"] * risk, "hour": t_hour, "px": px,
@@ -30523,12 +30540,13 @@ def emx_stats():
             "sel": {"coins": sel_n, "of": len(m.get("coins") or {}), "rule": cr, "research": m.get("coin_research"),
                     "n_all": len(rs_all), "avg_all": round(sum(rs_all) / len(rs_all), 3) if rs_all else None},
             "risk": MODULE_RISK_PCT.get("emw") or EMX_RISK_DEFAULT,
-            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap")} if m else None,
+            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap", "sides", "max_d_ema200", "tf_margin")} if m else None,
             "err": err, "scan": scan, "armed": armed[:40], "armed_n": len(armed),
             "open": [t for t in trades if t["status"] == "OPEN"][-30:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
-            "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "n", "t_in", "r", "result", "real", "sel")} for t in sorted(fin_all, key=lambda t: -t["t_in"])[:30]]}
+            "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "n", "t_in", "hour", "r", "result", "real", "sel", "entry", "sl", "tp", "exit", "t_out")}
+                     for t in sorted(fin_all, key=lambda t: -t["t_in"])[:30]]}
 
 
 @app.route("/api/emx/status")
@@ -39000,7 +39018,8 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
     top += `<div class="zsub">Проверка на истории — каждый год модель не видела. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>сделка до <b>${Math.round((rule.hold_h || 24))} ч</b></span><span>просадка до <b>${dd}R</b></span></div>
-      <div class="zsub">Вход — на EMA, стоп — <b>${rule.stop_datr} дневного хода</b> монеты за EMA, тейк — <b>${rule.take_r} риска</b>. Не больше ${m.side_cap || 12} сделок в одну сторону.</div>
+      <div class="zsub">Вход — на EMA, стоп — <b>${rule.stop_datr} дневного хода</b> монеты за EMA, тейк — <b>${rule.take_r} риска</b>. Не больше ${m.side_cap || 12} сделок в одну сторону.
+        ${m.sides ? `${m.sides.length === 1 && m.sides[0] === 1 ? 'Только лонги (на шортах модель не различает хорошие касания от плохих). ' : ''}Не входит, если цена уже дальше ${m.max_d_ema200} дневных ATR над EMA200 дня; касания на 4ч — только самые уверенные.` : ''}</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «EMA» в настройках риска (пусто = ${d.risk}%). Сделок много одновременно: просадка на истории до ${dd}R — держите риск маленьким.</div>`}`;
     const sl = d.sel || {}, cr = sl.rule || {}, rsl = sl.research || {};
     if (sl.of) top += `<div class="zsub">🧮 <b>Авто-отбор монет:</b> торгуются <b>${sl.coins} из ${sl.of}</b> — у которых сделки модели были в среднем ≥ ${cr.min_avg != null ? '+' + cr.min_avg : '+0.1'}R (от ${cr.min_n || 10} сделок, история + живые). Остальные — только виртуально, без сигналов и сделок; монета войдёт в список, когда наберёт результат.${rsl.sel ? ` На истории 2025–26: <b>${sgR(rsl.sel.avg)}</b> на сделку, просадка ${rsl.sel.dd}R (без отбора ${sgR(rsl.all.avg)}, просадка ${rsl.all.dd}R).` : ''}</div>`;
@@ -39015,13 +39034,15 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
     : `<div class="dim" style="font-size:var(--fs-sm);">сейчас подходящих уровней нет — пересчёт каждый час${d.scan ? ` (последний ${hm(d.scan.t)}, ${d.scan.coins} монет)` : ''}</div>`);
   // 3. the trades
   const op = d.open || [];
-  const row = t => `<div style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);">
+  const row = (t, i) => `<div onclick="btLiveOpen('emx', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
       <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">EMA ${t.n} · ${tfN[t.tf]}${t.real ? ' · 💰' : ''}${t.sel === false ? ' · вне отбора' : ''}</span></span>
       <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry)} · до ${hm(t.until)}</span></div>`;
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
     ${d.sel && d.sel.n_all > (d.n || 0) ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">выше — монеты в отборе; все монеты вместе: ${d.sel.n_all} сделок, ${sgR(d.sel.avg_all)} в среднем</div>` : ''}
     ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map(row).join('')}</div>` : ''}
-    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${zBars(d.last.map(t => ({label: `${coin(t.symbol)} ${t.side > 0 ? '↑' : '↓'}`, sub: `EMA ${t.n} ${tfN[t.tf]} · ${hm(t.t_in)}${t.sel === false ? ' · вне отбора' : ''}`, v: t.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}`);
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromEmx(t), `btLiveOpen('emx', ${Math.min(10, op.length) + i})`)).join('')}</details>` : ''}`);
+  window._btLive.emx = op.slice(-10).reverse().map(btFromEmx).concat((d.last || []).map(btFromEmx));
+  h += btSection('emx', 'Сделки бэктеста — 2022–2026 (модель каждый год учится только на прошлых)');
   h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Каждый час бот считает уровни EMA формирующихся свечей (их значение известно с открытия свечи и не меняется) и оценивает, каким было бы касание в этот час: график и EMA, разгон к уровню, EMA вокруг, RSI трёх графиков, тренд дня и недели, BTC, сила монеты, другие EMA рядом. Уровни с оценкой выше порога «на прицеле»: цена проверяется каждые 30 с, при касании — сигнал в Telegram${d.auto ? ' и сделка' : ''}. Считается только первое касание EMA за свечу. Учёт сделок — по часовым свечам, как в исследовании: стоп раньше тейка, в час входа тейк не считается, выход через ${rule.hold_h || 24} ч; комиссии и фандинг учтены.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
@@ -39158,6 +39179,9 @@ window._btData = window._btData || {};
 window._btSt = window._btSt || {};
 window._btLive = window._btLive || {};
 const BT_CH = {'1d': 'день', '12h': '12ч', '1h': '1ч', '4h': '4ч'};
+const BT_EMA_TF = {'4h': '4ч', '1d': 'день', '1w': 'неделя', '1M': 'месяц'};
+const btLabel = t => t.tf ? `EMA ${t.n} · ${BT_EMA_TF[t.tf] || t.tf}` : (BT_CH[t.c] || t.c);
+const btKey = t => t.tf || t.c;
 const BT_KIND = {stop: 'стоп', hard: 'аварийный стоп', STOP_CLOSE: 'стоп по закрытию', HARD_STOP: 'аварийный стоп', take: 'тейк', trend: 'конец тренда', time: 'по времени', LOSS: 'стоп', WIN: 'тейк', TREND_END: 'конец тренда',
   TIME_EXIT: 'по времени', BREAKEVEN: 'безубыток', TIME: 'по времени'};
 function btSection(mod, title) {
@@ -39181,11 +39205,11 @@ function btListHtml(mod) {
   const all = window._btData[mod] || [];
   if (!all.length) return '<div class="dim">сделок нет</div>';
   const st = window._btSt[mod] || (window._btSt[mod] = {f: 'all', n: 40});
-  const charts = [...new Set(all.map(t => t.c))];
-  const idx = all.map((t, i) => i).filter(i => st.f === 'all' || all[i].c === st.f);
+  const charts = [...new Set(all.map(btKey))];
+  const idx = all.map((t, i) => i).filter(i => st.f === 'all' || btKey(all[i]) === st.f);
   const rs = idx.map(i => all[i].r), avg = rs.reduce((a, b) => a + b, 0) / (rs.length || 1), wr = rs.filter(r => r > 0).length / (rs.length || 1) * 100;
   const chip = (k, lbl, n) => `<span onclick="btSet('${mod}', 'f', '${k}')" style="display:inline-block;padding:3px 9px;margin:0 6px 6px 0;border-radius:999px;cursor:pointer;border:1px solid var(--line);${st.f === k ? 'background:var(--card);color:var(--tx);' : 'color:var(--tx-3);'}">${lbl} · ${n}</span>`;
-  let h = `<div>${chip('all', 'все', all.length)}${charts.length > 1 ? charts.map(c => chip(c, BT_CH[c] || c, all.filter(t => t.c === c).length)).join('') : ''}</div>
+  let h = `<div>${chip('all', 'все', all.length)}${charts.length > 1 ? charts.map(c => chip(c, BT_EMA_TF[c] || BT_CH[c] || c, all.filter(t => btKey(t) === c).length)).join('') : ''}</div>
     <div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">${idx.length} сделок · в среднем ${avg > 0 ? '+' : ''}${avg.toFixed(2)}R · WR ${wr.toFixed(0)}% · тап по сделке — график</div>`;
   h += idx.slice(0, st.n).map(i => btRowHtml(all[i], `btOpen('${mod}', ${i})`)).join('');
   if (idx.length > st.n) h += `<div style="text-align:center;margin-top:6px;"><button class="btnNeutral" onclick="btSet('${mod}', 'n', ${st.n + 60})">ещё ${Math.min(60, idx.length - st.n)}</button></div>`;
@@ -39195,7 +39219,7 @@ function btRowHtml(t, onclick) {
   const d = new Date(t.t * 1000).toLocaleDateString('ru-RU', {day: '2-digit', month: '2-digit', year: '2-digit'});
   const r = t.r == null ? '<span class="dim">открыта</span>' : `<span class="${t.r > 0 ? 'win' : (t.r < 0 ? 'loss' : '')}">${t.r > 0 ? '+' : ''}${(+t.r).toFixed(2)}R</span>`;
   return `<div onclick="${onclick}" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
-    <span><span class="dim">${d}</span> <b>${(t.s || '').replace('_USDT', '')}</b> <span class="${t.d > 0 ? 'win' : 'loss'}">${t.d > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${BT_CH[t.c] || t.c}${t.k ? ' · ' + (BT_KIND[t.k] || t.k) : ''}</span></span>
+    <span><span class="dim">${d}</span> <b>${(t.s || '').replace('_USDT', '')}</b> <span class="${t.d > 0 ? 'win' : 'loss'}">${t.d > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${btLabel(t)}${t.k ? ' · ' + (BT_KIND[t.k] || t.k) : ''}</span></span>
     <span style="white-space:nowrap;">${r} ›</span></div>`;
 }
 function btOpen(mod, i) { const t = (window._btData[mod] || [])[i]; if (t) btChart(Object.assign({mod}, t)); }
@@ -39203,12 +39227,15 @@ function btLiveOpen(mod, i) { const t = (window._btLive[mod] || [])[i]; if (t) b
 function btFromRbx(t) {   // a live 📈 trade -> the chart's trade
   return {mod: 'rbx', s: t.symbol, d: t.side, c: t.chart || '1d', t: t.day, e: t.entry != null ? t.entry : t.px, sl: t.sl, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
 }
+function btFromEmx(t) {   // v0.99.644 — a live EMA trade -> the chart's trade (shown on 1h candles)
+  return {mod: 'emx', s: t.symbol, d: t.side, c: '1h', tf: t.tf, n: t.n, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+}
 function btFromPrx(t) {
   return {mod: 'prv', s: t.symbol, d: t.side, c: (t.tf || 1) + 'h', t: t.hour, e: t.entry != null ? t.entry : t.px, sl: t.sl, tp: t.tp, hs: t.hs, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
 }
 async function btChart(o) {
   const coin = (o.s || '').replace('_USDT', ''), side = o.d > 0 ? 'ЛОНГ' : 'ШОРТ';
-  document.getElementById('vgiModalTitle').textContent = `${coin} | ${o.mod === 'rbx' ? '📈 Пробой' : 'P/R'} ${BT_CH[o.c] || o.c} | ${side}${o.live ? '' : ' · бэктест'}`;
+  document.getElementById('vgiModalTitle').textContent = `${coin} | ${o.mod === 'rbx' ? '📈 Пробой' : (o.mod === 'emx' ? '📐' : 'P/R')} ${btLabel(o)} | ${side}${o.live ? '' : ' · бэктест'}`;
   document.getElementById('vgiModalParams').textContent = 'загрузка...';
   vgiModal.classList.add('open');
   window._vgiLast = null;

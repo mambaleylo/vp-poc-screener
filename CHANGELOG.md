@@ -20023,3 +20023,9 @@ v0.99.643 - P/R trades the 1h chart only (the user noticed the stops were mostly
          stops), on 1h R rises with the score. Everything rechecked on 1h only: the BTC filters 4% / 1% and the stop
          by close stay the best, the take / stop distances stay 4.5 / 3 / 6 ATR (the alternatives are within noise).
          2023–26: 264 trades, WR ~76%, +0.33R of the hard stop a trade. Model ver 6; t_prx_cs.py 16/16.
+v0.99.644 - 📐 EMA: a new trading rule after the same study as P/R (hypotheses judged at an equal drawdown on the
+         bot's top 3% and a top-10% check set): longs only (the model does not rank shorts at all), no entry when
+         the price is 10+ daily ATR above the daily EMA200, a 4h touch only with a clear score margin, take 3R.
+         2022–26: +0.58R a trade instead of +0.47R, WR 52% instead of 49%, the longest losing run 19 instead of
+         33. The EMA tab gets the backtest trade list with charts and clickable live trades, like the user asked.
+         Model ver 4; tools/ema_model/t_emx_rule.py 8/8.
