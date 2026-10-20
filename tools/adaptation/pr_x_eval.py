@@ -21,11 +21,12 @@ def run(nm, fn, q, cap=12, per_hour=None):
         if np.quantile(ds, .9) <= target: best = (f, np.median([a[0] for a in out]), np.median(ds))
         else: break
     print(f"{nm:34s} q{q} {len(tr):4d} {rr.mean():+.3f} WR {np.mean(rr > 0)*100:3.0f}% минусов {np.mean(rr < 0)*100:3.0f}% подряд {w:2d} | {yrs} | " + (f"{best[0]*100:.1f}%: x{best[1]:,.0f}" if best else "—"), flush=True)
-for q in ("99", "95"):
-    print(f"\n=== P/R q{q}")
-    run("сейчас (тейк 4.5 ATR)", "prv_lab_cs", q)
-    for nm, fn in (("1/3 на +1 ATR → б/у", "px_1_33"), ("1/3 на +1.5 ATR", "px_15_33"), ("1/2 на +1.5 ATR", "px_15_50"),
-                   ("1/3 на +2.25 ATR", "px_225_33"), ("1/2 на +2.25 ATR", "px_225_50"), ("1/2 на +3 ATR", "px_3_50")):
-        run(nm, fn, q)
-    for cap in (4, 6, 8): run(f"не больше {cap} в сторону", "prv_lab_cs", q, cap=cap)
-    for ph in (1, 2, 3): run(f"не больше {ph} входа в час в сторону", "prv_lab_cs", q, per_hour=ph)
+if __name__ == "__main__":
+    for q in ("99", "95"):
+        print(f"\n=== P/R q{q}")
+        run("сейчас (тейк 4.5 ATR)", "prv_lab_cs", q)
+        for nm, fn in (("1/3 на +1 ATR → б/у", "px_1_33"), ("1/3 на +1.5 ATR", "px_15_33"), ("1/2 на +1.5 ATR", "px_15_50"),
+                       ("1/3 на +2.25 ATR", "px_225_33"), ("1/2 на +2.25 ATR", "px_225_50"), ("1/2 на +3 ATR", "px_3_50")):
+            run(nm, fn, q)
+        for cap in (4, 6, 8): run(f"не больше {cap} в сторону", "prv_lab_cs", q, cap=cap)
+        for ph in (1, 2, 3): run(f"не больше {ph} входа в час в сторону", "prv_lab_cs", q, per_hour=ph)

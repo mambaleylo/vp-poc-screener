@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.661"
+APP_VERSION = "0.99.662"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31488,7 +31488,7 @@ PRX_BTC_FILTER_1H = 1.0
 # higher the score, the worse the trade (the bot's 4h trades -0.16R, WR 37%, half of them stops), on 1h it rises with the
 # score. The model's "tfs" overrides it.
 PRX_TFS = (1,)
-PRX_MODEL_VER = 6   # v0.99.636 — 2: trained on the last 24 months only, retrained every quarter (the adaptation study)
+PRX_MODEL_VER = 7   # v0.99.662 — 7: the entry by a limit 0.3 ATR better than the next open, 3 bars (x2065 vs x646 at an equal drawdown, the check set +0.049R vs +0.040R); v0.99.636 — 2: trained on the last 24 months only, retrained every quarter (the adaptation study)
 # v0.99.641 — 4: the stop by the bar's close (3 ATR) + a hard stop 6 ATR on the exchange, R per the hard stop; the BTC filter
 # v0.99.642 — 5: the same + the 1-hour BTC filter (the research stats and the backtest list recomputed with it)
 # v0.99.643 — 6: the 1h chart only
@@ -32004,7 +32004,7 @@ def prx_scan_once():
     opened, cap = 0, int(m.get("side_cap") or 12)
     for c in sorted(cands, key=lambda c: -c["score"]):
         with _prx_lock:
-            opn = [t for t in _PRX["trades"] if t["status"] == "OPEN"]
+            opn = [t for t in _PRX["trades"] if t["status"] in ("OPEN", "PENDING")]
         if any(t["symbol"] == c["symbol"] and t["side"] == c["side"] for t in opn) or sum(1 for t in opn if t["side"] == c["side"]) >= cap:
             continue
         prx_open(m, c, t_hour, live.get(c["symbol"]))
@@ -32026,13 +32026,16 @@ def prx_open(m, c, t_hour, live_px=None):
     tr = {"id": f"prx_{sym}_{s}_{hrs}_{t_hour}", "symbol": sym, "side": s, "tf": hrs, "direction": direction, "hour": t_hour,
           "score": c["score"], "risk": soft, "entry": None, "sl": sl, "tp": tp, "px": px, "hold": hold, "take_r": float(rule["take_r"]),
           "until": t_hour + hold * hrs * 3600, "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False,
-          "rv": PRX_MODEL_VER}
+          "rv": PRX_MODEL_VER, "atr": c["atr"]}
+    lim = float(rule.get("entry_lim_atr") or 0)
+    if lim:   # v0.99.662 — the entry by a limit lim ATR better than the bar's open, waiting entry_wait bars (no fill = no trade)
+        tr.update({"status": "PENDING", "lim_atr": lim, "wait": int(rule.get("entry_wait") or 3), "lv": px - s * lim * c["atr"]})
     if rule.get("stop_close") and rule.get("hard_atr"):
         # v0.99.641 — the stop by the CLOSE of the trade's bar (a wick through it no longer stops the trade); the exchange
         # holds only the hard stop further away, and the position is sized on it ("risk" = the hard stop's distance)
         hard = float(rule["hard_atr"]) * c["atr"]
         tr.update({"risk": hard, "soft": soft, "hs": px - s * hard})
-    if AUTOTRADE_ENABLED_PRV and live_px:
+    if AUTOTRADE_ENABLED_PRV and live_px and not lim:
         try:
             res = execute_autotrade("prv", sym, direction, live_px, tr.get("hs", sl), tp, extra={"p/r": f"v2 {hrs}ч {c['score']}"},
                                     risk_pct_override=MODULE_RISK_PCT.get("prv") or PRX_RISK_DEFAULT)
@@ -32048,9 +32051,11 @@ def prx_open(m, c, t_hour, live_px=None):
         pct = lambda p: (p - px) / px * 100
         stop_txt = (f"стоп {sl:.6g} ({pct(sl):+.1f}%) по закрытию {hrs}ч свечи, аварийный {tr['hs']:.6g} ({pct(tr['hs']):+.1f}%)" if tr.get("hs") is not None
                     else f"стоп {sl:.6g} ({pct(sl):+.1f}%)")
+        entry_txt = (f"вход лимиткой ~{tr['lv']:.6g} ({pct(tr['lv']):+.2f}%, ждать до {tr['wait']} ч — не дойдёт, сделки нет)" if lim
+                     else f"вход по рынку ~{px:.6g}")
         send_telegram(f"{'🟢' if s > 0 else '🔴'} {sym.replace('_USDT', '')} {direction} · 🔄 Peak Reversal ({hrs}ч)\n"
-                      f"вход по рынку ~{px:.6g} · {stop_txt} · тейк {tp:.6g} ({pct(tp):+.1f}%) · держать до {hold * hrs} ч\n"
-                      f"оценка модели {c['score']} · " + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"), category="prv")
+                      f"{entry_txt} · {stop_txt} · тейк {tp:.6g} ({pct(tp):+.1f}%) · держать до {hold * hrs} ч\n"
+                      f"оценка модели {c['score']} · " + ("💰 сделка на бирже" if tr["real"] else ("💰 на бирже — когда цена дойдёт до лимитки" if lim and AUTOTRADE_ENABLED_PRV else "без сделки (только сигнал)")), category="prv")
 
 
 def prx_settle(now=None):
@@ -32059,7 +32064,7 @@ def prx_settle(now=None):
     now = now or time.time()
     changed = False
     with _prx_lock:
-        opn = [t for t in _PRX["trades"] if t["status"] == "OPEN"]
+        opn = [t for t in _PRX["trades"] if t["status"] in ("OPEN", "PENDING")]
     for t in opn:
         try:
             hrs = int(t["tf"]); sec = hrs * 3600
@@ -32073,16 +32078,33 @@ def prx_settle(now=None):
                 continue
             s, risk, hold = t["side"], t["risk"], int(t["hold"])
             soft = t.get("soft")        # v0.99.641: the stop by close (a trade opened before keeps the plain stop)
+            k0 = int(t.get("k0") or 0)
             if t.get("entry") is None:
-                e = cs[0]["open"]
+                lim = float(t.get("lim_atr") or 0)
+                if lim and t.get("atr"):   # v0.99.662 — the limit lim ATR better than the entry bar's open, entry_wait bars
+                    lv = cs[0]["open"] - s * lim * float(t["atr"]); wait = int(t.get("wait") or 3)
+                    f = next((k for k, c in enumerate(cs[:wait]) if ((c["low"] <= lv) if s > 0 else (c["high"] >= lv))), None)
+                    if f is None:
+                        if len(cs) >= wait:
+                            with _prx_lock:
+                                t.update({"status": "CLOSED", "result": "NO_FILL", "r": None, "lv": lv, "t_out": int(cs[wait - 1]["time"] + sec)})
+                            changed = True
+                            if t.get("real") and AUTOTRADE_ENABLED_PRV:   # the live touch filled, the candles did not: out
+                                log_error(f"p/r no-fill {t['symbol']}: {close_position_for_mode('prv', t['symbol'], t['direction'])}")
+                        continue
+                    e = min(lv, cs[f]["open"]) if s > 0 else max(lv, cs[f]["open"]); k0 = f
+                else:
+                    e = cs[0]["open"]
                 with _prx_lock:
                     if soft:
                         t.update({"entry": e, "sl": e - s * soft, "hs": e - s * risk, "tp": e + s * t["take_r"] * soft})
                     else:
                         t.update({"entry": e, "sl": e - s * risk, "tp": e + s * t["take_r"] * risk})
+                    t.update({"k0": k0, "status": "OPEN", "until": int(cs[k0]["time"] + hold * sec)})
                 changed = True
             e, sl, tp = t["entry"], t["sl"], t["tp"]
             res = None
+            cs = cs[k0:]
             for k, c in enumerate(cs[:hold]):
                 if soft:     # the hard stop inside the bar, then the take, then the bar's close beyond the stop
                     if (c["low"] <= t["hs"]) if s > 0 else (c["high"] >= t["hs"]):
@@ -32119,6 +32141,44 @@ def prx_settle(now=None):
         prx_save()
 
 
+def prx_watch_tick():
+    """v0.99.662 — the P/R limit on the exchange: a pending signal whose price reached its limit within the wait opens
+    the real trade at market (the stops / take from the fill)"""
+    now = time.time()
+    m = _PRX.get("model") or {}
+    rule = m.get("rule") or {}
+    with _prx_lock:
+        todo = [t for t in _PRX["trades"] if t["status"] == "PENDING" and not t.get("rt") and t.get("lv")
+                and now < t["hour"] + int(t.get("wait") or 3) * 3600]
+    if not todo or not rule:
+        return
+    px = {}
+    for tk in get_tickers() or []:
+        try:
+            px[tk["contract"]] = float(tk.get("last") or 0)
+        except (TypeError, ValueError):
+            pass
+    for t in todo:
+        p = px.get(t["symbol"]); s = t["side"]
+        if not p or not ((p <= t["lv"]) if s > 0 else (p >= t["lv"])):
+            continue
+        with _prx_lock:
+            t["rt"] = True
+        a = float(t["atr"]); soft = float(rule["stop_atr"]) * a
+        hs = p - s * (float(rule["hard_atr"]) * a if rule.get("hard_atr") else soft); tp = p + s * float(rule["take_r"]) * soft
+        try:
+            res = execute_autotrade("prv", t["symbol"], t["direction"], p, hs, tp, extra={"p/r": f"лимитка {t['tf']}ч {t['score']}"},
+                                    risk_pct_override=MODULE_RISK_PCT.get("prv") or PRX_RISK_DEFAULT)
+            with _prx_lock:
+                t["real"] = (res or {}).get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+                t["autotrade"] = {"status": (res or {}).get("status"), "detail": str((res or {}).get("detail") or "")[:200]}
+            if TELEGRAM_ALERTS_PRV and t["real"]:
+                send_telegram(f"🔄 {t['symbol'].replace('_USDT', '')}: лимитка P/R {p:.6g} — сделка на бирже открыта", category="prv")
+        except Exception as e:
+            log_error(f"p/r limit autotrade {t['symbol']}: {e}")
+    prx_save()
+
+
 def prx_loop():
     time.sleep(150)
     prx_load()
@@ -32134,6 +32194,8 @@ def prx_loop():
                     if now - h < 20 * 60:
                         prx_scan_once()
                     last_hour = h
+                if AUTOTRADE_ENABLED_PRV:
+                    prx_watch_tick()
         except Exception as e:
             log_error(f"prx_loop: {e}")
             with _prx_lock:
@@ -32155,9 +32217,10 @@ def prx_stats():
             "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "label_rule", "research", "side_cap", "train")} | {"btc_filter": m.get("btc_filter") or PRX_BTC_FILTER, "btc_filter_1h": m.get("btc_filter_1h") or PRX_BTC_FILTER_1H,
                                                          "tfs": m.get("tfs") or list(PRX_TFS)} if m else None,
             "err": err, "scan": scan, "near": last,
-            "open": [t for t in trades if t["status"] == "OPEN"][-30:],
+            "open": [t for t in trades if t["status"] in ("OPEN", "PENDING")][-30:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
+            "no_fill": sum(1 for t in trades if t.get("result") == "NO_FILL"),
             "live_check": live_vs_bt("prv", [t["r"] for t in fin if t.get("rv") == PRX_MODEL_VER]),
             "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "hour", "r", "result", "real", "entry", "px", "sl", "tp", "hs", "exit", "t_out")} for t in sorted(fin, key=lambda t: -t["hour"])[:30]]}
 
@@ -40388,7 +40451,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
     top += tr_ + `<div class="zsub">Проверка на истории 127 монет — каждый год модель не видела${rs.scheme ? ' (' + rs.scheme + ')' : ''}. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>до <b>${rule.hold_bars || 48}</b> свечей</span><span>просадка до <b>${dd}R</b></span></div>
-      <div class="zsub">Вход — по рынку после закрытия свечи, ${rule.stop_close ? `стоп — <b>${rule.stop_atr} ATR по закрытию свечи</b> (тень за стопом сделку не закрывает; на бирже стоит аварийный стоп ${rule.hard_atr} ATR — от него считается риск и R), тейк — <b>${(rule.take_r * rule.stop_atr).toFixed(1)} ATR</b>` : `стоп — <b>${rule.stop_atr} ATR</b> её графика, тейк — <b>${rule.take_r} риска</b>`}, через ${rule.hold_bars} свечей выход (${(m.tfs && !m.tfs.includes(4)) ? '2 дня; 4ч график убран — на нём модель ошибалась' : '1ч — 2 дня, 4ч — 8 дней'}). Не больше ${m.side_cap || 12} сделок в одну сторону.
+      <div class="zsub">Вход — ${rule.entry_lim_atr ? `<b>лимиткой на ${rule.entry_lim_atr} ATR лучше цены</b> после закрытия свечи (ждёт до ${rule.entry_wait} ч; не дошла — сделки нет)` : 'по рынку после закрытия свечи'}, ${rule.stop_close ? `стоп — <b>${rule.stop_atr} ATR по закрытию свечи</b> (тень за стопом сделку не закрывает; на бирже стоит аварийный стоп ${rule.hard_atr} ATR — от него считается риск и R), тейк — <b>${(rule.take_r * rule.stop_atr).toFixed(1)} ATR</b>` : `стоп — <b>${rule.stop_atr} ATR</b> её графика, тейк — <b>${rule.take_r} риска</b>`}, через ${rule.hold_bars} свечей выход (${(m.tfs && !m.tfs.includes(4)) ? '2 дня; 4ч график убран — на нём модель ошибалась' : '1ч — 2 дня, 4ч — 8 дней'}). Не больше ${m.side_cap || 12} сделок в одну сторону.
         ${m.btc_filter ? `Против рынка не входит: лонг — если BTC упал за 24 ч больше чем на ${m.btc_filter}% или за последний час больше чем на ${m.btc_filter_1h}%, шорт — если вырос так же.` : ''}</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «P/R» в настройках риска (пусто = ${d.risk}%). Сделок бывает много одновременно — держите риск маленьким.</div>`}`;
   }
@@ -40404,7 +40467,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
   // 3. the trades
   const op = d.open || [];
   const row = (t, i) => `<div onclick="btLiveOpen('prv', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
-      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim"> · ${t.tf}ч${t.real ? ' · 💰' : ''}</span></span>
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim"> · ${t.tf}ч${t.status === 'PENDING' ? ' · ⏳ лимитка ' + fmtNum(t.lv) : ''}${t.real ? ' · 💰' : ''}</span></span>
       <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry != null ? t.entry : t.px)} · до ${hm(t.until)}</span></div>`;
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
     ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}

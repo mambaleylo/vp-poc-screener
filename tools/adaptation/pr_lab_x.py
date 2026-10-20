@@ -8,14 +8,25 @@ from common import V, load, D
 FEE, FUND = 0.001, 0.0003
 PA, PF, OUTN = float(ARGV[0]), float(ARGV[1]), ARGV[2]
 TAKE = float(ARGV[3]) if len(ARGV) > 3 else 4.5
+LIM = float(ARGV[4]) if len(ARGV) > 4 else 0.0     # an entry limit this many ATR better than the next open, waiting LIMW bars
+LIMW = int(ARGV[5]) if len(ARGV) > 5 else 3
 SOFT, HARD = 3.0, 6.0
 @njit(cache=True)
-def lab(O, H, L, C, idx, sd, atr, pa, pf, take, out, kind, kbar):
+def lab(O, H, L, C, idx, sd, atr, pa, pf, take, lim, limw, out, kind, kbar):
     for j in range(len(idx)):
         i = idx[j]; s = sd[j]; a = atr[j]
-        if i < 0 or i + 49 > len(O) or a != a:
+        if i < 0 or i + 49 + limw > len(O) or a != a:
             out[j] = np.nan; kind[j] = -1; kbar[j] = -1; continue
-        e = O[i + 1]; risk = HARD * a; hs = e - s * HARD * a; ss = e - s * SOFT * a; tp = e + s * take * a
+        e = O[i + 1]
+        if lim > 0:
+            lv = O[i + 1] - s * lim * a; f = -1
+            for w in range(limw):
+                b = i + 1 + w
+                if (s > 0 and L[b] <= lv) or (s < 0 and H[b] >= lv): f = b; break
+            if f < 0:
+                out[j] = np.nan; kind[j] = -1; kbar[j] = -1; continue
+            e = min(lv, O[f]) if s > 0 else max(lv, O[f]); i = f - 1
+        risk = HARD * a; hs = e - s * HARD * a; ss = e - s * SOFT * a; tp = e + s * take * a
         pt = e + s * pa * a; took = False
         k = 47; ex = C[i + 48]; kd = 3
         for q in range(48):
@@ -45,7 +56,7 @@ for fn in sorted(glob.glob(f"{D}/prv_ev/*.npz")):
     m = np.where(tf == 1)[0]
     i = np.searchsorted(T, t[m] - 3600); i = np.where((i < len(T)) & (T[np.minimum(i, len(T) - 1)] == t[m] - 3600), i, -1)
     out = np.empty(len(m)); kd = np.empty(len(m), dtype=np.int64); kq = np.empty(len(m), dtype=np.int64)
-    lab(O, H, L, C, i.astype(np.int64), sd[m], A[np.maximum(i, 0)], PA, PF, TAKE, out, kd, kq); o[m] = out; kk[m] = kd; kb[m] = kq
+    lab(O, H, L, C, i.astype(np.int64), sd[m], A[np.maximum(i, 0)], PA, PF, TAKE, LIM, LIMW, out, kd, kq); o[m] = out; kk[m] = kd; kb[m] = kq
     res.append(o); kinds.append(kk); kbars.append(kb)
 np.savez(f"{D}/{OUTN}.npz", cs=np.concatenate(res).astype(np.float32), kind=np.concatenate(kinds).astype(np.int8), k=np.concatenate(kbars).astype(np.int16))
 print("done", OUTN, flush=True)

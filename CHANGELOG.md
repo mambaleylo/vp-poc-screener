@@ -20122,3 +20122,8 @@ v0.99.661 - Night round 2 (the user: "второй заход по всем ин
          12 h instead of 24 h — x3.0 vs x1.9 and the check x9.7 vs x8.9, 2025–26 +0.14R a trade instead of +0.02R
          (model ver 4). Checked and not kept: P/R partial takes (WR 84–93% but half the growth), P/R caps and entries
          per hour, Neuro partials / takes / caps, EMA caps.
+v0.99.662 - P/R: the entry by a limit 0.3 ATR better than the next bar's open, waiting up to 3 h (no fill = no trade)
+         instead of the market. On the bot's set +0.38R a trade vs +0.35R, x2065 vs x646 at an equal drawdown, WR 80%
+         vs 77%, ~14% fewer trades; the check set +0.049R vs +0.040R; every neighbour (−0.2…−0.4 ATR, 1–6 h) beats the
+         market entry too. Real trades: the bot watches the price and opens at market when it reaches the limit within
+         the wait. Model ver 7, the backtest list and the stats redone (tools/adaptation pr_lab_x / pr_x* / pr_export_lim).
