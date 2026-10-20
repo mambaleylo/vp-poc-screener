@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.649"
+APP_VERSION = "0.99.650"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30576,7 +30576,18 @@ def api_emx_status():
 # the 1h candles exactly as the research labels (stop first, then the take, the 12th close).
 NX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_neuro_model.json")
 NX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_neuro_model.json"
-NX_MODEL_VER = 2   # v0.99.623 — 2: take 3R, out after 48 h (the take sweep)
+NX_MODEL_VER = 3   # v0.99.623 — 2: take 3R, out after 48 h (the take sweep)
+# v0.99.650 — 3: the same model, ADX < 30 (no entries into a strong trend), BTC's last hour not more than 1% against the
+# trade, out after 24 h — better on the bot's top 0.5% and a top-2% check set at an equal drawdown (tools/neuro_model/nx_hyp*.py);
+# the longest losing run 29 instead of 51. Neuro stays the weakest module: 2025–26 about 0R a trade.
+NX_MAX_ADX, NX_BTC_1H = 30.0, 1.0
+
+
+def nx_pass(m, s, row):
+    """v0.99.650 — the rule's filters on a scored hour (the model's own fields override the defaults)"""
+    if row[NX_NAMES.index("adx")] >= float(m.get("max_adx") or NX_MAX_ADX):
+        return False
+    return s * row[NX_NAMES.index("b_r1")] > -float(m.get("btc_1h") or NX_BTC_1H)
 NX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_nx_state.json")
 NX_TOP = int(os.environ.get("VP_NX_TOP", "120"))
 NX_RISK_DEFAULT = 0.5      # % when Neuro's own risk field is empty — many trades at once
@@ -31089,7 +31100,7 @@ def nx_scan_once():
             sc = nx_score(m, row)
             for s in (1, -1):
                 best.append((sc[s] / (m["thr"][str(s)] or 1e-9), sym, s, round(sc[s], 3)))
-                if sc[s] >= m["thr"][str(s)]:
+                if sc[s] >= m["thr"][str(s)] and nx_pass(m, s, row):
                     atr = row[i_atr] / 100 * h1[-1]["close"]
                     cands.append({"symbol": sym, "side": s, "score": round(sc[s], 3), "atr": atr, "px": h1[-1]["close"]})
         except Exception as e:

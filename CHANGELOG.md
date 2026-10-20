@@ -20054,3 +20054,7 @@ v0.99.649 - Live vs backtest check in the P/R, EMA and 📈 tabs: the closed tra
          "in norm", or a warning when the live average falls below the backtest's minus 1.64 standard errors
          (the market may have changed: lower the risk or pause). Shown in the tab only, no Telegram noise.
          tools/adaptation/t_live_check.py 6/6.
+v0.99.650 - 🧠 Neuro: the same study as the other modules. Kept (better on both sets at an equal drawdown): no entry
+         into a strong trend (ADX < 30), none when BTC moved more than 1% against the trade in the last hour, out
+         after 24 h instead of 48. The longest losing run 29 instead of 51. Neuro stays the weakest module
+         (2025–26 about 0R a trade) — keep its risk small or the module virtual. Model ver 3; t_nx_rule.py 6/6.

@@ -23,3 +23,10 @@ hold 12 / 48 / 120 h labels; `Y3=3 FINAL=1 python3 nx_wf3.py 1.0_3.0_48 1.0_4.0_
 3R, out after 48 h, top 0.5%: 2022 +0.35R, 2023 +0.42R, 2024 +0.29R, 2025–26 +0.33R (3.8/wk) vs +0.10R of the
 old 2R / 12 h; 4R and 6R lost in 2025–26. Export: `Y3=3 RULE=1.0_3.0_48 Q=0.995 EXPORT=1 python3 nx_final3.py`
 (set "ver": 2). `t_nx_e2e.py`: 60/60 rows, 120/120 trades.
+
+v0.99.650 — the same audit as P/R / EMA / 📈: `nx_sel.py` saves the deployed scheme's yearly walk-forward scores once,
+`nx_h.py` replays the bot (one per coin & side until the exit, cap 12 per side) with exits re-simulated on 1h bars,
+`nx_hyp.py` / `nx_hyp2.py` judge ideas at an equal 1-in-10 drawdown on the bot's top 0.5% and a top-2% check set.
+Better on both: ADX < 30 + BTC's last hour not > 1% against + out after 24 h (x2.0 vs x1.5, check x8.5 vs x4.9; the
+longest losing run 29 vs 51). Not kept: longs / shorts only, BTC 24h / EMA50, the day trend, stops 1.5 / 2, takes 2 / 4 /
+6R, 96 h, the stop by close. Neuro remains the weakest module (2025–26 about 0R a trade). `nx_export3.py` -> model ver 3.
