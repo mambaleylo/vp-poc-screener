@@ -24,8 +24,8 @@ Uses the Binance 1h history and the Neuro feature store of `tools/zones_model` /
    `t_cas_e2e.py` (the bot's `cas_settle` on the same candles = the backtest trades, 80/80).
 
 Chosen rule: stop at the 24-bar swing ± 0.2 ATR, take 2R, out after 48 h, top 0.5% per side:
-2022 +0.34R, 2023 +0.25R, 2024 +0.83R, 2025–26 +0.39R a trade (~1.6/wk, WR 56%); another seed +0.40R with every
-year positive. Looser check sets (top 1–2%) +0.13…+0.25R, every year ≥ 0. Shorts after a recent up-cross (the
+2022 +0.34R, 2023 +0.25R, 2024 +0.83R, 2025–26 +0.39R a trade (~1.6/wk, WR 56%); another seed +0.40R and a 31-leaf model
++0.24R (fewer trades), every year positive in both. Looser check sets (top 1–2%) +0.13…+0.25R, every year ≥ 0. Shorts after a recent up-cross (the
 user's "отбой") are the best kind (+0.74R, WR 66%). Alone it is weaker than P/R at an equal drawdown (2% risk →
 x13 over 2023–26 vs P/R 8% → x363), but its months are nearly independent of P/R (+0.26): P/R 4% + cascade 1%
 → x95 vs P/R 4% alone → x26 at the same 1-in-10 drawdown (23%).
