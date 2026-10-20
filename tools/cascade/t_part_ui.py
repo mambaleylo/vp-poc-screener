@@ -17,14 +17,14 @@ with sync_playwright() as p:
     b = p.chromium.launch(executable_path="/opt/pw-browsers/chromium"); pg = b.new_page(viewport={"width": 400, "height": 900})
     errs = []; pg.on("pageerror", lambda e: errs.append(str(e)))
     pg.goto("http://127.0.0.1:5097/"); pg.wait_for_timeout(2500)
-    for tab, box in (("cas", "btBox_cas"), ("rbx", "btBox_rbx")):
+    for tab, box in (("rbx", "btBox_rbx"),):
         pg.click(f'.tab[data-tab="{tab}"]'); pg.wait_for_timeout(2500)
         pg.screenshot(path=f"ui_part_{tab}.png", full_page=True)
         pg.click(f'#{tab}Panel >> text=📜 Сделки бэктеста'); pg.wait_for_timeout(2000)
         rows = pg.locator(f'#{box} div[onclick^="btOpen"]')
         for k in range(rows.count()):
             tx = rows.nth(k).inner_text()
-            if "безубыток" in tx and "1000" not in tx: rows.nth(k).click(); break
+            if ("ложный" in tx or "безубыток" in tx) and "1000" not in tx: rows.nth(k).click(); break
         pg.wait_for_timeout(3000)
         pg.screenshot(path=f"ui_part_{tab}_chart.png")
         print(tab, "params", pg.locator("#vgiModalParams").inner_text()[:160].replace("\n", " "))

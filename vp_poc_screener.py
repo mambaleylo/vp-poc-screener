@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.654"
+APP_VERSION = "0.99.655"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -26153,7 +26153,8 @@ def notify_trade_result(module, symbol, direction, entry, exit_price, result, r=
         if not TELEGRAM_ALERTS_TRADE_RESULTS or (TELEGRAM_TRADE_RESULTS_REAL_ONLY and not real):
             return
         head = {"WIN": "✅ ТЕЙК", "LOSS": "❌ СТОП", "BE": "🛡 БЕЗУБЫТОК", "TIME_EXIT": "⏱ выход по времени", "TIMEOUT": "⏱ выход по времени", "AUTHOR_EXIT": "📣 закрыта по посту автора", "MANUAL": "✋ закрыта вручную",
-                "LOSS_EARLY": "✂️ ранний выход", "STOP_CLOSE": "❌ СТОП (свеча закрылась за стопом)", "HARD_STOP": "❌ АВАРИЙНЫЙ СТОП"}.get(result, str(result))
+                "LOSS_EARLY": "✂️ ранний выход", "STOP_CLOSE": "❌ СТОП (свеча закрылась за стопом)", "HARD_STOP": "❌ АВАРИЙНЫЙ СТОП", "FAILED": "↩️ ЛОЖНЫЙ ПРОБОЙ (выход)", "BREAKEVEN": "🛡 БЕЗУБЫТОК после частичной",
+                "TREND_END": "🏁 тренд кончился"}.get(result, str(result))
         d = 1 if str(direction).upper() == "LONG" else -1
         pct = d * (exit_price - entry) / entry * 100 if entry and exit_price is not None else None
         nums = " · ".join(x for x in (f"{r:+.2f}R" if r is not None else "",
@@ -31464,7 +31465,7 @@ def api_bt_trades():
         return jsonify({"trades": [], "err": str(e)[:200]})
 
 
-RBX_RULE_VER = 654   # v0.99.648 — the breakout's trading rule (stop 2 ATR, the channel 15 after +4R) for the live check; 654 — the partial take
+RBX_RULE_VER = 655   # v0.99.648 — the breakout's trading rule (stop 2 ATR, the channel 15 after +4R) for the live check; 654 — the partial take; 655 — strong only + the failed-breakout exit
 
 
 def live_vs_bt(mod, rs):
@@ -31589,6 +31590,10 @@ def bt_gate_trade(mod, t):
         lv = min(x["low"] for x in bars[k - dc:k]) if s > 0 else max(x["high"] for x in bars[k - dc:k])
         if (c["close"] < lv) if s > 0 else (c["close"] > lv):
             return res(c["close"], j)
+        if t.get("fk") and j < int(t["fk"]) and not took:     # v0.99.655: back inside the range (the level as a share of the entry)
+            lvl = e * float(t["hh"] if s > 0 else t["ll"]) / e_b
+            if (c["close"] < lvl) if s > 0 else (c["close"] > lvl):
+                return res(c["close"], j)
     k = min(len(bars), k0 + hold) - 1
     return res(bars[k]["close"], k - k0)
 
@@ -32327,6 +32332,12 @@ RBX_HALF = False   # v0.99.654 — the "half at +2R" mode replaced by the partia
 # (tools/rr_hunt/rb_wr.py, rb_part.py). A third / a half at +1R, +0.75R, +1.5R, break-even alone, a pause after losses: worse.
 RBX_PART = os.environ.get("VP_RBX_PART", "1") == "1"
 RBX_PART_R, RBX_PART_F = 1.0, 0.25
+# v0.99.655 — false breakouts (the user: "часто в стопах, когда идёт сразу после входа только в сторону стопа"): 72% of the
+# stops never got to +0.5R. Only strong breakouts (the close ≥ 0.6 ATR beyond the range) and out at the close back inside
+# the range within the first 2 bars: the bot's set x48 vs x38 at an equal drawdown, full stops 32% of trades instead of
+# 42%, the longest losing run 13 vs 14; the check set x13 vs x11, the run 12 vs 18; ~2.7 trades a week instead of 3.7.
+# A confirmation bar, a retest entry, other stops: worse (tools/rr_hunt/rb_fail.py, rb_part2.py).
+RBX_MIN_BRK, RBX_FAIL_K = 0.6, 2
 RBX_CHARTS = {"1d": {"hrs": 24, "n": 20, "k": 2.5, "hold": 180, "cap": 6, "name": "день"},
               "12h": {"hrs": 12, "n": 30, "k": 4.0, "hold": 360, "cap": 6, "name": "12ч"}}
 # v0.99.646 — the stop 2 ATR (was 1.5): better on the bot's breakouts and on a check set (the other range lengths) at
@@ -32339,7 +32350,7 @@ RBX_TOP = int(os.environ.get("VP_RBX_TOP", "120"))
 RBX_RISK_DEFAULT = 0.5
 RBX_FEE, RBX_FUND = 0.001, 0.0003
 RBX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_rbx_state.json")
-RBX_RESEARCH = json.loads('''{"24_part":{"years":{"2021":{"n":32,"avg":1.11,"wk":0.6,"sum":35.6,"dd":9.9,"wr":46.9,"days":23.0,"best":32.1},"2022":{"n":41,"avg":1.07,"wk":0.8,"sum":43.8,"dd":4.7,"wr":70.7,"days":42.0,"best":17.7},"2023":{"n":48,"avg":0.16,"wk":0.9,"sum":7.7,"dd":9.7,"wr":47.9,"days":35.0,"best":6.9},"2024":{"n":71,"avg":0.78,"wk":1.4,"sum":55.1,"dd":15.7,"wr":56.3,"days":23.0,"best":36.5},"2025":{"n":98,"avg":0.82,"wk":1.1,"sum":80.2,"dd":11.3,"wr":56.1,"days":33.0,"best":55.9}},"max_losing_streak":11},"12_part":{"years":{"2021":{"n":129,"avg":0.4,"wk":2.5,"sum":51.4,"dd":17.0,"wr":54.3,"days":12.0,"best":20.1},"2022":{"n":108,"avg":0.08,"wk":2.1,"sum":8.7,"dd":13.3,"wr":60.2,"days":14.0,"best":4.4},"2023":{"n":156,"avg":0.16,"wk":3.0,"sum":25.6,"dd":23.0,"wr":53.8,"days":12.0,"best":13.9},"2024":{"n":151,"avg":0.76,"wk":2.9,"sum":114.6,"dd":19.8,"wr":51.7,"days":14.0,"best":59.7},"2025":{"n":282,"avg":0.37,"wk":3.1,"sum":104.5,"dd":33.6,"wr":51.1,"days":14.0,"best":82.8}},"max_losing_streak":12},"24_dc20":{"years":{"2021":{"n":32,"avg":2.85,"wk":0.6,"sum":91.1,"dd":10.2,"wr":34.4,"days":40.0,"best":42.5},"2022":{"n":39,"avg":0.6,"wk":0.7,"sum":23.4,"dd":6.1,"wr":59.0,"days":46.0,"best":3.8},"2023":{"n":44,"avg":0.7,"wk":0.8,"sum":30.7,"dd":12.1,"wr":36.4,"days":38.0,"best":13.6},"2024":{"n":58,"avg":1.12,"wk":1.1,"sum":65.1,"dd":23.5,"wr":25.9,"days":29.0,"best":48.4},"2025":{"n":97,"avg":1.02,"wk":1.1,"sum":98.5,"dd":14.7,"wr":37.1,"days":35.0,"best":74.2}},"max_losing_streak":18},"24_half2dc20":{"years":{"2021":{"n":34,"avg":1.55,"wk":0.7,"sum":52.7,"dd":10.2,"wr":47.1,"days":35.0,"best":22.2},"2022":{"n":39,"avg":0.73,"wk":0.7,"sum":28.5,"dd":3.9,"wr":66.7,"days":46.0,"best":2.9},"2023":{"n":44,"avg":0.43,"wk":0.8,"sum":18.9,"dd":12.0,"wr":38.6,"days":38.0,"best":7.8},"2024":{"n":59,"avg":0.59,"wk":1.1,"sum":34.8,"dd":12.8,"wr":39.0,"days":27.0,"best":25.2},"2025":{"n":97,"avg":0.62,"wk":1.1,"sum":59.9,"dd":12.6,"wr":42.3,"days":34.0,"best":38.1}},"max_losing_streak":14},"12_dc20":{"years":{"2021":{"n":113,"avg":0.74,"wk":2.2,"sum":84.1,"dd":17.8,"wr":34.5,"days":16.0,"best":26.4},"2022":{"n":92,"avg":0.31,"wk":1.8,"sum":28.4,"dd":19.3,"wr":35.9,"days":20.0,"best":8.6},"2023":{"n":126,"avg":0.48,"wk":2.4,"sum":60.2,"dd":34.1,"wr":27.8,"days":17.0,"best":18.2},"2024":{"n":137,"avg":0.89,"wk":2.6,"sum":122.0,"dd":32.7,"wr":29.2,"days":15.0,"best":79.4},"2025":{"n":265,"avg":0.39,"wk":2.9,"sum":102.9,"dd":43.7,"wr":29.8,"days":16.0,"best":110.1}},"max_losing_streak":18},"12_half2dc20":{"years":{"2021":{"n":119,"avg":0.39,"wk":2.3,"sum":46.0,"dd":17.4,"wr":39.5,"days":15.0,"best":14.2},"2022":{"n":94,"avg":0.35,"wk":1.8,"sum":33.3,"dd":14.7,"wr":46.8,"days":19.0,"best":4.0},"2023":{"n":135,"avg":0.19,"wk":2.6,"sum":25.3,"dd":25.5,"wr":33.3,"days":15.0,"best":10.1},"2024":{"n":143,"avg":0.41,"wk":2.7,"sum":58.5,"dd":25.1,"wr":35.7,"days":14.0,"best":40.7},"2025":{"n":269,"avg":0.3,"wk":3.0,"sum":81.2,"dd":27.6,"wr":40.9,"days":15.0,"best":56.1}},"max_losing_streak":13}}''')   # {"24_dc20" | "24_half2dc20" | "12_dc20" | "12_half2dc20": {"years", "max_losing_streak"}}
+RBX_RESEARCH = json.loads('''{"24_part":{"years":{"2021":{"n":20,"avg":1.59,"wk":0.4,"sum":31.9,"dd":7.5,"wr":25.0,"days":21.0,"best":32.1},"2022":{"n":31,"avg":1.27,"wk":0.6,"sum":39.5,"dd":5.8,"wr":64.5,"days":47.0,"best":17.7},"2023":{"n":33,"avg":-0.08,"wk":0.6,"sum":-2.8,"dd":7.1,"wr":48.5,"days":32.0,"best":1.7},"2024":{"n":47,"avg":2.04,"wk":0.9,"sum":95.7,"dd":10.8,"wr":55.3,"days":25.0,"best":36.5},"2025":{"n":56,"avg":0.32,"wk":0.6,"sum":18.0,"dd":12.7,"wr":51.8,"days":32.0,"best":11.4}},"max_losing_streak":9},"12_part":{"years":{"2021":{"n":107,"avg":0.64,"wk":2.1,"sum":68.4,"dd":17.8,"wr":48.6,"days":9.0,"best":33.7},"2022":{"n":80,"avg":0.33,"wk":1.5,"sum":26.8,"dd":7.0,"wr":72.5,"days":13.0,"best":6.2},"2023":{"n":110,"avg":0.41,"wk":2.1,"sum":44.7,"dd":8.9,"wr":60.9,"days":12.0,"best":13.9},"2024":{"n":116,"avg":0.11,"wk":2.2,"sum":13.3,"dd":17.8,"wr":53.4,"days":11.0,"best":12.9},"2025":{"n":213,"avg":0.44,"wk":2.3,"sum":92.9,"dd":19.4,"wr":49.8,"days":13.0,"best":82.8}},"max_losing_streak":12},"24_dc20":{"years":{"2021":{"n":20,"avg":2.4,"wk":0.4,"sum":48.0,"dd":7.2,"wr":15.0,"days":27.0,"best":42.5},"2022":{"n":30,"avg":1.59,"wk":0.6,"sum":47.6,"dd":9.0,"wr":46.7,"days":49.0,"best":23.3},"2023":{"n":33,"avg":-0.12,"wk":0.6,"sum":-3.9,"dd":11.1,"wr":36.4,"days":34.0,"best":2.2},"2024":{"n":45,"avg":2.61,"wk":0.9,"sum":117.5,"dd":19.9,"wr":26.7,"days":29.0,"best":48.4},"2025":{"n":53,"avg":0.68,"wk":0.6,"sum":35.9,"dd":17.5,"wr":37.7,"days":38.0,"best":15.0}},"max_losing_streak":15},"24_half2dc20":{"years":{"2021":{"n":34,"avg":1.55,"wk":0.7,"sum":52.7,"dd":10.2,"wr":47.1,"days":35.0,"best":22.2},"2022":{"n":39,"avg":0.73,"wk":0.7,"sum":28.5,"dd":3.9,"wr":66.7,"days":46.0,"best":2.9},"2023":{"n":44,"avg":0.43,"wk":0.8,"sum":18.9,"dd":12.0,"wr":38.6,"days":38.0,"best":7.8},"2024":{"n":59,"avg":0.59,"wk":1.1,"sum":34.8,"dd":12.8,"wr":39.0,"days":27.0,"best":25.2},"2025":{"n":97,"avg":0.62,"wk":1.1,"sum":59.9,"dd":12.6,"wr":42.3,"days":34.0,"best":38.1}},"max_losing_streak":14},"12_dc20":{"years":{"2021":{"n":92,"avg":1.01,"wk":1.8,"sum":92.7,"dd":25.4,"wr":23.9,"days":13.0,"best":44.7},"2022":{"n":68,"avg":0.47,"wk":1.3,"sum":31.8,"dd":11.0,"wr":42.6,"days":20.0,"best":8.6},"2023":{"n":88,"avg":0.62,"wk":1.7,"sum":54.4,"dd":18.6,"wr":37.5,"days":18.0,"best":18.2},"2024":{"n":105,"avg":0.12,"wk":2.0,"sum":12.4,"dd":28.6,"wr":30.5,"days":16.0,"best":17.0},"2025":{"n":192,"avg":0.62,"wk":2.1,"sum":119.9,"dd":28.4,"wr":33.3,"days":16.0,"best":110.1}},"max_losing_streak":21},"12_half2dc20":{"years":{"2021":{"n":119,"avg":0.39,"wk":2.3,"sum":46.0,"dd":17.4,"wr":39.5,"days":15.0,"best":14.2},"2022":{"n":94,"avg":0.35,"wk":1.8,"sum":33.3,"dd":14.7,"wr":46.8,"days":19.0,"best":4.0},"2023":{"n":135,"avg":0.19,"wk":2.6,"sum":25.3,"dd":25.5,"wr":33.3,"days":15.0,"best":10.1},"2024":{"n":143,"avg":0.41,"wk":2.7,"sum":58.5,"dd":25.1,"wr":35.7,"days":14.0,"best":40.7},"2025":{"n":269,"avg":0.3,"wk":3.0,"sum":81.2,"dd":27.6,"wr":40.9,"days":15.0,"best":56.1}},"max_losing_streak":13}}''')   # {"24_dc20" | "24_half2dc20" | "12_dc20" | "12_half2dc20": {"years", "max_losing_streak"}}
 RBX_RESEARCH_MONTHS = json.loads('''{"months":[["2025-01",1,12.8],["2025-02",1,-0.5],["2025-03",3,2.4],["2025-04",7,8.3],["2025-05",5,-2.9],["2025-06",4,0.5],["2025-07",6,-3.9],["2025-08",6,-1.2],["2025-09",7,-7.2],["2025-11",4,84.6],["2026-01",7,2.2],["2026-02",2,-0.8],["2026-03",3,10.3],["2026-04",8,-1.8],["2026-05",8,-3.2],["2026-07",7,1.8],["2026-08",11,-6.2],["2026-09",4,-4.1],["2026-10",4,20.1]],"pos_months":29,"all_months":69}''')   # the daily trend exit, month by month (2025–26)
 _RBX = {"trades": [], "loaded": False, "scan": None, "watch": [], "err": None}
 _rbx_lock = threading.Lock()
@@ -32452,8 +32463,11 @@ def rbx_scan_once(chart):
             except (TypeError, ValueError):
                 pass
     opened = 0
+    weak = sum(1 for c in cands if c["brk"] < RBX_MIN_BRK)
     for c in sorted(cands, key=lambda c: -c["brk"]):
         if RBX_STOP_ATR * c["atr"] <= c["close"] * 0.003:   # a stop within the fees (as the research skipped)
+            continue
+        if c["brk"] < RBX_MIN_BRK:     # v0.99.655: a weak breakout (the close barely beyond the range)
             continue
         with _rbx_lock:
             opn = [t for t in _RBX["trades"] if t["status"] == "OPEN"]
@@ -32464,7 +32478,7 @@ def rbx_scan_once(chart):
         opened += 1
     with _rbx_lock:
         sc = dict(_RBX.get("scan") or {})
-        sc[chart] = {"t": int(now), "bar": t_bar, "coins": coins, "signals": len(cands), "opened": opened}
+        sc[chart] = {"t": int(now), "bar": t_bar, "coins": coins, "signals": len(cands) - weak, "weak": weak, "opened": opened}
         sc["t"] = int(now)
         _RBX["scan"] = sc
         _RBX["watch"] = [w for w in (_RBX.get("watch") or []) if w.get("chart", "1d") != chart] + watch[:8]
@@ -32481,7 +32495,8 @@ def rbx_open(c, chart, t_bar, live_px=None):
     tp = px + 40 * risk if s > 0 else max(px - 40 * risk, px * 0.05)   # the exit is the 20-bar low / high; a far take only as a guard
     tr = {"id": f"rbx_{chart}_{sym}_{s}_{t_bar}", "symbol": sym, "side": s, "direction": direction, "chart": chart, "hrs": cfg["hrs"],
           "hold": cfg["hold"], "day": t_bar, "risk": risk, "entry": None, "sl": sl, "px": px, "rg": c["rg"], "brk": round(c["brk"], 2),
-          "half": False, "half_done": False, "part": bool(RBX_PART), "part_r": RBX_PART_R, "part_f": RBX_PART_F, "part_done": False, "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False,
+          "half": False, "half_done": False, "part": bool(RBX_PART), "part_r": RBX_PART_R, "part_f": RBX_PART_F, "part_done": False,
+          "lvl": c["hh"] if s > 0 else c["ll"], "fail_k": RBX_FAIL_K, "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": False,
           "rv": RBX_RULE_VER}
     if AUTOTRADE_ENABLED_RBX and live_px:
         try:
@@ -32497,7 +32512,8 @@ def rbx_open(c, chart, t_bar, live_px=None):
         _RBX["trades"].append(tr)
     if TELEGRAM_ALERTS_RBX:
         exit_txt = (f"на +{RBX_PART_R:g}R закрыть {round(RBX_PART_F * 100)}% и стоп в безубыток, остаток — " if tr["part"] else "тейка нет: ") + \
-                   f"выход, когда свеча {cfg['name']} закроется {'ниже 20-свечного минимума' if s > 0 else 'выше 20-свечного максимума'} (после +{RBX_TIGHT_R:g}R — {RBX_TIGHT_DC}-свечного)"
+                   f"выход, когда свеча {cfg['name']} закроется {'ниже 20-свечного минимума' if s > 0 else 'выше 20-свечного максимума'} (после +{RBX_TIGHT_R:g}R — {RBX_TIGHT_DC}-свечного)" + \
+                   (f"; если в первые {RBX_FAIL_K} свечи закроется обратно в коридор — выход сразу" if RBX_FAIL_K else "")
         send_telegram(f"{'🟢' if s > 0 else '🔴'} {sym.replace('_USDT', '')} {direction} · 📈 Пробой ({cfg['name']})\n"
                       f"вход по рынку ~{px:.6g} · стоп {sl:.6g} ({(sl - px) / px * 100:+.1f}%)" +
                       (f" · {round(RBX_PART_F * 100)}% на {px + s * RBX_PART_R * risk:.6g}" if tr["part"] else "") + f"\n{exit_txt}\n"
@@ -32532,6 +32548,9 @@ def rbx_walk(cs, k0, t):
             lv = min(x["low"] for x in cs[k - dc:k]) if s > 0 else max(x["high"] for x in cs[k - dc:k])
             if (c["close"] < lv) if s > 0 else (c["close"] > lv):
                 return "TREND_END", c["close"], j, fin2(j, c["close"])
+            fk, lvl = int(t.get("fail_k") or 0), t.get("lvl")    # v0.99.655: the close back inside the range early on
+            if fk and lvl is not None and j < fk and not took and ((c["close"] < lvl) if s > 0 else (c["close"] > lvl)):
+                return "FAILED", c["close"], j, fin2(j, c["close"])
         if len(cs) - k0 >= hold:
             ex = cs[k0 + hold - 1]["close"]
             return "TIME_EXIT", ex, hold - 1, fin2(hold - 1, ex)
@@ -32588,13 +32607,13 @@ def rbx_settle(now=None):
             if not res:
                 continue
             kind, ex, j, r = res
-            if kind in ("TREND_END", "TIME_EXIT") and t.get("real") and AUTOTRADE_ENABLED_RBX:
+            if kind in ("TREND_END", "TIME_EXIT", "FAILED") and t.get("real") and AUTOTRADE_ENABLED_RBX:
                 log_error(f"rbx exit {t['symbol']}: {close_position_for_mode('rbx', t['symbol'], t['direction'])}")
             with _rbx_lock:
                 t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k0 + j]["time"] + sec), "r": round(r, 3)})
             changed = True
             notify_trade_result("rbx", t["symbol"], t["direction"], t["entry"], ex, "WIN" if r > 0 and kind != "LOSS" else kind, round(r, 3),
-                                real=bool(t.get("real")), note=f"📈 Пробой {RBX_CHARTS[chart]['name']}" + (" · тренд кончился" if kind == "TREND_END" else ""))
+                                real=bool(t.get("real")), note=f"📈 Пробой {RBX_CHARTS[chart]['name']}" + (" · тренд кончился" if kind == "TREND_END" else "") + (" · ложный пробой — вернулась в коридор" if kind == "FAILED" else ""))
         except Exception as e_:
             log_error(f"rbx trade {t.get('symbol')}: {e_}")
     if changed:
@@ -32693,7 +32712,7 @@ def rbx_stats():
     fin = [t for t in trades if t["status"] == "CLOSED" and t.get("r") is not None]
     rs = [t["r"] for t in fin]
     return {"on": RBX_ENABLED, "auto": AUTOTRADE_ENABLED_RBX, "tg": TELEGRAM_ALERTS_RBX, "half": False, "part": RBX_PART, "part_r": RBX_PART_R, "part_f": RBX_PART_F, "risk": MODULE_RISK_PCT.get("rbx") or RBX_RISK_DEFAULT,
-            "research": RBX_RESEARCH, "months": RBX_RESEARCH_MONTHS, "charts": RBX_CHARTS, "stop_atr": RBX_STOP_ATR, "dc": RBX_DC, "half_r": RBX_HALF_R, "tight_r": RBX_TIGHT_R, "tight_dc": RBX_TIGHT_DC,
+            "min_brk": RBX_MIN_BRK, "fail_k": RBX_FAIL_K, "research": RBX_RESEARCH, "months": RBX_RESEARCH_MONTHS, "charts": RBX_CHARTS, "stop_atr": RBX_STOP_ATR, "dc": RBX_DC, "half_r": RBX_HALF_R, "tight_r": RBX_TIGHT_R, "tight_dc": RBX_TIGHT_DC,
             "err": err, "scan": scan, "watch": watch, "open": [t for t in trades if t["status"] == "OPEN"][-24:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 2) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None,
@@ -39834,7 +39853,7 @@ const BT_CH = {'1d': 'день', '12h': '12ч', '1h': '1ч', '4h': '4ч'};
 const BT_EMA_TF = {'4h': '4ч', '1d': 'день', '1w': 'неделя', '1M': 'месяц'};
 const btLabel = t => t.tf ? `EMA ${t.n} · ${BT_EMA_TF[t.tf] || t.tf}` : (BT_CH[t.c] || t.c);
 const btKey = t => t.tf || t.c;
-const BT_KIND = {be: 'безубыток после частичной', stop: 'стоп', hard: 'аварийный стоп', STOP_CLOSE: 'стоп по закрытию', HARD_STOP: 'аварийный стоп', take: 'тейк', trend: 'конец тренда', time: 'по времени', LOSS: 'стоп', WIN: 'тейк', TREND_END: 'конец тренда',
+const BT_KIND = {fail: 'ложный пробой', FAILED: 'ложный пробой', be: 'безубыток после частичной', stop: 'стоп', hard: 'аварийный стоп', STOP_CLOSE: 'стоп по закрытию', HARD_STOP: 'аварийный стоп', take: 'тейк', trend: 'конец тренда', time: 'по времени', LOSS: 'стоп', WIN: 'тейк', TREND_END: 'конец тренда',
   TIME_EXIT: 'по времени', BREAKEVEN: 'безубыток', TIME: 'по времени'};
 function btSection(mod, title) {
   const body = window._btData[mod] ? btListHtml(mod) : '<div class="dim">загружаю…</div>';
@@ -40008,7 +40027,7 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
             wk: all.length ? all.reduce((a, x) => a + x.wk, 0) / all.length : null, dd: Math.max(0, ...all.map(x => x.dd || 0)),
             days: n ? all.reduce((a, x) => a + (x.days || 0) * x.n, 0) / n : null, streak: (R[key] || {}).max_losing_streak}; };
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
-  let top = `<div class="dim hintx">Монета идёт в узком коридоре (день — ${(ch['1d'] || {}).n || 20} свечей, 12ч — ${(ch['12h'] || {}).n || 30}), потом свеча закрывается за ним — в сторону её собственного тренда (EMA200). Вход сразу после закрытия, стоп ${d.stop_atr || 1.5} ATR. ${d.part ? `<b>На +${d.part_r}R закрывается ${Math.round(d.part_f * 100)}%</b>, стоп переносится в безубыток, остаток идёт по тренду — без тейка, пока тренд жив.` : 'Тейка нет: сделка держится, пока тренд жив.'} Выход — свеча закрылась за ${d.dc || 20}-свечным минимумом (для шорта — максимумом)${d.tight_r ? `; после +${d.tight_r}R — за ${d.tight_dc}-свечным, чтобы сохранить большую часть прибыли` : ''}.</div>
+  let top = `<div class="dim hintx">Монета идёт в узком коридоре (день — ${(ch['1d'] || {}).n || 20} свечей, 12ч — ${(ch['12h'] || {}).n || 30}), потом свеча закрывается за ним — в сторону её собственного тренда (EMA200). Вход сразу после закрытия, стоп ${d.stop_atr || 1.5} ATR. ${d.part ? `<b>На +${d.part_r}R закрывается ${Math.round(d.part_f * 100)}%</b>, стоп переносится в безубыток, остаток идёт по тренду — без тейка, пока тренд жив.` : 'Тейка нет: сделка держится, пока тренд жив.'} Выход — свеча закрылась за ${d.dc || 20}-свечным минимумом (для шорта — максимумом)${d.tight_r ? `; после +${d.tight_r}R — за ${d.tight_dc}-свечным, чтобы сохранить большую часть прибыли` : ''}.${d.min_brk ? ` Берутся только сильные пробои — свеча закрылась за границей на ${d.min_brk} ATR и дальше; если в первые ${d.fail_k} свечи цена закрылась обратно в коридор — выход сразу, не дожидаясь стопа (ложный пробой).` : ''}</div>
     <div class="zsub">Проверка на истории 127 монет Binance, 2021–2026; правило выбрано по 2021–23, 2024 и 2025–26 — проверка. Результат на сделку в текущем режиме:</div>`;
   for (const [tf, hk] of [['1d', 24], ['12h', 12]]) {
     const s = sum(`${hk}_${mode}`), o = sum(`${hk}_${d.part ? 'dc20' : 'part'}`);
@@ -40022,7 +40041,7 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
   const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;"><b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.chart === '12h' ? '12ч' : 'день'} · коридор ${a.rg} · до пробоя ${a.dist > 0 ? '+' : ''}${a.dist}%</span></span>`;
   const sc = d.scan || {};
   h += card('👀 В сжатии сейчас', (w.length ? `<div>${w.map(chip).join('')}</div><div class="dim" style="font-size:var(--fs-xs);">монеты в узком коридоре по своему тренду; закроется свеча за границей — будет сигнал${d.auto ? ' и сделка' : ''}</div>` : '<div class="dim" style="font-size:var(--fs-sm);">сейчас подходящих сжатий нет</div>')
-    + `<div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">${['1d', '12h'].map(c => sc[c] ? `${c === '1d' ? 'день' : '12ч'}: проверка ${dd(sc[c].t)}, ${sc[c].coins} монет, пробоев ${sc[c].signals}, открыто ${sc[c].opened}` : '').filter(Boolean).join(' · ')}${sc.t ? ' · ' : ''}следующая — в 03:00 и 15:00 МСК</div>`);
+    + `<div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">${['1d', '12h'].map(c => sc[c] ? `${c === '1d' ? 'день' : '12ч'}: проверка ${dd(sc[c].t)}, ${sc[c].coins} монет, пробоев ${sc[c].signals}${sc[c].weak ? ` (+${sc[c].weak} слабых пропущено)` : ''}, открыто ${sc[c].opened}` : '').filter(Boolean).join(' · ')}${sc.t ? ' · ' : ''}следующая — в 03:00 и 15:00 МСК</div>`);
   const op = d.open || [];
   const row = (t, i) => `<div onclick="btLiveOpen('rbx', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
       <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${t.chart === '12h' ? '12ч' : 'день'}${t.half ? (t.half_done ? ' · ½ взята' : ' · ½ на +2R') : ''}${t.part ? (t.part_done ? ' · ¼ взята' : ` · ¼ на +${t.part_r || 1}R`) : ''}${t.real ? ' · 💰' : ''}</span></span>

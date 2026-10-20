@@ -20083,3 +20083,10 @@ v0.99.654 - Win rate and losing runs (the user: "очень не нравитс�
          default): WR 33% -> 54%, the longest losing run 26 -> 14 at about the same growth; the check set x13 vs x8.
          Real trades: the share closed at market and the stop moved to the entry on the exchange. Pauses after
          losses, break-even alone, filters (BTC, ADX, trend, hour): worse. Backtest lists and the Gate check redone.
+v0.99.655 - 📈 Breakout: false breakouts (the user: "часто в стопах, когда идёт сразу после входа только в сторону
+         стопа"). 72% of the stops never reached +0.5R. Now only strong breakouts are taken (the close ≥ 0.6 ATR beyond
+         the range) and a trade that closes back inside the range within its first 2 bars is closed at once (↩️
+         ложный пробой) instead of waiting for the stop. On the bot's breakouts x48 vs x38 at an equal drawdown, full
+         stops 32% of trades instead of 42%, the longest losing run 13; on the check set x13 vs x11, the run 12 vs 18.
+         ~2.7 trades a week instead of 3.7. A confirmation bar, a retest limit, other stops: worse. Stats, the
+         backtest list and the Gate check redone.

@@ -14,15 +14,16 @@ def rng_(sym, tf, a, b):
 vp.get_candles_range = rng_
 for f in ("send_telegram", "rbx_save", "cas_save", "notify_trade_result"): setattr(vp, f, lambda *a, **k: None)
 vp.AUTOTRADE_ENABLED_RBX = vp.AUTOTRADE_ENABLED_CAS = False
-KR = {"stop": "LOSS", "be": "BREAKEVEN", "trend": "TREND_END", "time": "TIME_EXIT", "take": "WIN"}
+KR = {"fail": "FAILED", "stop": "LOSS", "be": "BREAKEVEN", "trend": "TREND_END", "time": "TIME_EXIT", "take": "WIN"}
 rng = np.random.default_rng(3)
-rb = [x for x in json.load(open("rbx_bt_v654.json")) if not x["s"].startswith("1000") and load(x["s"].replace("_", ""))]
+rb = [x for x in json.load(open("rbx_bt_v655.json")) if not x["s"].startswith("1000") and load(x["s"].replace("_", ""))]
 ok = bad = 0
 for x in [rb[i] for i in rng.choice(len(rb), 150, replace=False)]:
     cfg = vp.RBX_CHARTS[x["c"]]; s = x["d"]; risk = abs(x["e"] - x["sl"])
     tr = {"id": "x", "symbol": x["s"], "side": s, "direction": "LONG" if s > 0 else "SHORT", "chart": x["c"], "hrs": cfg["hrs"], "hold": cfg["hold"],
           "day": x["t"], "risk": risk, "entry": None, "sl": x["e"] - s * risk, "px": x["e"], "half": False, "part": True, "part_r": vp.RBX_PART_R,
-          "part_f": vp.RBX_PART_F, "status": "OPEN", "real": False}
+          "part_f": vp.RBX_PART_F, "status": "OPEN", "real": False,
+          "lvl": x["hh"] if s > 0 else x["ll"], "fail_k": x.get("fk", 0)}
     vp._RBX["trades"] = [tr]
     vp.rbx_settle(now=x["x"] + 2 * cfg["hrs"] * 3600)
     good = tr["status"] == "CLOSED" and abs(tr["r"] - x["r"]) < 0.01 and tr["result"] == KR[x["k"]] and tr["t_out"] == x["x"]
