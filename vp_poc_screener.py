@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.650"
+APP_VERSION = "0.99.651"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -29671,7 +29671,9 @@ def oc_loop():
 # edges, the stop a day's move of the coin beyond the far edge, the take a multiple of the risk.
 ZM_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_zones_model.json")
 ZM_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_zones_model.json"
-ZM_MODEL_VER = 2   # v0.99.622 — 2: stop 0.75 daily ATR, take 4R (the take sweep)
+ZM_MODEL_VER = 3   # v0.99.622 — 2: stop 0.75 daily ATR, take 4R (the take sweep)
+# v0.99.651 — 3: the same model, the stop 1.0 daily ATR past the zone: better on the bot's top 5% and a top-15% check set at an
+# equal drawdown (tools/zones_model/zm_hyp.py), WR 43% instead of 39%, the longest losing run 18 instead of 31
 ZM_ENABLED = os.environ.get("VP_ZONES_ZM", "1") == "1"
 AUTOTRADE_ENABLED_ZONES_ZM = os.environ.get("VP_AUTOTRADE_ZONES_ZM", "0") == "1"
 TELEGRAM_ALERTS_ZONES_ZM = os.environ.get("VP_TG_ZONES_ZM", "1") == "1"

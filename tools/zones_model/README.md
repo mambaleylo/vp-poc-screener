@@ -24,3 +24,9 @@ v0.99.622 — the take sweep (the user: "полноценная проверка
 deployed 1 / 3R in every year; with 3 models per fold (`LAB=G_0.75_R4.0 python3 zm_expect2.py`): 2022 +0.46R,
 2023 +0.27R, 2024 +0.22R, 2025–26 +0.17R (+383R in all vs +279R). `zm_export2.py` exports it with the monthly
 expectation; `t_bot_e2e2.py` checks the bot's ladder (23/23).
+
+v0.99.651 — the same audit as the other modules: `zm_sel.py` saves the yearly walk-forward scores once, `zm_h.py`
+replays the bot on the label grid, `zm_hyp.py <0.95|0.85>` judges ideas at an equal 1-in-10 drawdown on the bot's top
+5% and a top-15% check set. Better on both: the stop 1.0 daily ATR past the zone (x12.0 vs x7.7, check x5.2 vs x4.7;
+WR 43% vs 39%, the longest losing run 18 vs 31). Not kept: longs / shorts only, one zone chart, BTC 24h / EMA50, the
+coin's EMA200 trend, other buffer / take pairs (disagree between the sets). `zm_export3.py` -> model ver 3.

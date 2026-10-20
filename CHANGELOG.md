@@ -20058,3 +20058,7 @@ v0.99.650 - 🧠 Neuro: the same study as the other modules. Kept (better on bot
          into a strong trend (ADX < 30), none when BTC moved more than 1% against the trade in the last hour, out
          after 24 h instead of 48. The longest losing run 29 instead of 51. Neuro stays the weakest module
          (2025–26 about 0R a trade) — keep its risk small or the module virtual. Model ver 3; t_nx_rule.py 6/6.
+v0.99.651 - 🎯 Strong zones: the stop 1.0 daily ATR past the zone instead of 0.75 (take 4R as before), after the same
+         study as the other modules — better on both sets at an equal drawdown, WR 43% instead of 39%, the longest
+         losing run 18 instead of 31. Filters by side, chart, BTC and the coin's trend disagreed between the sets.
+         Model ver 3 (the same trees, the rule and the yearly stats).
