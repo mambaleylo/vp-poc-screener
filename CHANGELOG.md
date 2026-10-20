@@ -20095,3 +20095,9 @@ v0.99.656 - Zones: the live pullback signals list shows 15 and a "ещё 20" but
          take:stop) next to the % stops — the user asked whether "the price reached the line in 78% of posts" can be
          traded: with a % stop the take is 1% away on one post and 15% on another. If such a variant is in plus on
          the whole history and on its last third, the bot signals it as before.
+v0.99.657 - Zones, the sweep before the line (the user: "на практике вынос, может это использовать?" — the live pullback
+         signals with a 0.5% stop: 2 takes of 28, −11R): the "➡️ Движение к зоне" card shows how far the price went
+         against the move before it reached the line (median / 75% / 90%, in % and in shares of the way); the
+         hypotheses get entries at the sweep (a limit 0.25 / 0.5 / 0.75 of the way against the move) with stops in
+         shares of the way; a variant that lost live (15+ closed signals, average below zero) is no longer signalled —
+         the next one that holds on the history and its last third is taken, or none.

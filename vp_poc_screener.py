@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.656"
+APP_VERSION = "0.99.657"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -25131,7 +25131,9 @@ def zones_approach_sim(cs, d, target, sl_pct, start, end):
             "t_out": after[-1]["time"], "open": True}
 
 
-ZONES_HYP_PULL = (0.0, 1.0, 2.0, 3.0, 5.0)   # v0.99.522 — wait for a pullback this % against the move before entering
+ZONES_HYP_PULL = (0.0, 1.0, 2.0, 3.0, 5.0, -0.25, -0.5, -0.75)   # v0.99.522 — wait for a pullback this % against the move before entering;
+# v0.99.657 — negative = that share of the way to the line against the move (the user: "на практике вынос, может это
+# использовать?" — the live 0.5% stops were swept 26 times of 28 before the price went to the line: enter at the sweep)
 ZONES_HYP_SL = (0.5, 1.0, 2.0, 3.0, 5.0, -0.5, -1.0, -1.5, -2.0)     # stop, % from the entry; v0.99.656: negative = that many
 # times the way to the line (the user asked whether "the price reached the line in 78% of posts" can be traded: with a
 # stop in % the take can be far and the stop near or the other way round; a stop sized on the way fixes the reward:risk)
@@ -25144,6 +25146,15 @@ def zones_sl_px(e, d, sl, line_tp):
 
 def zones_sl_txt(sl):
     return f"{sl:g}%" if sl > 0 else f"{-sl:g}× пути до линии"
+
+
+def zones_pull_px(p0, d, pull, line_tp):
+    """the entry: pull >= 0 — a limit pull % against the move from p0; pull < 0 — |pull| x the way from p0 to the line"""
+    return p0 * (1 - d * pull / 100) if pull >= 0 else p0 - d * (-pull) * abs(line_tp - p0)
+
+
+def zones_pull_txt(pull):
+    return f"откат {pull:g}%" if pull > 0 else (f"откат {-pull:g}× пути" if pull < 0 else "сразу")
 ZONES_HYP_TP = ("line", "half", "2r", "3r")   # take: before the first line / half the way / 2R / 3R
 ZONES_HYP_TP_NAMES = {"line": "до 1-й линии", "half": "полпути до линии", "2r": "2R", "3r": "3R"}
 
@@ -25157,8 +25168,8 @@ def zones_hyp_sim(after, d, target, pull, sl_pct, tp_mode):
     if not after:
         return None
     p0 = after[0]["open"]
-    e = p0 * (1 - d * pull / 100)
     line_tp = zones_approach_tp(target, d)
+    e = zones_pull_px(p0, d, pull, line_tp)
     if (d > 0 and e >= line_tp) or (d < 0 and e <= line_tp):
         return None
     sl = zones_sl_px(e, d, sl_pct, line_tp)
@@ -25236,6 +25247,7 @@ def zones_approach_learn(cache=None):
     rows = {sl: [] for sl in ZONES_APPR_SL}
     reach, elig = 0, 0
     hyp_cases = []   # v0.99.522
+    sweeps = []      # v0.99.657
     with _zones_lock:
         fine_only = bool(ZONES.get("fine_only"))
     for post in posts:
@@ -25252,6 +25264,13 @@ def zones_approach_learn(cache=None):
             continue
         tp = zones_approach_tp(ap["target"], ap["dir"])
         touched = any((ap["dir"] > 0 and c["high"] >= tp) or (ap["dir"] < 0 and c["low"] <= tp) for c in cs)
+        if touched:   # v0.99.657 — how far against the move the price went before it reached the line (the sweep)
+            p0, adv = cs[0]["open"], 0.0
+            for c in cs:
+                adv = max(adv, (p0 - c["low"]) if ap["dir"] > 0 else (c["high"] - p0))
+                if (ap["dir"] > 0 and c["high"] >= tp) or (ap["dir"] < 0 and c["low"] <= tp):
+                    break
+            sweeps.append((adv / p0 * 100, adv / abs(tp - p0) if tp != p0 else 0.0))
         if touched or window_over:
             elig += 1
             reach += 1 if touched else 0
@@ -25271,6 +25290,11 @@ def zones_approach_learn(cache=None):
     best = max(ok, key=lambda r: r["avg_r"]) if ok else None
     res = {"at": now, "posts": elig, "reach_pct": round(reach / elig * 100, 1) if elig else None,
            "rows": out_rows, "best": best, "good": bool(best and best["avg_r"] > 0)}
+    if len(sweeps) >= 10:
+        q = lambda xs, p: sorted(xs)[min(len(xs) - 1, int(p * len(xs)))]
+        pc, wy = [x[0] for x in sweeps], [x[1] for x in sweeps]
+        res["sweep"] = {"n": len(sweeps), "pct": [round(q(pc, p), 2) for p in (0.5, 0.75, 0.9)], "way": [round(q(wy, p), 2) for p in (0.5, 0.75, 0.9)],
+                        "none": round(sum(1 for x in pc if x < 0.3) / len(pc) * 100)}
     try:
         res["hyp"] = zones_hyp_table(hyp_cases)
     except Exception as e:
@@ -25347,8 +25371,14 @@ def zones_pb_variant():
     with enough trades, in plus over the whole history AND on its last third"""
     with _zones_lock:
         hy = (ZONES.get("approach") or {}).get("hyp") or {}
+        live = [p_["pb_trade"] for p_ in ZONES["posts"] if p_.get("pb_trade") and p_["pb_trade"].get("status") == "CLOSED"]
     for r in hy.get("rows") or []:
         if r["n"] >= ZONES_LEARN_MIN and r["avg_r"] > 0 and (r.get("test_r") or 0) > 0:
+            # v0.99.657 — a variant that already lost live (15+ closed signals, the average below zero) is not signalled
+            rs = [t["pnl_r"] for t in live if t.get("pnl_r") is not None
+                  and all(t["variant"].get(k) == r[k] for k in ("pull", "sl", "tp"))]
+            if len(rs) >= 15 and sum(rs) / len(rs) < 0:
+                continue
             return r
     return None
 
@@ -25396,8 +25426,8 @@ def zones_pb_on_new_post(post):
     if not ap:
         return None
     d, sym = ap["dir"], post["symbol"]
-    e = price * (1 - d * v["pull"] / 100)
     line_tp = zones_approach_tp(ap["target"], d)
+    e = zones_pull_px(price, d, v["pull"], line_tp)
     if (d > 0 and e >= line_tp) or (d < 0 and e <= line_tp):
         return None
     sl = zones_sl_px(e, d, v["sl"], line_tp)
@@ -25418,7 +25448,7 @@ def zones_pb_on_new_post(post):
                 + (f" ({sz['loss_pct']:g}% баланса)" if sz.get("loss_pct") is not None else "")
                 if sz.get("lev") and not sz.get("skip") else f"объём: {sz.get('skip') or 'не посчитан'}")
     zones_pb_notify(f"🧪 Откат · {sym.replace('_USDT', '')} {word}\n"
-                 + (f"лимитка {e:.6g} (откат {v['pull']:g}% от {price:.6g})" if v["pull"] else f"вход по рынку {e:.6g}")
+                 + (f"лимитка {e:.6g} ({zones_pull_txt(v['pull'])} от {price:.6g}, {abs(price - e) / price * 100:.2g}%)" if v["pull"] else f"вход по рынку {e:.6g}")
                  + f"\nстоп {sl:.6g} ({abs(sl - e) / e * 100:.2g}%{'' if v['sl'] > 0 else ', ' + zones_sl_txt(v['sl'])}) · тейк {tp:.6g} ({tp_name})\n{size_txt}\n"
                  f"по истории: {v['n']} сделок, WR {v['wr']}%, {v['avg_r']:+.2f}R, последняя треть {v['test_r']:+.2f}R\n"
                  f"🔔 только сигнал — бот ордер не ставит, ведёт статистику")
@@ -25481,7 +25511,7 @@ def _zones_track_pb(post):
             tr.update({"status": "CLOSED", "result": kind, "exit_price": px, "exit_time": tx, "pnl_r": round(r, 3)})
         if zones_pb_tg():
             notify_trade_result("zones_pb", sym, tr["direction"], tr["entry"], px, kind, r, real=False,
-                                note=f"откат {tr['variant']['pull']:g}% · стоп {zones_sl_txt(tr['variant']['sl'])} · тейк "
+                                note=f"{zones_pull_txt(tr['variant']['pull'])} · стоп {zones_sl_txt(tr['variant']['sl'])} · тейк "
                                      f"{ZONES_HYP_TP_NAMES.get(tr['variant']['tp'], tr['variant']['tp'])}")
         _zones_learn_event.set()
         changed = True
@@ -38644,7 +38674,8 @@ async function refreshZones() {
       <div>автосделки</div><div>${d.autotrade_approach ? '<span class="win">вкл</span>' : 'выкл'}</div></div>
       ${rows ? `<div class="zwrap"><table class="ztbl"><thead><tr><th>Стоп</th><th>WR</th><th>средний</th><th>сделок</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="dim">сделок пока нет</div>'}
       <div class="zsub">${ap.good && ap.best ? `в сигнале будет «можно заходить», стоп ${ap.best.sl}%` : (ap.best ? 'пока не в плюсе — в сигнале только справка' : `мало постов (нужно ${d.learn_min})`)}</div>
-      <div class="dim hintx" style="font-size:var(--fs-sm);">«Дошла до линии» — без стопа: по дороге цена часто сначала уходит против. Стоп в % плохо подходит — путь до линии у постов разный (то 1%, то 15%). Варианты со стопом в долях пути (тейк:стоп фиксирован), с откатом и проверкой на последней трети — в таблице «🧪 Вход до зоны» ниже; если какой-то окажется в плюсе и там, бот сам начнёт слать по нему сигналы.</div>`);
+      ${ap.sweep ? `<div class="zkv" style="margin:6px 0;"><div>вынос против до линии</div><div>медиана <b>${ap.sweep.pct[0]}%</b> (${ap.sweep.way[0]}× пути) · у 75% ≤ ${ap.sweep.pct[1]}% (${ap.sweep.way[1]}×) · у 90% ≤ ${ap.sweep.pct[2]}% (${ap.sweep.way[2]}×)<div class="dim">${ap.sweep.n} постов, дошедших до линии; почти без выноса (&lt;0.3%) — ${ap.sweep.none}%</div></div></div>` : ''}
+      <div class="dim hintx" style="font-size:var(--fs-sm);">«Дошла до линии» — без стопа: по дороге цена часто сначала уходит против. Стоп в % плохо подходит — путь до линии у постов разный (то 1%, то 15%). Варианты со стопом в долях пути (тейк:стоп фиксирован), со входом на выносе («откат 0.5× пути» — лимитка там, где обычно кончается вынос) и проверкой на последней трети — в таблице «🧪 Вход до зоны» ниже; вариант, который вживую после 15 сделок в минусе, бот больше не сигналит; если какой-то окажется в плюсе и там, бот сам начнёт слать по нему сигналы.</div>`);
   }
   // v0.99.522 — "before the zone" entry hypotheses: a separate table
   let hypCard = '';
@@ -38652,7 +38683,8 @@ async function refreshZones() {
   if (hy && (hy.rows || []).length) {
     const tpN = {line: 'до 1-й линии', half: 'полпути', '2r': '2R', '3r': '3R'};
     const slT = v => v > 0 ? v + '%' : (-v) + '× пути';   // v0.99.656: a stop sized on the way to the line
-    const hrow = r => `<tr class="${r.n < d.learn_min ? 'dim' : ''}"><td>${r.pull ? 'откат ' + r.pull + '%' : 'сразу'}<div class="dim">стоп ${slT(r.sl)} · тейк ${tpN[r.tp] || r.tp}</div></td><td>${r.n}<div class="dim">${r.entry_pct}%</div></td><td>${r.wr}%</td><td>${sgR(r.avg_r)}<div class="dim">${sgP(r.g)}</div></td><td>${r.test_r == null ? '—' : sgR(r.test_r)}<div class="dim">${r.test_n || ''}</div></td></tr>`;
+    const pullT = v => v > 0 ? 'откат ' + v + '%' : (v < 0 ? 'откат ' + (-v) + '× пути' : 'сразу');   // v0.99.657
+    const hrow = r => `<tr class="${r.n < d.learn_min ? 'dim' : ''}"><td>${pullT(r.pull)}<div class="dim">стоп ${slT(r.sl)} · тейк ${tpN[r.tp] || r.tp}</div></td><td>${r.n}<div class="dim">${r.entry_pct}%</div></td><td>${r.wr}%</td><td>${sgR(r.avg_r)}<div class="dim">${sgP(r.g)}</div></td><td>${r.test_r == null ? '—' : sgR(r.test_r)}<div class="dim">${r.test_n || ''}</div></td></tr>`;
     const head = '<thead><tr><th>Вход</th><th>сделок</th><th>WR</th><th>средний<div class="dim">счёт</div></th><th>посл. треть</th></tr></thead>';
     const top = hy.rows.filter(r => r.n >= d.learn_min).slice(0, 10);
     const b = top[0];
@@ -38677,7 +38709,7 @@ async function refreshZones() {
     };
     const pbRow = t => `<tr><td>${(t.symbol || '').replace('_USDT', '')} ${t.direction === 'LONG' ? 'лонг' : 'шорт'}<div class="dim">${zdate(t.time)}</div></td><td>${+(+t.entry).toPrecision(5)}<div class="dim">стоп ${+(+t.sl).toPrecision(5)} · тейк ${+(+t.tp).toPrecision(5)}</div></td><td>${t.status === 'CLOSED' ? `<b class="${t.pnl_r > 0 ? 'win' : 'loss'}">${resTxt[t.result] || t.result} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R</b>` : (stTxt[t.status] || t.status)}${pbSizeTxt(t)}</td></tr>`;
     const pbBlock = `<div class="zh" style="margin-top:10px;">🔔 Сигналы откатов вживую</div>
-      <div class="zsub" style="margin-top:0;">${pv ? `сейчас сигналю вариант: <b>${pv.pull ? 'откат ' + pv.pull + '%' : 'вход сразу'} · стоп ${slT(pv.sl)} · тейк ${tpN[pv.tp] || pv.tp}</b> (лучший, что в плюсе и на последней трети)` : 'ни один вариант не в плюсе на последней трети — новых сигналов нет'}. В Telegram: лимитка, стоп, тейк, плечо и убыток на стопе при вашем риске; ордера бот не ставит.</div>
+      <div class="zsub" style="margin-top:0;">${pv ? `сейчас сигналю вариант: <b>${pv.pull ? pullT(pv.pull) : 'вход сразу'} · стоп ${slT(pv.sl)} · тейк ${tpN[pv.tp] || pv.tp}</b> (лучший, что в плюсе и на последней трети)` : 'ни один вариант не в плюсе на последней трети — новых сигналов нет'}. В Telegram: лимитка, стоп, тейк, плечо и убыток на стопе при вашем риске; ордера бот не ставит.</div>
       <label style="display:block;margin:6px 0 8px;cursor:pointer;"><input type="checkbox" ${d.pb_tg ? 'checked' : ''} onchange="zonesPbTg(this.checked)"> <b>уведомления об откатах в Telegram</b><div class="dim" style="font-size:var(--fs-sm);">статистика ведётся в любом случае</div></label>
       ${pb.n ? `<div class="zkv"><div>сигналов</div><div><b>${pb.n}</b>: ждут ${pb.pending} · в позиции ${pb.open} · не налились ${pb.missed} · закрыто ${pb.closed}</div>
         ${pb.closed ? `<div>итог закрытых</div><div>тейков ${pb.wins} из ${pb.closed} · средний <b>${sgR(pb.avg_r)}</b> · всего ${pb.sum_r > 0 ? '+' : ''}${pb.sum_r}R</div>` : ''}</div>
