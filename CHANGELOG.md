@@ -20039,3 +20039,8 @@ v0.99.646 - 📈 Range breakout: the stop 2 ATR instead of 1.5, after the same s
          longest losing run 28 instead of 31, more growth at the same drawdown on both sets; with the "half at
          +2R" mode on: WR 41% and at most 17 losses in a row. The tab's yearly stats and the backtest list are
          recomputed with the new stop; the bot = the research on the history (t_rbx_e2e2.py: 0 differences).
+v0.99.647 - 📈 Range breakout: once a trade has been +4R, it exits on the close beyond the 15-bar low / high instead
+         of the 20-bar one — keeps more of a big trend when it turns. Better on both the bot's breakouts and the
+         check set for any threshold from +4 to +8R. Also checked and not used: a retest entry, other exit
+         channels, closing trades that go nowhere, the EMA200 slope, one signal per coin across the two charts.
+         The tab's stats and the backtest list recomputed; t_rbx_e2e2.py checks the new exit (0 differences).

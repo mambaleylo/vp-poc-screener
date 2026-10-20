@@ -31,3 +31,9 @@ dc10 / dc50 and breakeven are worse. `rb_sim.py` (re-simulated exits, 99.9–100
 on both sets (x29 vs x20, check x6.3 vs x4.0; WR 32% vs 28%, a losing run of 28 vs 31), with half at +2R WR 41% and a
 run of 17 at about the same growth; the stop by close, 2.5 and 3 ATR disagree between the sets. Deployed: the stop 2 ATR
 (`rb_export.py` recomputes RBX_RESEARCH / RBX_RESEARCH_MONTHS and the backtest list); `t_rbx_e2e2.py` uses the bot's stop.
+
+v0.99.647 — round 2 (`rb_sim2.py`, `rb_sim3.py`): a retest entry (a limit at the broken edge, 3 / 6 bars), the exit
+channel 15 / 30, closing a trade that has not been +1R in 5 / 10 / 20 bars, the EMA200 slope, one signal per coin
+across the two charts, half at +2R — worse or disagreeing between the two sets. Kept: the exit channel shortens to 15
+bars once the trade has been +4R (x32 vs x29, check x8.4 vs x6.2; +5 / +6 / +8R give the same, -> 10 bars is worse).
+`rb_export2.py` recomputes the stats and the list; `t_rbx_e2e2.py` checks the tightened exit too (0 differences).

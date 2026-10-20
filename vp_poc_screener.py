@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.646"
+APP_VERSION = "0.99.647"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31765,12 +31765,15 @@ RBX_CHARTS = {"1d": {"hrs": 24, "n": 20, "k": 2.5, "hold": 180, "cap": 6, "name"
 # v0.99.646 — the stop 2 ATR (was 1.5): better on the bot's breakouts and on a check set (the other range lengths) at
 # an equal drawdown, WR 32% instead of 28%, with "half at +2R" 41%; the stats below recomputed with it (tools/rr_hunt/rb_*.py)
 RBX_STOP_ATR, RBX_DC, RBX_HALF_R = 2.0, 20, 2.0
+# v0.99.647 — once the trade has been +4R (its best price so far), the exit channel shortens to 15 bars: keeps more of a big
+# trend when it turns. Better on both sets for every threshold +4 / +5 / +6 / +8R (x32 vs x29, check x8.4 vs x6.2).
+RBX_TIGHT_R, RBX_TIGHT_DC = 4.0, 15
 RBX_TOP = int(os.environ.get("VP_RBX_TOP", "120"))
 RBX_RISK_DEFAULT = 0.5
 RBX_FEE, RBX_FUND = 0.001, 0.0003
 RBX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_rbx_state.json")
-RBX_RESEARCH = json.loads('''{"24_dc20":{"years":{"2021":{"n":30,"avg":3.24,"wk":0.6,"sum":97.3,"dd":8.1,"wr":36.7,"days":46.0,"best":42.5},"2022":{"n":38,"avg":0.64,"wk":0.7,"sum":24.1,"dd":3.3,"wr":60.5,"days":48.0,"best":3.8},"2023":{"n":41,"avg":0.79,"wk":0.8,"sum":32.2,"dd":13.9,"wr":34.1,"days":44.0,"best":13.6},"2024":{"n":56,"avg":0.77,"wk":1.1,"sum":43.3,"dd":22.5,"wr":25.0,"days":31.0,"best":39.3},"2025":{"n":95,"avg":0.83,"wk":1.0,"sum":79.3,"dd":15.5,"wr":37.9,"days":36.0,"best":54.6}},"max_losing_streak":18},"24_half2dc20":{"years":{"2021":{"n":32,"avg":1.78,"wk":0.6,"sum":57.1,"dd":8.1,"wr":50.0,"days":39.0,"best":22.2},"2022":{"n":38,"avg":0.77,"wk":0.7,"sum":29.3,"dd":3.3,"wr":68.4,"days":48.0,"best":2.9},"2023":{"n":41,"avg":0.48,"wk":0.8,"sum":19.7,"dd":12.0,"wr":39.0,"days":44.0,"best":7.8},"2024":{"n":57,"avg":0.4,"wk":1.1,"sum":23.0,"dd":13.2,"wr":36.8,"days":28.0,"best":20.6},"2025":{"n":95,"avg":0.54,"wk":1.0,"sum":51.3,"dd":12.9,"wr":43.2,"days":35.0,"best":28.3}},"max_losing_streak":12},"12_dc20":{"years":{"2021":{"n":113,"avg":0.88,"wk":2.2,"sum":99.3,"dd":19.1,"wr":34.5,"days":17.0,"best":34.7},"2022":{"n":90,"avg":0.33,"wk":1.7,"sum":29.8,"dd":17.1,"wr":35.6,"days":21.0,"best":8.6},"2023":{"n":126,"avg":0.38,"wk":2.4,"sum":47.5,"dd":34.2,"wr":26.2,"days":18.0,"best":17.0},"2024":{"n":135,"avg":1.03,"wk":2.6,"sum":138.8,"dd":32.7,"wr":28.9,"days":16.0,"best":79.4},"2025":{"n":252,"avg":0.41,"wk":2.8,"sum":103.3,"dd":44.9,"wr":29.4,"days":17.0,"best":100.0}},"max_losing_streak":20},"12_half2dc20":{"years":{"2021":{"n":119,"avg":0.43,"wk":2.3,"sum":51.0,"dd":19.0,"wr":39.5,"days":15.0,"best":18.4},"2022":{"n":92,"avg":0.36,"wk":1.8,"sum":33.5,"dd":10.6,"wr":46.7,"days":20.0,"best":4.2},"2023":{"n":135,"avg":0.14,"wk":2.6,"sum":18.8,"dd":27.2,"wr":33.3,"days":15.0,"best":9.5},"2024":{"n":141,"avg":0.51,"wk":2.7,"sum":71.2,"dd":25.1,"wr":36.2,"days":15.0,"best":40.7},"2025":{"n":256,"avg":0.32,"wk":2.8,"sum":82.3,"dd":27.6,"wr":41.4,"days":16.0,"best":51.0}},"max_losing_streak":13}}''')   # {"24_dc20" | "24_half2dc20" | "12_dc20" | "12_half2dc20": {"years", "max_losing_streak"}}
-RBX_RESEARCH_MONTHS = json.loads('''{"months":[["2025-01",1,11.7],["2025-02",2,38.8],["2025-03",3,2.4],["2025-04",7,8.3],["2025-05",5,-2.9],["2025-06",4,0.5],["2025-07",6,-3.9],["2025-08",6,-1.9],["2025-09",7,-7.2],["2025-11",3,10.3],["2025-12",1,54.6],["2026-01",7,2.2],["2026-02",2,-0.8],["2026-03",3,10.1],["2026-04",6,0.3],["2026-05",8,-3.2],["2026-07",7,1.1],["2026-08",11,-6.2],["2026-09",4,-4.1],["2026-10",4,20.1]],"pos_months":35,"all_months":69}''')   # the daily trend exit, month by month (2025–26)
+RBX_RESEARCH = json.loads('''{"24_dc20":{"years":{"2021":{"n":32,"avg":2.85,"wk":0.6,"sum":91.1,"dd":10.2,"wr":34.4,"days":40.0,"best":42.5},"2022":{"n":39,"avg":0.6,"wk":0.7,"sum":23.4,"dd":6.1,"wr":59.0,"days":46.0,"best":3.8},"2023":{"n":44,"avg":0.7,"wk":0.8,"sum":30.7,"dd":12.1,"wr":36.4,"days":38.0,"best":13.6},"2024":{"n":58,"avg":1.12,"wk":1.1,"sum":65.1,"dd":23.5,"wr":25.9,"days":29.0,"best":48.4},"2025":{"n":97,"avg":1.02,"wk":1.1,"sum":98.5,"dd":14.7,"wr":37.1,"days":35.0,"best":74.2}},"max_losing_streak":18},"24_half2dc20":{"years":{"2021":{"n":34,"avg":1.55,"wk":0.7,"sum":52.7,"dd":10.2,"wr":47.1,"days":35.0,"best":22.2},"2022":{"n":39,"avg":0.73,"wk":0.7,"sum":28.5,"dd":3.9,"wr":66.7,"days":46.0,"best":2.9},"2023":{"n":44,"avg":0.43,"wk":0.8,"sum":18.9,"dd":12.0,"wr":38.6,"days":38.0,"best":7.8},"2024":{"n":59,"avg":0.59,"wk":1.1,"sum":34.8,"dd":12.8,"wr":39.0,"days":27.0,"best":25.2},"2025":{"n":97,"avg":0.62,"wk":1.1,"sum":59.9,"dd":12.6,"wr":42.3,"days":34.0,"best":38.1}},"max_losing_streak":14},"12_dc20":{"years":{"2021":{"n":113,"avg":0.74,"wk":2.2,"sum":84.1,"dd":17.8,"wr":34.5,"days":16.0,"best":26.4},"2022":{"n":92,"avg":0.31,"wk":1.8,"sum":28.4,"dd":19.3,"wr":35.9,"days":20.0,"best":8.6},"2023":{"n":126,"avg":0.48,"wk":2.4,"sum":60.2,"dd":34.1,"wr":27.8,"days":17.0,"best":18.2},"2024":{"n":137,"avg":0.89,"wk":2.6,"sum":122.0,"dd":32.7,"wr":29.2,"days":15.0,"best":79.4},"2025":{"n":265,"avg":0.39,"wk":2.9,"sum":102.9,"dd":43.7,"wr":29.8,"days":16.0,"best":110.1}},"max_losing_streak":18},"12_half2dc20":{"years":{"2021":{"n":119,"avg":0.39,"wk":2.3,"sum":46.0,"dd":17.4,"wr":39.5,"days":15.0,"best":14.2},"2022":{"n":94,"avg":0.35,"wk":1.8,"sum":33.3,"dd":14.7,"wr":46.8,"days":19.0,"best":4.0},"2023":{"n":135,"avg":0.19,"wk":2.6,"sum":25.3,"dd":25.5,"wr":33.3,"days":15.0,"best":10.1},"2024":{"n":143,"avg":0.41,"wk":2.7,"sum":58.5,"dd":25.1,"wr":35.7,"days":14.0,"best":40.7},"2025":{"n":269,"avg":0.3,"wk":3.0,"sum":81.2,"dd":27.6,"wr":40.9,"days":15.0,"best":56.1}},"max_losing_streak":13}}''')   # {"24_dc20" | "24_half2dc20" | "12_dc20" | "12_half2dc20": {"years", "max_losing_streak"}}
+RBX_RESEARCH_MONTHS = json.loads('''{"months":[["2025-01",1,12.8],["2025-02",1,-0.5],["2025-03",3,2.4],["2025-04",7,8.3],["2025-05",5,-2.9],["2025-06",4,0.5],["2025-07",6,-3.9],["2025-08",6,-1.2],["2025-09",7,-7.2],["2025-11",4,84.6],["2026-01",7,2.2],["2026-02",2,-0.8],["2026-03",3,10.3],["2026-04",8,-1.8],["2026-05",8,-3.2],["2026-07",7,1.8],["2026-08",11,-6.2],["2026-09",4,-4.1],["2026-10",4,20.1]],"pos_months":29,"all_months":69}''')   # the daily trend exit, month by month (2025–26)
 _RBX = {"trades": [], "loaded": False, "scan": None, "watch": [], "err": None}
 _rbx_lock = threading.Lock()
 
@@ -31926,7 +31929,7 @@ def rbx_open(c, chart, t_bar, live_px=None):
         _RBX["trades"].append(tr)
     if TELEGRAM_ALERTS_RBX:
         exit_txt = (f"на +{RBX_HALF_R:g}R закрыть половину и стоп в безубыток, остаток — " if tr["half"] else "тейка нет: ") + \
-                   f"выход, когда свеча {cfg['name']} закроется {'ниже 20-свечного минимума' if s > 0 else 'выше 20-свечного максимума'}"
+                   f"выход, когда свеча {cfg['name']} закроется {'ниже 20-свечного минимума' if s > 0 else 'выше 20-свечного максимума'} (после +{RBX_TIGHT_R:g}R — {RBX_TIGHT_DC}-свечного)"
         send_telegram(f"{'🟢' if s > 0 else '🔴'} {sym.replace('_USDT', '')} {direction} · 📈 Пробой ({cfg['name']})\n"
                       f"вход по рынку ~{px:.6g} · стоп {sl:.6g} ({(sl - px) / px * 100:+.1f}%)" +
                       (f" · половина на {px + s * RBX_HALF_R * risk:.6g}" if tr["half"] else "") + f"\n{exit_txt}\n"
@@ -31942,6 +31945,7 @@ def rbx_walk(cs, k0, t):
     hold, hrs = int(t["hold"]), int(t["hrs"])
     fin = lambda k, ex, part=1.0, fee=1.0: (s * (ex - e) - e * RBX_FEE * fee - e * RBX_FUND * (k + 1) * hrs / 24) / risk * part
     half_at = None
+    best = 0.0
     for k in range(k0, min(len(cs), k0 + hold)):
         c = cs[k]; j = k - k0
         if half_at is None:
@@ -31950,7 +31954,9 @@ def rbx_walk(cs, k0, t):
         else:
             if (c["low"] <= e) if s > 0 else (c["high"] >= e):
                 return "BREAKEVEN", e, j, half_at + 0.5 * (s * 0 - e * RBX_FEE / 2 - e * RBX_FUND * (j + 1) * hrs / 24) / risk
-        lv = min(x["low"] for x in cs[k - RBX_DC:k]) if s > 0 else max(x["high"] for x in cs[k - RBX_DC:k])
+        best = max(best, ((c["high"] - e) if s > 0 else (e - c["low"])) / risk)
+        dc = RBX_TIGHT_DC if RBX_TIGHT_R and best >= RBX_TIGHT_R else RBX_DC   # v0.99.647
+        lv = min(x["low"] for x in cs[k - dc:k]) if s > 0 else max(x["high"] for x in cs[k - dc:k])
         if t.get("half") and half_at is None and ((c["high"] >= e + s * RBX_HALF_R * risk) if s > 0 else (c["low"] <= e + s * RBX_HALF_R * risk)):
             half_at = 0.5 * (RBX_HALF_R * risk - e * RBX_FEE / 2) / risk
             continue   # the rest from the next bar on (as the research)
@@ -32085,7 +32091,7 @@ def rbx_stats():
     fin = [t for t in trades if t["status"] == "CLOSED" and t.get("r") is not None]
     rs = [t["r"] for t in fin]
     return {"on": RBX_ENABLED, "auto": AUTOTRADE_ENABLED_RBX, "tg": TELEGRAM_ALERTS_RBX, "half": RBX_HALF, "risk": MODULE_RISK_PCT.get("rbx") or RBX_RISK_DEFAULT,
-            "research": RBX_RESEARCH, "months": RBX_RESEARCH_MONTHS, "charts": RBX_CHARTS, "stop_atr": RBX_STOP_ATR, "dc": RBX_DC, "half_r": RBX_HALF_R,
+            "research": RBX_RESEARCH, "months": RBX_RESEARCH_MONTHS, "charts": RBX_CHARTS, "stop_atr": RBX_STOP_ATR, "dc": RBX_DC, "half_r": RBX_HALF_R, "tight_r": RBX_TIGHT_R, "tight_dc": RBX_TIGHT_DC,
             "err": err, "scan": scan, "watch": watch, "open": [t for t in trades if t["status"] == "OPEN"][-24:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 2) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None,
@@ -39310,7 +39316,7 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
             wk: all.length ? all.reduce((a, x) => a + x.wk, 0) / all.length : null, dd: Math.max(0, ...all.map(x => x.dd || 0)),
             days: n ? all.reduce((a, x) => a + (x.days || 0) * x.n, 0) / n : null, streak: (R[key] || {}).max_losing_streak}; };
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
-  let top = `<div class="dim hintx">Монета идёт в узком коридоре (день — ${(ch['1d'] || {}).n || 20} свечей, 12ч — ${(ch['12h'] || {}).n || 30}), потом свеча закрывается за ним — в сторону её собственного тренда (EMA200). Вход сразу после закрытия, стоп ${d.stop_atr || 1.5} ATR. ${d.half ? `<b>Режим «половина на +${d.half_r}R»</b>: на +${d.half_r}R половина закрывается, стоп переносится в безубыток, остаток идёт по тренду.` : 'Тейка нет: сделка держится, пока тренд жив.'} Выход — свеча закрылась за ${d.dc || 20}-свечным минимумом (для шорта — максимумом).</div>
+  let top = `<div class="dim hintx">Монета идёт в узком коридоре (день — ${(ch['1d'] || {}).n || 20} свечей, 12ч — ${(ch['12h'] || {}).n || 30}), потом свеча закрывается за ним — в сторону её собственного тренда (EMA200). Вход сразу после закрытия, стоп ${d.stop_atr || 1.5} ATR. ${d.half ? `<b>Режим «половина на +${d.half_r}R»</b>: на +${d.half_r}R половина закрывается, стоп переносится в безубыток, остаток идёт по тренду.` : 'Тейка нет: сделка держится, пока тренд жив.'} Выход — свеча закрылась за ${d.dc || 20}-свечным минимумом (для шорта — максимумом)${d.tight_r ? `; после +${d.tight_r}R — за ${d.tight_dc}-свечным, чтобы сохранить большую часть прибыли` : ''}.</div>
     <div class="zsub">Проверка на истории 127 монет Binance, 2021–2026; правило выбрано по 2021–23, 2024 и 2025–26 — проверка. Результат на сделку в текущем режиме:</div>`;
   for (const [tf, hk] of [['1d', 24], ['12h', 12]]) {
     const s = sum(`${hk}_${mode}`), o = sum(`${hk}_${d.half ? 'dc20' : 'half2dc20'}`);
