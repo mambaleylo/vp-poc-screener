@@ -42,7 +42,7 @@ def stat(f, BB=B, nz=NM):
     fa = np.array([f[m] for m in MODS]); rr = [sim(b, R, M, fa, nz) for b in BB]
     xs = np.array([a[0] for a in rr]); ds = np.array([a[1] for a in rr])
     return float(np.median(xs)), float(np.median(ds)), float(np.quantile(ds, .9))
-G = {"prv": (0.03, 0.04, 0.06), "emx": (0.01, 0.02, 0.03), "rbx": (0.005, 0.01, 0.015), "cas": (0.0, 0.01, 0.015, 0.02)}
+G = {"prv": (0.03, 0.04, 0.06), "emx": (0.02, 0.03, 0.04), "rbx": (0.005, 0.01, 0.015), "cas": (0.0, 0.01, 0.015, 0.02)}
 res = []
 for combo in itertools.product(*[G[m] for m in MODS]):
     f = dict(zip(MODS, combo)); x, d50, d90 = stat(f); res.append((combo, x, d50, d90))
