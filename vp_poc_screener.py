@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.676"
+APP_VERSION = "0.99.677"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23646,6 +23646,44 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                     lit += 1
         return n_ > 0 and lit / n_ >= 0.015   # labels ~4-6 %, plain zones 0 %
 
+    def _arrow_near(r):
+        """v0.99.677 — the price-range tool draws a thin arrow of the label's colour from
+        the label towards the measured move; a zone never has one. Found without OCR (NOT:
+        the phone's tesseract did not read the label, the post was taken for a setup)"""
+        if r["kind"] == 1:
+            col = lambda q: q[1] - q[0] >= 30 and q[1] - q[2] >= 20 and q[1] >= 140
+        else:
+            col = lambda q: q[0] - q[1] >= 50 and q[0] - q[2] >= 35 and q[0] >= 170
+        h_ = r["y1"] - r["y0"]
+        if r["x0"] <= 2 or r["y0"] <= 2 or r["y1"] >= H - 3:
+            return False   # a coloured page edge (a Telegram background), not a label on a chart
+        need = max(1.5 * h_, 0.025 * H)
+        gap0 = max(6, int(0.03 * H))
+        for x in range(r["x0"] + 2, r["x1"] - 1):
+            for d, y_e in ((1, r["y1"]), (-1, r["y0"] - 1)):
+                y, run, miss, started = y_e, 0, 0, False
+                lim = int(0.3 * H)
+                while 0 <= y < H and abs(y - y_e) < lim:
+                    if col(px[x, y]):
+                        started, run, miss = True, run + (miss if started else 0) + 1, 0
+                    elif started:
+                        miss += 1
+                        if miss > 2:
+                            if run < 4 and abs(y - y_e) <= gap0:
+                                started, run, miss = False, 0, 0   # the label's own edge row (SEI)
+                            else:
+                                break
+                    elif abs(y - y_e) > gap0:
+                        break
+                    y += d
+                if run >= need:
+                    ym = y_e + d * (abs(y - y_e) // 2)
+                    wd = sum(1 for xx in range(max(0, x - 30), min(plot_x1, x + 31)) if col(px[xx, ym]))
+                    # a thin shaft, or the tool's narrow shaded column (SEI) — far narrower than the label
+                    if wd <= max(6, 0.012 * W) or (wd <= 0.35 * (r["x1"] - r["x0"]) and run >= 3 * h_):
+                        return True
+        return False
+
     for r in merged + label_rects:
         w_, h_ = r["x1"] - r["x0"], r["y1"] - r["y0"]
         small_sz = w_ < 0.22 * plot_x1 and h_ < 0.06 * H
@@ -23676,6 +23714,9 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                     result_label = txt.strip()
                     small = True
                     break
+            if result_label is None and _arrow_near(r):
+                result_label = "ярлык со стрелкой"
+                small = True
         if small or w_ < 0.06 * plot_x1 or r.get("label_only"):
             continue   # a label / a marker, not a zone
         keep.append(r)

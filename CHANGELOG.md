@@ -20230,3 +20230,12 @@ v0.99.676 - The user: "может реализовать принудитель�
          (Gate's or Binance's 1h candle) is kept virtual only — the research filled it at the limit, a late market entry
          would be worse; one whose limit is still ahead is watched as usual. A late Cascade signal (a market entry at the
          hour's open) is virtual only. t_late_scan.py.
+v0.99.677 - Зоны: the NOT result post (red price-range label "0,0000207 (5,65%) 207" with an arrow) was
+         taken for a setup again ("Снова не распознала, что это просто отчет"). The label was found only by
+         reading its text, and the phone's tesseract / a smaller copy of the picture may not read it. Now the
+         price-range tool is also recognised without OCR: a small filled label with a thin arrow of the same
+         colour coming out of it (a zone never has one) -> "пост-отчёт (ярлык со стрелкой)". Checked on the
+         NOT, SEI and two earlier result screenshots at full and half size (JPEG q40) with the label OCR off; the
+         other chart screenshots recognise as before (45 landscape + 143 phone screenshots compared old vs new;
+         two phone screenshots of other apps with coloured price tags now read as a result post instead of junk
+         zones). tools/zones_model/t_result_arrow.py.
