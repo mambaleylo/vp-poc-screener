@@ -20209,3 +20209,12 @@ v0.99.673 - The user's screenshot: MSTR / CRCL (stock perps) near the P/R thresh
          strong zones the research's 127, the breakout its 127 (v0.99.672). The tabs say so. t_universe.py: stock
          perps and untested coins are never scanned. (The "проверено 120" on the P/R tab was the last hourly scan
          before the update; the next one scans the new list.)
+v0.99.674 - The user: "везде все проверь по всем индикаторам, чтобы все было обновлено". Audit: the code's model versions
+         = the model files (EMA 10, P/R 8, strong zones 4, Neuro 5, Cascade 2); every test passes (EMA settle 150/150 and
+         levels + the crowd filter, breakout 198/200 — two open at the data's end, P/R 348/348, Cascade 150/150, Neuro
+         146/146, strong zones 46/46, the Binance trigger 5/5, the coin lists, the long/short feed 300/300, the Gate
+         no-fill note); every tab renders without errors. Fixed: the breakout's "what to expect by month" was from an
+         older rule (now the deployed day trades); the strong-zone message said "if both fill" with one limit; the limit
+         entries (EMA, P/R, Neuro, breakout) now say the touch is also caught on Binance's 1-min candles and the trade is
+         opened at Gate's market; the breakout tab says to expect less live than the backtest (tools/adaptation
+         audit_all.sh / t_alltabs.py).
