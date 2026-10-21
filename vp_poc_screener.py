@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.670"
+APP_VERSION = "0.99.671"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30175,7 +30175,7 @@ def zm_stats():
 # the price is watched every 30 s; the virtual record follows the 1h candles exactly as the research did.
 EMX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_ema_model.json")
 EMX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_ema_model.json"
-EMX_MODEL_VER = 9   # v0.99.667 — 9: + the crowd filter (ls_min_d24); v0.99.665 — 8: no 4h touches; v0.99.664 — 7: the entry limit 0.2 daily ATR past the EMA; v0.99.661 — 6: a third off at +1R (the stop to the fill), take 4R; v0.99.645 — 5: + the BTC EMA50 filter (the research stats and the backtest list with it); v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
+EMX_MODEL_VER = 10   # v0.99.671 — 10: the top 4% (thr at q 0.96), +31% trades; v0.99.667 — 9: + the crowd filter (ls_min_d24); v0.99.665 — 8: no 4h touches; v0.99.664 — 7: the entry limit 0.2 daily ATR past the EMA; v0.99.661 — 6: a third off at +1R (the stop to the fill), take 4R; v0.99.645 — 5: + the BTC EMA50 filter (the research stats and the backtest list with it); v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
 # v0.99.644 — 4: the same model, a new trading rule from the hypothesis study (tools/ema_model/ema_hyp*.py), better than
 # the old one on the bot's top 3% and on the top 10% check set at an equal drawdown: longs only (on shorts the score does
 # not rank: ~0R at every score), no entry when the price is >= 10 daily ATR above the daily EMA200 (those lost on both

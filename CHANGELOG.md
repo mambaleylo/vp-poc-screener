@@ -20189,3 +20189,10 @@ v0.99.670 - P/R: more trades (the user: "как в p/r увеличить кол
          (was 120) and keeps at most 20 open per side (was 12): 1.8 trades a week instead of 1.2, the years +0.43 /
          +0.36 / +0.51 / +0.23R vs +0.39 / +0.36 / +0.57 / +0.24R, x7400 vs x1800. Model ver 8, the backtest list (358
          trades, 211 coins) and the stats redone; the tab shows the real coin counts.
+v0.99.671 - More trades for the other modules (the user: "а если по другим индикаторам попробовать увеличить
+         количество?"), tools/ema_model/more_trades.py. 📐 EMA: the top 4% of the scores instead of 3% — 306 trades
+         2022-26 instead of 234 (+31%), +0.88R a trade (WR 79%, the longest losing run 7) vs +1.00R, the growth at an
+         equal drawdown the same (x396k vs x283k); the model's own threshold at q 0.96 = 0.314072 (ema_thr.py runs its
+         trees over the last year's touches; q 0.97 gives back the old 0.355311). Model ver 10. Not kept: EMA top 5–6%
+         (the R a trade falls faster), EMA 20 open at once (x5k–60k: crash-day clusters), 🌊 cascade top 1% (R halved) or
+         10 open (within the noise), 📈 breakout 8 / 10 open or breakouts >= 0.5 ATR (worse on both sets).
