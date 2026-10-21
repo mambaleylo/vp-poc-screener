@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.674"
+APP_VERSION = "0.99.675"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30737,6 +30737,10 @@ def emx_part_tick():
 def emx_loop():
     time.sleep(90)
     emx_load()
+    try:   # v0.99.675 — the model at the start (the tab shows it at once; the first scan is only at the next hour)
+        emx_model()
+    except Exception as e:
+        log_error(f"emx_loop model: {e}")
     last_hour = None
     while True:
         heartbeat("emx_loop")
@@ -31502,6 +31506,10 @@ def nx_watch_tick():
 def nx_loop():
     time.sleep(120)
     nx_load()
+    try:   # v0.99.675 — the model at the start (the tab shows it at once; the first scan is only at the next hour)
+        nx_model()
+    except Exception as e:
+        log_error(f"nx_loop model: {e}")
     last_hour = (_NX.get("scan") or {}).get("hour")
     while True:
         heartbeat("nx_loop")
@@ -32347,6 +32355,10 @@ def prx_watch_tick():
 def prx_loop():
     time.sleep(150)
     prx_load()
+    try:   # v0.99.675 — the model at the start (the tab shows it at once; the first scan is only at the next hour)
+        prx_model()
+    except Exception as e:
+        log_error(f"prx_loop model: {e}")
     last_hour = (_PRX.get("scan") or {}).get("hour")
     while True:
         heartbeat("prx_loop")
@@ -32731,6 +32743,10 @@ def cas_part_tick():
 def cas_loop():
     time.sleep(170)
     cas_load()
+    try:   # v0.99.675 — the model at the start (the tab shows it at once; the first scan is only at the next hour)
+        cas_model()
+    except Exception as e:
+        log_error(f"cas_loop model: {e}")
     last_hour = (_CAS.get("scan") or {}).get("hour")
     while True:
         heartbeat("cas_loop")
@@ -38414,7 +38430,7 @@ async function refreshNeuro() {   // v0.99.619 — Neuro v3: the model, the year
       <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.pct}%</span></span>`;
   h += card('🔎 Последний час', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, 'монет')}${tile('сигналов', sc.signals, '')}${tile('открыто', sc.opened, '')}</div>
     ${near.length ? `<div class="zsub" style="margin-top:8px;">ближе всех к порогу (100% — сигнал):</div><div>${near.map(chip).join('')}</div>` : ''}
-    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · следующий пересчёт в начале часа</div>`
+    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 3700 ? '⏳ это скан до перезапуска бота (после старта бот ждёт начала часа — вход позже 20 минут уже опоздал); новый — в начале следующего часа' : 'следующий пересчёт в начале часа'}</div>`
     : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
   // 3. the trades
   const op = d.open || [];
@@ -40679,7 +40695,7 @@ async function refreshCas() {   // v0.99.653 — 🌊 EMA cascade: the model on 
       <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.pct}%</span></span>`;
   h += card('🔎 Последний час', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, `монет · пробоев каскада ${sc.events}`)}${tile('сигналов', sc.signals, '')}${tile('открыто', sc.opened, '')}</div>
     ${near.length ? `<div class="zsub" style="margin-top:8px;">ближе всех к порогу (100% — сигнал):</div><div>${near.map(chip).join('')}</div>` : ''}
-    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · следующий пересчёт в начале часа</div>`
+    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 3700 ? '⏳ это скан до перезапуска бота (после старта бот ждёт начала часа — вход позже 20 минут уже опоздал); новый — в начале следующего часа' : 'следующий пересчёт в начале часа'}</div>`
     : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
   const op = d.open || [];
   const row = (t, i) => `<div onclick="btLiveOpen('cas', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
@@ -40730,7 +40746,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
       <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.tf}ч · ${a.pct}%</span></span>`;
   h += card('🔎 Последний час', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, `монет · выходов за полосу ${sc.events}`)}${tile('сигналов', sc.signals, sc.btc_skip ? `ещё ${sc.btc_skip} против BTC — пропущены` : '')}${tile('открыто', sc.opened, '')}</div>
     ${near.length ? `<div class="zsub" style="margin-top:8px;">ближе всех к порогу (100% — сигнал):</div><div>${near.map(chip).join('')}</div>` : ''}
-    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · следующий пересчёт в начале часа</div>`
+    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 3700 ? '⏳ это скан до перезапуска бота (после старта бот ждёт начала часа — вход позже 20 минут уже опоздал); новый — в начале следующего часа' : 'следующий пересчёт в начале часа'}</div>`
     : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
   // 3. the trades
   const op = d.open || [];

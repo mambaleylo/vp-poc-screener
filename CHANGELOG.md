@@ -20218,3 +20218,9 @@ v0.99.674 - The user: "везде все проверь по всем индик
          entries (EMA, P/R, Neuro, breakout) now say the touch is also caught on Binance's 1-min candles and the trade is
          opened at Gate's market; the breakout tab says to expect less live than the backtest (tools/adaptation
          audit_all.sh / t_alltabs.py).
+v0.99.675 - The user: "почему 120 только проверено?" — the P/R tab showed the last scan of the old version (14:14): after a
+         restart a module scans only at the next hour's start (an entry later than 20 min into the hour is late), and the
+         model was loaded only by that first scan ("Модель загружается…"). Now P/R, Neuro, Cascade and EMA load their
+         model as their loop starts, and a scan older than an hour is labelled "это скан до перезапуска бота … новый —
+         в начале следующего часа" (P/R, Neuro, Cascade). The next scan uses the new coin lists (P/R: the 211 tested
+         coins, no stock perps).
