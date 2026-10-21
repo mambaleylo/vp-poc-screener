@@ -1,6 +1,6 @@
-"""v0.99.664: the bot's armed EMA levels carry the entry 0.2 daily ATR past the EMA, the stop / take from it"""
+"""v0.99.664 / 665: the bot's armed EMA levels (no 4h) carry the entry 0.2 daily ATR past the EMA, the stop / take from it"""
 from common import V as vp, load
-m = vp.emx_model(); assert m and m["rule"]["deep_datr"] == 0.2, m and m.get("rule")
+m = vp.emx_model(); assert m and m["rule"]["deep_datr"] == 0.2 and m["tfs"] == ["1d", "1w", "1M"], m and m.get("rule")
 vp.emx_pass = lambda *a, **k: True
 agg = lambda h, n: vp._oc_agg(h, n)
 B = load("BTCUSDT"); n = 0
@@ -14,5 +14,5 @@ for sym in ("ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT"):
             assert abs(a["lv"] - a["ema"] * (1 - s * 0.2 * d / 100)) < 1e-9 * a["ema"], a
             assert abs((a["lv"] - a["sl"]) * s - a["lv"] * 0.75 * d / 100) < 1e-9 * a["lv"], a
             assert abs((a["tp"] - a["lv"]) * s - 4 * (a["lv"] - a["sl"]) * s) < 1e-9 * a["lv"], a
-            n += 1
+            assert a["tf"] != "4h", a; n += 1
 print("levels ok", n)

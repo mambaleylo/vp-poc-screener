@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.664"
+APP_VERSION = "0.99.665"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30172,7 +30172,7 @@ def zm_stats():
 # the price is watched every 30 s; the virtual record follows the 1h candles exactly as the research did.
 EMX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_ema_model.json")
 EMX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_ema_model.json"
-EMX_MODEL_VER = 7   # v0.99.664 — 7: the entry limit 0.2 daily ATR past the EMA; v0.99.661 — 6: a third off at +1R (the stop to the fill), take 4R; v0.99.645 — 5: + the BTC EMA50 filter (the research stats and the backtest list with it); v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
+EMX_MODEL_VER = 8   # v0.99.665 — 8: no 4h touches; v0.99.664 — 7: the entry limit 0.2 daily ATR past the EMA; v0.99.661 — 6: a third off at +1R (the stop to the fill), take 4R; v0.99.645 — 5: + the BTC EMA50 filter (the research stats and the backtest list with it); v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
 # v0.99.644 — 4: the same model, a new trading rule from the hypothesis study (tools/ema_model/ema_hyp*.py), better than
 # the old one on the bot's top 3% and on the top 10% check set at an equal drawdown: longs only (on shorts the score does
 # not rank: ~0R at every score), no entry when the price is >= 10 daily ATR above the daily EMA200 (those lost on both
@@ -30191,6 +30191,8 @@ def emx_pass(m, tf, side, sc, f):
     if sc < m["thr"] + float((m.get("tf_margin") or EMX_TF_MARGIN).get(tf, 0.0)):
         return False
     if side not in tuple(m.get("sides") or EMX_SIDES):
+        return False
+    if tf not in tuple(m.get("tfs") or EMX_TFS):   # v0.99.665 — the charts the rule trades (4h off with the deep entry)
         return False
     if float(f.get("s_d_ema200", 0.0)) >= float(m.get("max_d_ema200") or EMX_MAX_D_EMA200):
         return False
@@ -30462,7 +30464,7 @@ def emx_levels(sym, h1, h4, d1, t_hour, m, bt):
     if datr < 0.1:
         return []
     out = []
-    for tf in EMX_TFS:
+    for tf in tuple(m.get("tfs") or EMX_TFS):   # v0.99.665 — only the traded charts
         T = S[tf]
         if tf in ("4h", "1d"):
             b = len(T["bars"])
@@ -40105,7 +40107,7 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
   let h = '';
   // 1. what it is and how it did on the years it never saw
-  let top = `<div class="dim hintx">Касания EMA 20–200 на 4ч, дне, неделе и месяце у 120 ликвидных монет. Модель, обученная на 6 годах истории 127 монет (1.16 млн касаний), берёт ~${m && m.q ? Math.round((1 - m.q) * 100) : 3}% лучших.</div>`;
+  let top = `<div class="dim hintx">Касания EMA ${m && m.tfs ? m.tfs.map(x => ({'4h': '4ч', '1d': 'дня', '1w': 'недели', '1M': 'месяца'})[x] || x).join(', ') : '4ч, дня, недели и месяца'} у 120 ликвидных монет. Модель, обученная на 6 годах истории 127 монет (1.16 млн касаний), берёт ~${m && m.q ? Math.round((1 - m.q) * 100) : 3}% лучших.</div>`;
   if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
   else {
     const ys = rs.years || {};
@@ -40116,7 +40118,7 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>сделка до <b>${Math.round((rule.hold_h || 24))} ч</b></span><span>просадка до <b>${dd}R</b></span></div>
       <div class="zsub">Вход — ${rule.deep_datr ? `лимиткой на <b>${rule.deep_datr} дневного хода за EMA</b> (не дошла за час касания — сделки нет)` : 'на EMA'}, стоп — <b>${rule.stop_datr} дневного хода</b> монеты за входом${rule.part_r ? `, на <b>+${rule.part_r}R закрыть ${Math.round(rule.part_f * 100)}%</b> и стоп в безубыток` : ''}, тейк — <b>${rule.take_r} риска</b>. Не больше ${m.side_cap || 12} сделок в одну сторону.
-        ${m.sides ? `${m.sides.length === 1 && m.sides[0] === 1 ? 'Только лонги (на шортах модель не различает хорошие касания от плохих). ' : ''}Не входит, если цена уже дальше ${m.max_d_ema200} дневных ATR над EMA200 дня; касания на 4ч — только самые уверенные.${m.btc_ema50 ? ' Лонги — только пока BTC выше своей дневной EMA50.' : ''}` : ''}</div>
+        ${m.sides ? `${m.sides.length === 1 && m.sides[0] === 1 ? 'Только лонги (на шортах модель не различает хорошие касания от плохих). ' : ''}Не входит, если цена уже дальше ${m.max_d_ema200} дневных ATR над EMA200 дня${m.tfs && !m.tfs.includes('4h') ? '; касания на 4ч не берёт (с входом за EMA они слабее)' : '; касания на 4ч — только самые уверенные'}.${m.btc_ema50 ? ' Лонги — только пока BTC выше своей дневной EMA50.' : ''}` : ''}</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «EMA» в настройках риска (пусто = ${d.risk}%). Сделок много одновременно: просадка на истории до ${dd}R — держите риск маленьким.</div>`}`;
     const sl = d.sel || {}, cr = sl.rule || {}, rsl = sl.research || {};
     if (sl.of) top += `<div class="zsub">🧮 <b>Авто-отбор монет:</b> торгуются <b>${sl.coins} из ${sl.of}</b> — у которых сделки модели были в среднем ≥ ${cr.min_avg != null ? '+' + cr.min_avg : '+0.1'}R (от ${cr.min_n || 10} сделок, история + живые). Остальные — только виртуально, без сигналов и сделок; монета войдёт в список, когда наберёт результат.${rsl.sel ? ` На истории 2025–26: <b>${sgR(rsl.sel.avg)}</b> на сделку, просадка ${rsl.sel.dd}R (без отбора ${sgR(rsl.all.avg)}, просадка ${rsl.all.dd}R).` : ''}</div>`;

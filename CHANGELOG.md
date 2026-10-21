@@ -20142,3 +20142,10 @@ v0.99.664 - Night round 2, part 2. 📐 EMA: the entry by a limit 0.2 daily ATR 
          both sets): P/R take / stops / hold / locks / early exits; Neuro stop / take / hold / break-even / cap / ADX and
          BTC, trend, volume, funding, RSI filters; Breakout limit depth / wait, strength, partial, channel, stop, cap and
          ten entry filters; Cascade swing length / buffer, stop width, hold, take, trailing, a pause after a loss.
+v0.99.665 - Round 4 (the user: "пробуй всё"). 📐 EMA: no 4h touches any more (1d / 1w / 1M only) — with the entry
+         past the EMA the 4h touches are the weak part: on the bot's set +0.86R a trade vs +0.74R, WR 77%, and over 4
+         bootstrap seeds x27k–59k vs x5k–11k at an equal drawdown; the check set +0.45R vs +0.42R, x270–600 vs
+         x150–230. ~1.3 trades a week. Model ver 8 ("tfs"), the backtest list redone (314 trades). Checked and not kept:
+         the EMA model retrained on the new entry's label (more trades, but 2022 and the check set's average worse),
+         a LightGBM model picking 📈 breakouts (the check set better on 3 seeds, the bot's set not), keeping the EMA
+         limit beyond the touch hour, a ladder entry, adding to winning breakouts.
