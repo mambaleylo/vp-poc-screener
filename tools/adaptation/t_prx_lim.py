@@ -10,7 +10,7 @@ vp.get_candles_range = rng_
 for f in ("send_telegram", "prx_save", "notify_trade_result"): setattr(vp, f, lambda *a, **k: None)
 vp.AUTOTRADE_ENABLED_PRV = False
 KR = {"hard": "HARD_STOP", "stop": "STOP_CLOSE", "take": "WIN", "time": "TIME_EXIT"}
-bt = [x for x in json.load(open("prv_bt_v662.json")) if not x["s"].startswith("1000") and load(x["s"].replace("_", ""))]
+bt = [x for x in json.load(open("prv_bt_v670.json")) if not x["s"].startswith("1000") and load(x["s"].replace("_", ""))]
 ok = bad = 0
 for x in bt:
     s = x["d"]; a = s * (x["e"] - x["hs"]) / 6.0

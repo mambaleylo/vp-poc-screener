@@ -20181,3 +20181,11 @@ v0.99.669 - The user: "исполнять по рынку такие сделк�
          the market at the touch minute's close +0.66R (WR 82%), 1 min later +0.49R, 2–5 min later +0.44…+0.50R
          (the check set +0.56R / +0.43R / +0.32R / +0.21…+0.28R) — fewer R than the limit but no missed trades when
          Gate's wick is shorter. Without an answer from Binance only Gate's price counts. t_bn_trigger.py: 5/5.
+v0.99.670 - P/R: more trades (the user: "как в p/r увеличить количество сделок... если статистика не сильно садится").
+         Checked (tools/adaptation prmore.py, 2023-26): lower score thresholds kill the edge (top 1.5%: x18 instead of
+         x1800 at an equal drawdown, top 2%: x4); the 4h events add nothing at the bot's threshold; 84 more Binance coins
+         (>= 150M $ a month, history from 2025-06 or earlier; scored by the same quarterly models, never trained on
+         them) trade as well as the 127 (+0.40 / +0.36 / +0.42 / +0.21R by year). Deployed: the bot scans 200 Gate coins
+         (was 120) and keeps at most 20 open per side (was 12): 1.8 trades a week instead of 1.2, the years +0.43 /
+         +0.36 / +0.51 / +0.23R vs +0.39 / +0.36 / +0.57 / +0.24R, x7400 vs x1800. Model ver 8, the backtest list (358
+         trades, 211 coins) and the stats redone; the tab shows the real coin counts.

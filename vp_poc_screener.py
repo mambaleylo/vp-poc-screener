@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.669"
+APP_VERSION = "0.99.670"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31566,14 +31566,14 @@ PRX_BTC_FILTER_1H = 1.0
 # higher the score, the worse the trade (the bot's 4h trades -0.16R, WR 37%, half of them stops), on 1h it rises with the
 # score. The model's "tfs" overrides it.
 PRX_TFS = (1,)
-PRX_MODEL_VER = 7   # v0.99.662 — 7: the entry by a limit 0.3 ATR better than the next open, 3 bars (x2065 vs x646 at an equal drawdown, the check set +0.049R vs +0.040R); v0.99.636 — 2: trained on the last 24 months only, retrained every quarter (the adaptation study)
+PRX_MODEL_VER = 8   # v0.99.670 — 8: 211 coins, at most 20 open per side (1.8 trades a week instead of 1.2, the same R a trade); v0.99.662 — 7: the entry by a limit 0.3 ATR better than the next open, 3 bars (x2065 vs x646 at an equal drawdown, the check set +0.049R vs +0.040R); v0.99.636 — 2: trained on the last 24 months only, retrained every quarter (the adaptation study)
 # v0.99.641 — 4: the stop by the bar's close (3 ATR) + a hard stop 6 ATR on the exchange, R per the hard stop; the BTC filter
 # v0.99.642 — 5: the same + the 1-hour BTC filter (the research stats and the backtest list recomputed with it)
 # v0.99.643 — 6: the 1h chart only
 # v0.99.639 — 3: the same model, traded with a stop of 3.0 ATR and the take where it was (4.5 ATR = 1.5R): WR 66% instead of
 # 48% and a drawdown of 15R instead of 24R for about a third less profit (the user: "3.0 лучше"); "label_rule" = what it learns
 PRX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_prx_state.json")
-PRX_TOP = int(os.environ.get("VP_PRX_TOP", "120"))
+PRX_TOP = int(os.environ.get("VP_PRX_TOP", "200"))   # v0.99.670 — 200 (was 120): 84 more Binance coins trade as well as the 127
 PRX_RISK_DEFAULT = 0.5
 PRX_FEE, PRX_FUND = 0.001, 0.0003
 PRX_BAND_NAMES = ["tf", "side", "depth", "cdepth", "pdepth", "outside_n", "reent", "close_out", "slope", "squeeze", "atrp", "body", "wick"]
@@ -32370,7 +32370,7 @@ def prx_stats():
     rs = [t["r"] for t in fin]
     t0 = min((t["hour"] for t in trades), default=None)
     weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
-    return {"on": PRV_ENABLED, "auto": AUTOTRADE_ENABLED_PRV, "tg": TELEGRAM_ALERTS_PRV,
+    return {"on": PRV_ENABLED, "auto": AUTOTRADE_ENABLED_PRV, "tg": TELEGRAM_ALERTS_PRV, "top": PRX_TOP,
             "risk": MODULE_RISK_PCT.get("prv") or PRX_RISK_DEFAULT,
             "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "label_rule", "research", "side_cap", "train")} | {"btc_filter": m.get("btc_filter") or PRX_BTC_FILTER, "btc_filter_1h": m.get("btc_filter_1h") or PRX_BTC_FILTER_1H,
                                                          "tfs": m.get("tfs") or list(PRX_TFS)} if m else None,
@@ -40675,7 +40675,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
   let h = '';
   // 1. what it is and how it did on the years it never saw
-  let top = `<div class="dim hintx">Канал Кельтнера (EMA20 ± ATR) на ${(m && m.tfs && !m.tfs.includes(4)) ? '1ч' : '1ч и 4ч'} у 120 ликвидных монет. Сам выход за полосу на истории убыточен (проверено 4 608 вариантов правила, фильтры и подбор под монету — всё в минусе), поэтому сигнал даёт модель: она смотрит, как цена вышла за полосу, и ещё 89 параметров рынка, и берёт только лучший ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 1}% выходов.</div>`;
+  let top = `<div class="dim hintx">Канал Кельтнера (EMA20 ± ATR) на ${(m && m.tfs && !m.tfs.includes(4)) ? '1ч' : '1ч и 4ч'} у ${d.top || 120} ликвидных монет. Сам выход за полосу на истории убыточен (проверено 4 608 вариантов правила, фильтры и подбор под монету — всё в минусе), поэтому сигнал даёт модель: она смотрит, как цена вышла за полосу, и ещё 89 параметров рынка, и берёт только лучший ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 1}% выходов.</div>`;
   if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
   else {
     const ys = rs.years || {};
@@ -40683,7 +40683,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
     const n = all.reduce((a, x) => a + x.n, 0), avg = n ? all.reduce((a, x) => a + x.avg * x.n, 0) / n : null;
     const wk = all.length ? all.reduce((a, x) => a + x.wk, 0) / all.length : null, dd = Math.max(0, ...all.map(x => x.dd || 0));
     const tr_ = m.train ? `<div class="dim" style="font-size:var(--fs-xs);">🔄 модель учится на последних ${m.train.window_months} мес${m.train.auto ? ` и переобучается раз в ${m.train.retrain_months} мес` : ''} · обучена до ${new Date(m.trained_to * 1000).toLocaleDateString('ru-RU')}</div>` : '';
-    top += tr_ + `<div class="zsub">Проверка на истории 127 монет — каждый год модель не видела${rs.scheme ? ' (' + rs.scheme + ')' : ''}. Результат на сделку:</div>
+    top += tr_ + `<div class="zsub">Проверка на истории ${rs.coins || 127} монет Binance — каждый год модель не видела${rs.scheme ? ' (' + rs.scheme + ')' : ''}. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>до <b>${rule.hold_bars || 48}</b> свечей</span><span>просадка до <b>${dd}R</b></span></div>
       <div class="zsub">Вход — ${rule.entry_lim_atr ? `<b>лимиткой на ${rule.entry_lim_atr} ATR лучше цены</b> после закрытия свечи (ждёт до ${rule.entry_wait} ч; не дошла — сделки нет)` : 'по рынку после закрытия свечи'}, ${rule.stop_close ? `стоп — <b>${rule.stop_atr} ATR по закрытию свечи</b> (тень за стопом сделку не закрывает; на бирже стоит аварийный стоп ${rule.hard_atr} ATR — от него считается риск и R), тейк — <b>${(rule.take_r * rule.stop_atr).toFixed(1)} ATR</b>` : `стоп — <b>${rule.stop_atr} ATR</b> её графика, тейк — <b>${rule.take_r} риска</b>`}, через ${rule.hold_bars} свечей выход (${(m.tfs && !m.tfs.includes(4)) ? '2 дня; 4ч график убран — на нём модель ошибалась' : '1ч — 2 дня, 4ч — 8 дней'}). Не больше ${m.side_cap || 12} сделок в одну сторону.
