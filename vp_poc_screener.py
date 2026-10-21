@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.667"
+APP_VERSION = "0.99.668"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -40434,10 +40434,22 @@ async function btChart(o) {
   document.getElementById('vgiModalParams').innerHTML = `${fmtDateTime(o.t)} · вход ${fmtNum(o.e)} · SL ${fmtNum(o.sl)}${o.tp != null ? ' · TP ' + fmtNum(o.tp) : ''}${res}` +
     (o.live ? '' : (d.src === 'binance' ? `<br><span style="font-size:var(--fs-xs);">📒 свечи Binance — часовых за эту дату у Gate уже нет (хранит ~13 мес); сделка и посчитана на Binance</span>`
       : `<br><span style="font-size:var(--fs-xs);">свечи Gate; сделка посчитана на свечах Binance — цены могут чуть отличаться</span>`)) +
-    (coarse ? `<br><span style="font-size:var(--fs-xs);">⚠️ свечи ${BT_CH[o.c] || o.c}: часовых свечей за эту дату у Gate уже нет (хранит ~13 мес), Binance не ответил</span>` : '');
+    (coarse ? `<br><span style="font-size:var(--fs-xs);">⚠️ свечи ${BT_CH[o.c] || o.c}: часовых свечей за эту дату у Gate уже нет (хранит ~13 мес), Binance не ответил</span>` : '') +
+    btGateFillNote(o, d);
   const draw = () => btDraw(d.bars || [], o);
   window._emwRedraw = draw;
   draw();
+}
+function btGateFillNote(o, d) {   // v0.99.668 — the user's IO: a limit filled by Binance's wick that Gate's candles never reached
+  if (o.live || d.src !== 'gate' || (d.c && d.c !== o.c) || o.e == null || !(d.bars || []).length) return '';
+  const sec = ({'1h': 1, '4h': 4, '12h': 12, '1d': 24}[o.c] || 1) * 3600;
+  const w1 = o.mod === 'emx' ? o.t : (o.mod === 'prv' ? o.t + 2 * 3600 : (o.mod === 'rbx' ? (o.f || o.t) : null));
+  if (w1 == null) return '';
+  const win = d.bars.filter(b => b.time >= o.t && b.time <= w1);
+  if (!win.length) return '';
+  const ext = o.d > 0 ? Math.min(...win.map(b => b.low)) : Math.max(...win.map(b => b.high));
+  if (o.d > 0 ? ext <= o.e : ext >= o.e) return '';
+  return `<br><span class="loss" style="font-size:var(--fs-xs);">⚠️ на Gate цена до входа не дошла (${o.d > 0 ? 'минимум' : 'максимум'} ${fmtNum(ext)}) — вживую лимитка не исполнилась бы, сделки бы не было; на Binance фитиль был ${o.d > 0 ? 'глубже' : 'выше'}</span>`;
 }
 function btDraw(bars, o) {
   let casEma = null;

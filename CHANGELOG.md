@@ -20165,3 +20165,10 @@ v0.99.667 - New data (the user: "новые данные"): Binance's archive of
          the ratio from Binance (5-min history); no answer = no filter. EMA model ver 9, the breakout and EMA
          backtest lists and stats redone. Fixed: the EMA tab did not get the model's chart list (still said 4h).
          Nothing kept for P/R, Cascade, Neuro (OI, ratios and taker flow within the noise).
+v0.99.668 - The user's IO EMA backtest trade "входа не вижу": the backtest is computed on Binance's candles, where the
+         touch hour's wick went to 0.1368 past the entry limit 0.137852, while Gate's candle stopped at ~0.143 — on Gate
+         the limit would not have filled. The backtest chart now says so under the trade ("на Gate цена до входа не
+         дошла — вживую лимитка не исполнилась бы") for the limit entries of EMA (the touch hour), P/R (3 h) and the
+         breakout (up to the fill bar). On Binance ~19% of the EMA trades filled within 0.3% of the limit and they are
+         no better than the rest (+1.07R vs ~+1.0R), so shorter wicks on Gate mean fewer trades, not worse ones; the
+         "🔁 сверить с Gate (12 мес)" check of the backtest list counts the limits Gate would not have filled.
