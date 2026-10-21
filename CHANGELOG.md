@@ -20224,3 +20224,9 @@ v0.99.675 - The user: "почему 120 только проверено?" — th
          model as their loop starts, and a scan older than an hour is labelled "это скан до перезапуска бота … новый —
          в начале следующего часа" (P/R, Neuro, Cascade). The next scan uses the new coin lists (P/R: the 211 tested
          coins, no stock perps).
+v0.99.676 - The user: "может реализовать принудительный запуск, если прошло больше часа?" P/R, Neuro and Cascade no longer
+         skip an hour after a restart: a missed hour is scanned at once (the tab, the near-threshold list and the
+         signals). Late into the hour (> 20 min) a P/R / Neuro signal whose limit the price already reached this hour
+         (Gate's or Binance's 1h candle) is kept virtual only — the research filled it at the limit, a late market entry
+         would be worse; one whose limit is still ahead is watched as usual. A late Cascade signal (a market entry at the
+         hour's open) is virtual only. t_late_scan.py.

@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.675"
+APP_VERSION = "0.99.676"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31314,7 +31314,7 @@ def _nx_open_count():
     return opn
 
 
-def nx_scan_once():
+def nx_scan_once(late=False):
     """at an hour's start: the just-closed bar of every liquid coin scored; above the bar — an entry"""
     m = nx_model()
     if not m:
@@ -31357,7 +31357,7 @@ def nx_scan_once():
             continue
         if sum(1 for t in opn if t["side"] == c["side"]) >= cap:
             continue
-        nx_open(m, c, t_hour, live.get(c["symbol"]))
+        nx_open(m, c, t_hour, live.get(c["symbol"]), late)
         opened += 1
     with _nx_lock:
         _NX["scan"] = {"t": int(now), "hour": t_hour, "coins": coins, "signals": len(cands), "opened": opened}
@@ -31365,7 +31365,7 @@ def nx_scan_once():
     nx_save()
 
 
-def nx_open(m, c, t_hour, live_px=None):
+def nx_open(m, c, t_hour, live_px=None, late=False):
     """a signal: the virtual trade (entry = this hour's open, filled in by the settle) and the real order"""
     rule = m["rule"]
     s, sym = c["side"], c["symbol"]
@@ -31388,6 +31388,8 @@ def nx_open(m, c, t_hour, live_px=None):
             tr["autotrade"] = {"status": (res or {}).get("status"), "detail": str((res or {}).get("detail") or "")[:200]}
         except Exception as e:
             log_error(f"neuro autotrade {sym}: {e}")
+    if late and tr.get("lv") and limit_touched_since(sym, s, tr["lv"], t_hour):   # v0.99.676 — a late scan: the limit is already behind
+        tr.update({"rt": True, "late": True})   # the virtual record only (the research filled it at the limit)
     with _nx_lock:
         if any(t["id"] == tr["id"] for t in _NX["trades"]):
             return
@@ -31519,8 +31521,7 @@ def nx_loop():
                 h = int(now // 3600 * 3600)
                 if h != last_hour and now - h >= 30:   # a new hour: settle the trades, score the closed bar
                     nx_settle(now)
-                    if now - h < 20 * 60:   # entry at the hour's open — too late into the hour, skip it
-                        nx_scan_once()
+                    nx_scan_once(late=now - h >= 20 * 60)   # v0.99.676 — late: real only while the limit is ahead
                     last_hour = h
                 if AUTOTRADE_ENABLED_NEURO:
                     nx_watch_tick()
@@ -32008,6 +32009,15 @@ def limit_touched(symbol, side, lv, gate_px, since):
     return None
 
 
+def limit_touched_since(symbol, side, lv, t0):
+    """v0.99.676 — did the price reach lv anywhere from t0 till now (Gate's 1h candles incl. the forming one, Binance's too):
+    a late scan (after a restart) must not open a real trade whose limit the research would already have filled"""
+    for cs in (get_candles_range(symbol, "1h", t0, int(time.time())) or [], binance_klines(symbol, "1h", t0, int(time.time())) or []):
+        if any(((c["low"] <= lv) if side > 0 else (c["high"] >= lv)) for c in cs if c["time"] >= t0):
+            return True
+    return False
+
+
 _BN_LS = {}
 
 
@@ -32136,7 +32146,7 @@ def prx_coin_events(sym, now, ref, t_hour, tfs=(1, 4)):
     return out
 
 
-def prx_scan_once():
+def prx_scan_once(late=False):
     m = prx_model()
     if not m:
         return
@@ -32178,7 +32188,7 @@ def prx_scan_once():
             opn = [t for t in _PRX["trades"] if t["status"] in ("OPEN", "PENDING")]
         if any(t["symbol"] == c["symbol"] and t["side"] == c["side"] for t in opn) or sum(1 for t in opn if t["side"] == c["side"]) >= cap:
             continue
-        prx_open(m, c, t_hour, live.get(c["symbol"]))
+        prx_open(m, c, t_hour, live.get(c["symbol"]), late)
         opened += 1
     with _prx_lock:
         _PRX["scan"] = {"t": int(now), "hour": t_hour, "coins": coins, "events": events, "signals": len(cands), "opened": opened, "btc_skip": btc_skip}
@@ -32186,7 +32196,7 @@ def prx_scan_once():
     prx_save()
 
 
-def prx_open(m, c, t_hour, live_px=None):
+def prx_open(m, c, t_hour, live_px=None, late=False):
     rule = m["rule"]
     s, sym, hrs = c["side"], c["symbol"], c["tf"]
     direction = "LONG" if s > 0 else "SHORT"
@@ -32214,6 +32224,8 @@ def prx_open(m, c, t_hour, live_px=None):
             tr["autotrade"] = {"status": (res or {}).get("status"), "detail": str((res or {}).get("detail") or "")[:200]}
         except Exception as e:
             log_error(f"p/r autotrade {sym}: {e}")
+    if late and tr.get("lv") and limit_touched_since(sym, s, tr["lv"], t_hour):   # v0.99.676 — a late scan: the limit is already behind
+        tr.update({"rt": True, "late": True})   # the virtual record only (the research filled it at the limit)
     with _prx_lock:
         if any(t["id"] == tr["id"] for t in _PRX["trades"]):
             return
@@ -32368,8 +32380,7 @@ def prx_loop():
                 h = int(now // 3600 * 3600)
                 if h != last_hour and now - h >= 40:
                     prx_settle(now)
-                    if now - h < 20 * 60:
-                        prx_scan_once()
+                    prx_scan_once(late=now - h >= 20 * 60)   # v0.99.676 — late (after a restart): scanned, real only while the limit is ahead
                     last_hour = h
                 if AUTOTRADE_ENABLED_PRV:
                     prx_watch_tick()
@@ -32561,7 +32572,7 @@ def cas_coin_event(sym, now, ref, t_hour):
     return s, f + row, a, stop, h1[-1]["close"]
 
 
-def cas_scan_once():
+def cas_scan_once(late=False):
     m = cas_model()
     if not m:
         return
@@ -32600,7 +32611,7 @@ def cas_scan_once():
             opn = [t for t in _CAS["trades"] if t["status"] == "OPEN"]
         if any(t["symbol"] == c["symbol"] and t["side"] == c["side"] for t in opn) or sum(1 for t in opn if t["side"] == c["side"]) >= cap:
             continue
-        if cas_open(m, c, t_hour, live.get(c["symbol"])):
+        if cas_open(m, c, t_hour, None if late else live.get(c["symbol"])):   # v0.99.676 — late: the virtual record only
             opened += 1
     with _cas_lock:
         _CAS["scan"] = {"t": int(now), "hour": t_hour, "coins": coins, "events": events, "signals": len(cands), "opened": opened}
@@ -32756,8 +32767,7 @@ def cas_loop():
                 h = int(now // 3600 * 3600)
                 if h != last_hour and now - h >= 40:
                     cas_settle(now)
-                    if now - h < 20 * 60:
-                        cas_scan_once()
+                    cas_scan_once(late=now - h >= 20 * 60)   # v0.99.676 — late: the virtual record only
                     last_hour = h
                 if AUTOTRADE_ENABLED_CAS:
                     cas_part_tick()
@@ -38430,7 +38440,7 @@ async function refreshNeuro() {   // v0.99.619 — Neuro v3: the model, the year
       <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.pct}%</span></span>`;
   h += card('🔎 Последний час', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, 'монет')}${tile('сигналов', sc.signals, '')}${tile('открыто', sc.opened, '')}</div>
     ${near.length ? `<div class="zsub" style="margin-top:8px;">ближе всех к порогу (100% — сигнал):</div><div>${near.map(chip).join('')}</div>` : ''}
-    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 3700 ? '⏳ это скан до перезапуска бота (после старта бот ждёт начала часа — вход позже 20 минут уже опоздал); новый — в начале следующего часа' : 'следующий пересчёт в начале часа'}</div>`
+    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 3700 ? '⏳ скан старше часа — бот был выключен; после старта он сканирует сразу' : 'следующий пересчёт в начале часа'}</div>`
     : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
   // 3. the trades
   const op = d.open || [];
@@ -40695,7 +40705,7 @@ async function refreshCas() {   // v0.99.653 — 🌊 EMA cascade: the model on 
       <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.pct}%</span></span>`;
   h += card('🔎 Последний час', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, `монет · пробоев каскада ${sc.events}`)}${tile('сигналов', sc.signals, '')}${tile('открыто', sc.opened, '')}</div>
     ${near.length ? `<div class="zsub" style="margin-top:8px;">ближе всех к порогу (100% — сигнал):</div><div>${near.map(chip).join('')}</div>` : ''}
-    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 3700 ? '⏳ это скан до перезапуска бота (после старта бот ждёт начала часа — вход позже 20 минут уже опоздал); новый — в начале следующего часа' : 'следующий пересчёт в начале часа'}</div>`
+    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 3700 ? '⏳ скан старше часа — бот был выключен; после старта он сканирует сразу' : 'следующий пересчёт в начале часа'}</div>`
     : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
   const op = d.open || [];
   const row = (t, i) => `<div onclick="btLiveOpen('cas', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
@@ -40746,7 +40756,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
       <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.tf}ч · ${a.pct}%</span></span>`;
   h += card('🔎 Последний час', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, `монет · выходов за полосу ${sc.events}`)}${tile('сигналов', sc.signals, sc.btc_skip ? `ещё ${sc.btc_skip} против BTC — пропущены` : '')}${tile('открыто', sc.opened, '')}</div>
     ${near.length ? `<div class="zsub" style="margin-top:8px;">ближе всех к порогу (100% — сигнал):</div><div>${near.map(chip).join('')}</div>` : ''}
-    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 3700 ? '⏳ это скан до перезапуска бота (после старта бот ждёт начала часа — вход позже 20 минут уже опоздал); новый — в начале следующего часа' : 'следующий пересчёт в начале часа'}</div>`
+    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 3700 ? '⏳ скан старше часа — бот был выключен; после старта он сканирует сразу' : 'следующий пересчёт в начале часа'}</div>`
     : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
   // 3. the trades
   const op = d.open || [];
