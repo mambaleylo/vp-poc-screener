@@ -20203,3 +20203,9 @@ v0.99.672 - 📈 Breakout: trades only the research's 127 coins (RBX_COINS) inst
          equal drawdown, 2025 about 0R a trade (the check set x18 vs x208). So the breakout backtest flatters the live
          bot; trading the tested coins is the closer match — still expect less than the backtest (the 127 were picked
          with hindsight). P/R is not sensitive to the universe (top 200 / 120 / 60 by volume: the same R a trade).
+v0.99.673 - The user's screenshot: MSTR / CRCL (stock perps) near the P/R threshold — Gate's top by volume holds stock
+         and brand-new contracts the models never saw. Every model module now scans only the coins it was tested on,
+         in Gate's live volume order: P/R the 211 coins of v0.99.670 (within Gate's top 300), EMA / Neuro / Cascade /
+         strong zones the research's 127, the breakout its 127 (v0.99.672). The tabs say so. t_universe.py: stock
+         perps and untested coins are never scanned. (The "проверено 120" on the P/R tab was the last hourly scan
+         before the update; the next one scans the new list.)

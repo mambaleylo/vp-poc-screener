@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.672"
+APP_VERSION = "0.99.673"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -29048,6 +29048,13 @@ def _own_top_syms(n=None):
     return [s for _, s in sorted(vols, reverse=True)[:n or ZONES_OWN_TOP]]
 
 
+def _research_syms(coins, n=300):
+    """v0.99.673 — Gate's top n by 24h volume, only the coins a module was tested on (the user's screenshot: MSTR / CRCL —
+    stock perps — near the P/R threshold; the models were trained on crypto only)"""
+    cs = set(coins)
+    return [s for s in _own_top_syms(n) if s in cs]
+
+
 def _oc_pick(cands):
     """the nearest candidates of each side (what a trader would look at)"""
     out = []
@@ -30055,7 +30062,7 @@ def zm_scan_once():
     bv = btc["v"][-1] if btc and btc["v"] else 0.0
     bh1 = bh1[-480:]
     made, seen, found, near = 0, 0, [], []
-    for sym in _own_top_syms(ZM_TOP):
+    for sym in _research_syms(RESEARCH_COINS_127):   # v0.99.673 — the tested coins only (was Gate's top ZM_TOP)
         try:
             cs = _own_candles(sym, now)
             h4 = _zm_closed(sym, "4h", 4 * 3600, 480, now)
@@ -30520,7 +30527,7 @@ def emx_arm():
     bd1 = _zm_closed("BTC_USDT", "1d", 86400, 3000, now)
     bt = {"cs": bh1, "t": [c["time"] for c in bh1], "S": emx_series(bh1, bh4, bd1)}
     armed, coins = [], 0
-    for sym in _own_top_syms(EMX_TOP):
+    for sym in _research_syms(RESEARCH_COINS_127):   # v0.99.673 — the tested coins only (was Gate's top EMX_TOP)
         heartbeat("emx_loop")   # v0.99.619 — alive while the hourly levels are counted
         try:
             h1, h4, d1 = _emx_coin(sym, now)
@@ -31313,7 +31320,7 @@ def nx_scan_once():
     ref = {"btc": _zm_closed("BTC_USDT", "1h", 3600, 1000, now), "eth": _zm_closed("ETH_USDT", "1h", 3600, 1000, now)}
     i_atr = NX_NAMES.index("atr_pct")
     cands, coins, best = [], 0, []
-    for sym in _own_top_syms(NX_TOP):
+    for sym in _research_syms(RESEARCH_COINS_127):   # v0.99.673 — the tested coins only (was Gate's top NX_TOP)
         heartbeat("nx_loop")
         try:
             row, h1 = nx_coin_row(sym, now, ref)
@@ -32129,7 +32136,7 @@ def prx_scan_once():
     t_hour = int(now // 3600 * 3600)
     ref = {"btc": _zm_closed("BTC_USDT", "1h", 3600, 1000, now), "eth": _zm_closed("ETH_USDT", "1h", 3600, 1000, now)}
     cands, coins, events, best, btc_skip = [], 0, 0, [], 0
-    for sym in _own_top_syms(PRX_TOP):
+    for sym in _research_syms(RESEARCH_COINS_211, PRX_TOP + 100):   # v0.99.673 — the 211 tested coins in Gate's top 300
         heartbeat("prx_loop")
         try:
             evs = prx_coin_events(sym, now, ref, t_hour, tuple(m.get("tfs") or PRX_TFS))
@@ -32550,7 +32557,7 @@ def cas_scan_once():
     t_hour = int(now // 3600 * 3600)
     ref = {"btc": _zm_closed("BTC_USDT", "1h", 3600, 1000, now), "eth": _zm_closed("ETH_USDT", "1h", 3600, 1000, now)}
     cands, coins, events, best = [], 0, 0, []
-    for sym in _own_top_syms(CAS_TOP):
+    for sym in _research_syms(RESEARCH_COINS_127):   # v0.99.673 — the tested coins only (was Gate's top CAS_TOP)
         heartbeat("cas_loop")
         try:
             ev = cas_coin_event(sym, now, ref, t_hour)
@@ -32816,7 +32823,7 @@ RBX_TOP = int(os.environ.get("VP_RBX_TOP", "120"))
 # v0.99.672 — the breakout trades only the research's 127 coins (tools/adaptation/univ_test.py): on Gate's live top 120
 # (young / trending coins come and go) the same rule made x53 instead of x548 at an equal drawdown, 2025 about 0R a trade;
 # on the 84 extra Binance coins it lost (-0.40 / -0.21 / -0.05R in 2024–26). Empty = Gate's top RBX_TOP as before.
-RBX_COINS = tuple(os.environ.get("VP_RBX_COINS", """BONK_USDT FLOKI_USDT PEPE_USDT SHIB_USDT 1INCH_USDT AAVE_USDT ACH_USDT ADA_USDT AEVO_USDT ALGO_USDT ALT_USDT
+RESEARCH_COINS_127 = tuple("""BONK_USDT FLOKI_USDT PEPE_USDT SHIB_USDT 1INCH_USDT AAVE_USDT ACH_USDT ADA_USDT AEVO_USDT ALGO_USDT ALT_USDT
 ANKR_USDT APE_USDT APT_USDT ARB_USDT ARPA_USDT AR_USDT ATOM_USDT AVAX_USDT AXS_USDT BB_USDT BCH_USDT BLUR_USDT
 BNB_USDT BOME_USDT BRETT_USDT BTC_USDT C98_USDT CATI_USDT CELO_USDT CFX_USDT CHZ_USDT COMP_USDT CRV_USDT
 DASH_USDT DOGE_USDT DOT_USDT DYDX_USDT DYM_USDT EGLD_USDT EIGEN_USDT ENA_USDT ENJ_USDT ENS_USDT EOS_USDT
@@ -32827,7 +32834,18 @@ NEAR_USDT NEIRO_USDT NEO_USDT NOT_USDT ONDO_USDT OP_USDT ORDI_USDT PENDLE_USDT P
 PYTH_USDT QTUM_USDT RENDER_USDT RNDR_USDT ROSE_USDT RSR_USDT RUNE_USDT SAND_USDT SEI_USDT SNX_USDT SOL_USDT
 SSV_USDT STORJ_USDT STRK_USDT STX_USDT SUI_USDT SUSHI_USDT TAO_USDT THETA_USDT TIA_USDT TON_USDT TRB_USDT
 TRX_USDT TURBO_USDT UNI_USDT VET_USDT WIF_USDT WLD_USDT WOO_USDT W_USDT XAI_USDT XLM_USDT XRP_USDT XTZ_USDT
-YFI_USDT ZEC_USDT ZIL_USDT ZK_USDT ZRX_USDT""").split())
+YFI_USDT ZEC_USDT ZIL_USDT ZK_USDT ZRX_USDT""".split())   # v0.99.673 — the research's 127 coins (every module was tested on them)
+RBX_COINS = tuple(os.environ.get("VP_RBX_COINS", " ".join(RESEARCH_COINS_127)).split())
+# + the 84 Binance coins P/R was checked on (v0.99.670): volume >= 150M $ a month, history from 2025-06 or earlier
+RESEARCH_COINS_211 = RESEARCH_COINS_127 + tuple("""HYPE_USDT TRUMP_USDT TUT_USDT PUMP_USDT ACE_USDT ONG_USDT HEI_USDT PROM_USDT BICO_USDT PAXG_USDT BANK_USDT
+HOME_USDT RATS_USDT LIT_USDT PENGU_USDT BMT_USDT GPS_USDT KAITO_USDT COTI_USDT XMR_USDT SKYAI_USDT
+FARTCOIN_USDT KOMA_USDT PORTAL_USDT ZRO_USDT DEXE_USDT EPIC_USDT POL_USDT MUBARAK_USDT VIRTUAL_USDT HFT_USDT
+MOVR_USDT COW_USDT NIL_USDT TST_USDT VVV_USDT BR_USDT AVAAI_USDT H_USDT JTO_USDT MORPHO_USDT DODOX_USDT
+VIC_USDT RED_USDT SYN_USDT SPK_USDT ONT_USDT AERO_USDT ZEN_USDT LA_USDT COOKIE_USDT MELANIA_USDT RIF_USDT
+ONE_USDT CTSI_USDT MOVE_USDT ALICE_USDT SPX_USDT GRASS_USDT IOTX_USDT BIO_USDT USDC_USDT CAKE_USDT TLM_USDT
+WAL_USDT PNUT_USDT PLUME_USDT HYPER_USDT SQD_USDT SAGA_USDT SIREN_USDT SATS_USDT BEAMX_USDT LUNC_USDT
+SUPER_USDT PIPPIN_USDT HUMA_USDT BABY_USDT ARC_USDT BROCCOLI714_USDT CAT_USDT BERA_USDT BANANAS31_USDT
+LSK_USDT""".split())
 RBX_RISK_DEFAULT = 0.5
 RBX_FEE, RBX_FUND = 0.001, 0.0003
 RBX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_rbx_state.json")
@@ -36935,7 +36953,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">Работа (уровни каждый час + цена каждые 30 сек)</div>
-          <div class="sub">касания EMA 20–200 на 4ч / дне / неделе / месяце у 120 ликвидных монет; лучшие ~3% по модели, обученной на 6 годах истории — сигнал при касании: вход на EMA, стоп 0.75 дневного хода, тейк 4 риска, до 3 дней</div>
+          <div class="sub">касания EMA 20–200 на 4ч / дне / неделе / месяце у 127 монет исследования; лучшие ~3% по модели, обученной на 6 годах истории — сигнал при касании: вход на EMA, стоп 0.75 дневного хода, тейк 4 риска, до 3 дней</div>
         </div>
         <label class="switch"><input type="checkbox" id="setEmw"><span class="switchSlider"></span></label>
       </div>
@@ -38376,7 +38394,7 @@ async function refreshNeuro() {   // v0.99.619 — Neuro v3: the model, the year
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
   let h = '';
   // 1. what it is and how it did on the years it never saw
-  let top = `<div class="dim hintx">Одна модель на все монеты: каждый час смотрит ${d.n_feats || 89} параметров только что закрытой часовой свечи у 120 ликвидных монет — EMA, MACD, Supertrend, Ишимоку, ADX, RSI, стохастик, CCI, объёмы, свечи, 4ч / день / неделя, BTC и ETH, фандинг, час и день недели. Сигнал — только у лучших ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 0.3}% часов.</div>`;
+  let top = `<div class="dim hintx">Одна модель на все монеты: каждый час смотрит ${d.n_feats || 89} параметров только что закрытой часовой свечи у 127 монет исследования — EMA, MACD, Supertrend, Ишимоку, ADX, RSI, стохастик, CCI, объёмы, свечи, 4ч / день / неделя, BTC и ETH, фандинг, час и день недели. Сигнал — только у лучших ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 0.3}% часов.</div>`;
   if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
   else {
     const ys = rs.years || {};
@@ -40226,7 +40244,7 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
   let h = '';
   // 1. what it is and how it did on the years it never saw
-  let top = `<div class="dim hintx">Касания EMA ${m && m.tfs ? m.tfs.map(x => ({'4h': '4ч', '1d': 'дня', '1w': 'недели', '1M': 'месяца'})[x] || x).join(', ') : '4ч, дня, недели и месяца'} у 120 ликвидных монет. Модель, обученная на 6 годах истории 127 монет (1.16 млн касаний), берёт ~${m && m.q ? Math.round((1 - m.q) * 100) : 3}% лучших.</div>`;
+  let top = `<div class="dim hintx">Касания EMA ${m && m.tfs ? m.tfs.map(x => ({'4h': '4ч', '1d': 'дня', '1w': 'недели', '1M': 'месяца'})[x] || x).join(', ') : '4ч, дня, недели и месяца'} у 127 монет исследования (из живого топа Gate — только они; акции и новые монеты не берёт). Модель, обученная на 6 годах истории 127 монет (1.16 млн касаний), берёт ~${m && m.q ? Math.round((1 - m.q) * 100) : 3}% лучших.</div>`;
   if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
   else {
     const ys = rs.years || {};
@@ -40641,7 +40659,7 @@ async function refreshCas() {   // v0.99.653 — 🌊 EMA cascade: the model on 
   const m = d.model, rs = (m && m.research) || {}, rule = (m && m.rule) || {};
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
   let h = '';
-  let top = `<div class="dim hintx">Каскад EMA 5/10/14/20/28 на 1ч у 120 ликвидных монет. Сигнал — закрытие свечи за всем каскадом: выше верхней EMA — лонг, ниже нижней — шорт. Само пересечение на истории в минусе, поэтому сделку выбирает модель: она смотрит, что было до пробоя (памп и затухание, недавний пробой в другую сторону, ширина каскада, BTC), и ещё 89 параметров рынка, и берёт лучшие ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 0.5}% пробоев.</div>`;
+  let top = `<div class="dim hintx">Каскад EMA 5/10/14/20/28 на 1ч у 127 монет исследования. Сигнал — закрытие свечи за всем каскадом: выше верхней EMA — лонг, ниже нижней — шорт. Само пересечение на истории в минусе, поэтому сделку выбирает модель: она смотрит, что было до пробоя (памп и затухание, недавний пробой в другую сторону, ширина каскада, BTC), и ещё 89 параметров рынка, и берёт лучшие ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 0.5}% пробоев.</div>`;
   if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
   else {
     const ys = rs.years || {};
@@ -40690,7 +40708,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
   let h = '';
   // 1. what it is and how it did on the years it never saw
-  let top = `<div class="dim hintx">Канал Кельтнера (EMA20 ± ATR) на ${(m && m.tfs && !m.tfs.includes(4)) ? '1ч' : '1ч и 4ч'} у ${d.top || 120} ликвидных монет. Сам выход за полосу на истории убыточен (проверено 4 608 вариантов правила, фильтры и подбор под монету — всё в минусе), поэтому сигнал даёт модель: она смотрит, как цена вышла за полосу, и ещё 89 параметров рынка, и берёт только лучший ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 1}% выходов.</div>`;
+  let top = `<div class="dim hintx">Канал Кельтнера (EMA20 ± ATR) на ${(m && m.tfs && !m.tfs.includes(4)) ? '1ч' : '1ч и 4ч'} у ${d.top ? 211 : 120} проверенных монет (из топа Gate по объёму; акции и непроверенные монеты не берёт). Сам выход за полосу на истории убыточен (проверено 4 608 вариантов правила, фильтры и подбор под монету — всё в минусе), поэтому сигнал даёт модель: она смотрит, как цена вышла за полосу, и ещё 89 параметров рынка, и берёт только лучший ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 1}% выходов.</div>`;
   if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
   else {
     const ys = rs.years || {};
