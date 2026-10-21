@@ -10,7 +10,7 @@ vp.get_candles_range = rng_
 for f in ("send_telegram", "emx_save", "notify_trade_result"): setattr(vp, f, lambda *a, **k: None)
 vp.AUTOTRADE_ENABLED_EMW = False
 KR = {"stop": "LOSS", "be": "BREAKEVEN", "take": "WIN", "time": "TIME_EXIT"}
-bt = [x for x in json.load(open("emx_bt_v665.json")) if not x["s"].startswith("1000") and load(x["s"].replace("_", ""))]
+bt = [x for x in json.load(open("emx_bt_v667.json")) if not x["s"].startswith("1000") and load(x["s"].replace("_", ""))]
 rng = np.random.default_rng(4); ok = bad = 0
 for x in [bt[i] for i in rng.choice(len(bt), 150, replace=False)]:
     tr = {"id": "x", "symbol": x["s"], "side": x["d"], "direction": "LONG" if x["d"] > 0 else "SHORT", "tf": x["tf"], "n": x["n"], "entry": x["e"], "sl": x["sl"], "tp": x["tp"],

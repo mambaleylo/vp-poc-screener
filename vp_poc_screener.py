@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.666"
+APP_VERSION = "0.99.667"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30175,7 +30175,7 @@ def zm_stats():
 # the price is watched every 30 s; the virtual record follows the 1h candles exactly as the research did.
 EMX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_ema_model.json")
 EMX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_ema_model.json"
-EMX_MODEL_VER = 8   # v0.99.665 — 8: no 4h touches; v0.99.664 — 7: the entry limit 0.2 daily ATR past the EMA; v0.99.661 — 6: a third off at +1R (the stop to the fill), take 4R; v0.99.645 — 5: + the BTC EMA50 filter (the research stats and the backtest list with it); v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
+EMX_MODEL_VER = 9   # v0.99.667 — 9: + the crowd filter (ls_min_d24); v0.99.665 — 8: no 4h touches; v0.99.664 — 7: the entry limit 0.2 daily ATR past the EMA; v0.99.661 — 6: a third off at +1R (the stop to the fill), take 4R; v0.99.645 — 5: + the BTC EMA50 filter (the research stats and the backtest list with it); v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
 # v0.99.644 — 4: the same model, a new trading rule from the hypothesis study (tools/ema_model/ema_hyp*.py), better than
 # the old one on the bot's top 3% and on the top 10% check set at an equal drawdown: longs only (on shorts the score does
 # not rank: ~0R at every score), no entry when the price is >= 10 daily ATR above the daily EMA200 (those lost on both
@@ -30466,7 +30466,7 @@ def emx_levels(sym, h1, h4, d1, t_hour, m, bt):
     datr = S["1d"]["atr"][kd] / S["1d"]["C"][kd] * 100 if S["1d"]["atr"][kd] else 0
     if datr < 0.1:
         return []
-    out = []
+    out, ls_c = [], None
     for tf in tuple(m.get("tfs") or EMX_TFS):   # v0.99.665 — only the traded charts
         T = S[tf]
         if tf in ("4h", "1d"):
@@ -30494,6 +30494,11 @@ def emx_levels(sym, h1, h4, d1, t_hour, m, bt):
             x = [float(f.get(k, 0.0)) for k in m["feats"]]
             sc = sum(zm_tree_pred(t_, x) for t_ in m["models"]) / len(m["models"])
             if emx_pass(m, tf, side, sc, f):
+                if m.get("ls_min_d24") is not None:   # v0.99.667 — no long when the crowd did not add longs over 24 h
+                    if ls_c is None:
+                        ls_c = [binance_ls_d24(sym, t_hour)]
+                    if ls_c[0] is not None and side * ls_c[0] < float(m["ls_min_d24"]):
+                        continue
                 # v0.99.664 — the entry limit deep_datr daily ATR past the EMA (the stop / take from it)
                 le = lv * (1 - side * float(m["rule"].get("deep_datr") or 0) * f["datr"] / 100)
                 risk = le * m["rule"]["stop_datr"] * f["datr"] / 100
@@ -30758,7 +30763,7 @@ def emx_stats():
             "sel": {"coins": sel_n, "of": len(m.get("coins") or {}), "rule": cr, "research": m.get("coin_research"),
                     "n_all": len(rs_all), "avg_all": round(sum(rs_all) / len(rs_all), 3) if rs_all else None},
             "risk": MODULE_RISK_PCT.get("emw") or EMX_RISK_DEFAULT,
-            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap", "sides", "max_d_ema200", "tf_margin", "btc_ema50")} if m else None,
+            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap", "sides", "max_d_ema200", "tf_margin", "btc_ema50", "tfs", "ls_min_d24")} if m else None,
             "err": err, "scan": scan, "armed": armed[:40], "armed_n": len(armed),
             "open": [t for t in trades if t["status"] == "OPEN"][-30:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
@@ -31728,7 +31733,7 @@ def api_bt_trades():
         return jsonify({"trades": [], "err": str(e)[:200]})
 
 
-RBX_RULE_VER = 663   # 663 — the limit entry; v0.99.648 — the breakout's trading rule (stop 2 ATR, the channel 15 after +4R) for the live check; 654 — the partial take; 655 — strong only + the failed-breakout exit
+RBX_RULE_VER = 667   # 667 — the crowd filter; 663 — the limit entry; v0.99.648 — the breakout's trading rule (stop 2 ATR, the channel 15 after +4R) for the live check; 654 — the partial take; 655 — strong only + the failed-breakout exit
 
 
 def live_vs_bt(mod, rs):
@@ -31931,6 +31936,38 @@ def binance_klines(symbol, interval, start, end):
             log_error(f"binance klines {sym}: {e}")
             return []
     return []
+
+
+_BN_LS = {}
+
+
+def binance_ls_d24(symbol, t):
+    """v0.99.667 — the crowd's last 24 h: log(Binance USDT-M all accounts' long/short ratio before t / the same 24 h
+    earlier) for a Gate contract, from the 5-min history (= the research's ls_d24, tools/new_data/mfeat.py). None when
+    Binance does not answer or has no such coin — then the filter is skipped."""
+    key = (symbol, int(t) // 3600)
+    if key in _BN_LS:
+        return _BN_LS[key]
+    base, out = symbol.replace("_USDT", ""), None
+    for sym in (base + "USDT", "1000" + base + "USDT"):
+        try:
+            r = requests.get("https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
+                             params={"symbol": sym, "period": "5m", "limit": 500, "endTime": int(t) * 1000}, timeout=15)
+            if r.status_code != 200:
+                continue
+            rows = sorted((int(x["timestamp"]) // 1000, float(x["longShortRatio"])) for x in (r.json() or []))
+            now_ = [(a, v) for a, v in rows if a < t]
+            old = [(a, v) for a, v in rows if a < t - 86400]
+            if now_ and old and now_[-1][0] >= t - 900 and old[-1][0] >= t - 86400 - 900 and now_[-1][1] > 0 and old[-1][1] > 0:
+                out = math.log(now_[-1][1] / old[-1][1])
+            break
+        except Exception as e:
+            log_error(f"binance long/short {sym}: {e}")
+            break
+    if len(_BN_LS) > 3000:
+        _BN_LS.clear()
+    _BN_LS[key] = out
+    return out
 
 
 @app.route("/api/btchart/<symbol>")
@@ -32706,6 +32743,7 @@ RBX_PART_R, RBX_PART_F = 1.0, 0.25
 # 42%, the longest losing run 13 vs 14; the check set x13 vs x11, the run 12 vs 18; ~2.7 trades a week instead of 3.7.
 # A confirmation bar, a retest entry, other stops: worse (tools/rr_hunt/rb_fail.py, rb_part2.py).
 RBX_MIN_BRK, RBX_FAIL_K = 0.6, 2
+RBX_LS_MAX = 0.0918   # v0.99.667 — no breakout trade when the crowd's long/short ratio moved > this (log) into its side over 24 h
 # v0.99.663 — the entry by a limit 0.2 ATR better than the entry bar's open, waiting 3 bars of the chart (no fill = no trade):
 # the bot's set +0.60R a trade vs +0.53R, x103 vs x54 at an equal drawdown; the check set +0.40R vs +0.29R (tools/rr_hunt/rb_lim.py)
 RBX_LIM_ATR, RBX_LIM_WAIT = 0.2, 3
@@ -32721,7 +32759,7 @@ RBX_TOP = int(os.environ.get("VP_RBX_TOP", "120"))
 RBX_RISK_DEFAULT = 0.5
 RBX_FEE, RBX_FUND = 0.001, 0.0003
 RBX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_rbx_state.json")
-RBX_RESEARCH = json.loads('''{"24_part":{"years":{"2021":{"n":19,"avg":1.75,"wk":0.4,"sum":33.2,"dd":6.7,"wr":26.3,"days":24.0,"best":32.2},"2022":{"n":24,"avg":1.09,"wk":0.5,"sum":26.2,"dd":4.1,"wr":62.5,"days":38.0,"best":17.8},"2023":{"n":34,"avg":-0.17,"wk":0.7,"sum":-5.6,"dd":11.1,"wr":44.1,"days":30.0,"best":1.9},"2024":{"n":42,"avg":1.32,"wk":0.8,"sum":55.3,"dd":12.1,"wr":45.2,"days":22.0,"best":36.6},"2025":{"n":53,"avg":0.5,"wk":0.6,"sum":26.5,"dd":10.4,"wr":58.5,"days":34.0,"best":11.5}},"max_losing_streak":9},"12_part":{"years":{"2021":{"n":104,"avg":0.51,"wk":2.0,"sum":53.1,"dd":15.4,"wr":52.9,"days":9.0,"best":33.8},"2022":{"n":77,"avg":0.29,"wk":1.5,"sum":22.0,"dd":9.4,"wr":67.5,"days":12.0,"best":6.3},"2023":{"n":104,"avg":0.44,"wk":2.0,"sum":45.3,"dd":10.1,"wr":59.6,"days":13.0,"best":13.9},"2024":{"n":105,"avg":0.75,"wk":2.0,"sum":78.4,"dd":12.4,"wr":55.2,"days":12.0,"best":58.0},"2025":{"n":202,"avg":0.62,"wk":2.2,"sum":124.3,"dd":15.6,"wr":50.5,"days":14.0,"best":82.9}},"max_losing_streak":12},"24_dc20":{"years":{"2021":{"n":19,"avg":2.61,"wk":0.4,"sum":49.6,"dd":6.5,"wr":15.8,"days":30.0,"best":42.6},"2022":{"n":24,"avg":1.27,"wk":0.5,"sum":30.5,"dd":6.5,"wr":37.5,"days":41.0,"best":23.4},"2023":{"n":33,"avg":-0.26,"wk":0.6,"sum":-8.6,"dd":15.0,"wr":24.2,"days":33.0,"best":2.3},"2024":{"n":38,"avg":2.68,"wk":0.7,"sum":101.8,"dd":17.6,"wr":21.1,"days":26.0,"best":48.5},"2025":{"n":53,"avg":0.82,"wk":0.6,"sum":43.3,"dd":14.0,"wr":43.4,"days":37.0,"best":15.1}},"max_losing_streak":17},"24_half2dc20":{"years":{"2021":{"n":34,"avg":1.55,"wk":0.7,"sum":52.7,"dd":10.2,"wr":47.1,"days":35.0,"best":22.2},"2022":{"n":39,"avg":0.73,"wk":0.7,"sum":28.5,"dd":3.9,"wr":66.7,"days":46.0,"best":2.9},"2023":{"n":44,"avg":0.43,"wk":0.8,"sum":18.9,"dd":12.0,"wr":38.6,"days":38.0,"best":7.8},"2024":{"n":59,"avg":0.59,"wk":1.1,"sum":34.8,"dd":12.8,"wr":39.0,"days":27.0,"best":25.2},"2025":{"n":97,"avg":0.62,"wk":1.1,"sum":59.9,"dd":12.6,"wr":42.3,"days":34.0,"best":38.1}},"max_losing_streak":14},"12_dc20":{"years":{"2021":{"n":87,"avg":0.83,"wk":1.7,"sum":72.1,"dd":18.0,"wr":26.4,"days":13.0,"best":44.8},"2022":{"n":70,"avg":0.29,"wk":1.3,"sum":20.4,"dd":13.2,"wr":37.1,"days":17.0,"best":8.7},"2023":{"n":86,"avg":0.66,"wk":1.6,"sum":56.4,"dd":16.9,"wr":37.2,"days":19.0,"best":18.3},"2024":{"n":96,"avg":0.3,"wk":1.8,"sum":28.8,"dd":30.1,"wr":28.1,"days":16.0,"best":17.1},"2025":{"n":194,"avg":0.64,"wk":2.1,"sum":124.7,"dd":23.4,"wr":30.4,"days":16.0,"best":110.2}},"max_losing_streak":24},"12_half2dc20":{"years":{"2021":{"n":119,"avg":0.39,"wk":2.3,"sum":46.0,"dd":17.4,"wr":39.5,"days":15.0,"best":14.2},"2022":{"n":94,"avg":0.35,"wk":1.8,"sum":33.3,"dd":14.7,"wr":46.8,"days":19.0,"best":4.0},"2023":{"n":135,"avg":0.19,"wk":2.6,"sum":25.3,"dd":25.5,"wr":33.3,"days":15.0,"best":10.1},"2024":{"n":143,"avg":0.41,"wk":2.7,"sum":58.5,"dd":25.1,"wr":35.7,"days":14.0,"best":40.7},"2025":{"n":269,"avg":0.3,"wk":3.0,"sum":81.2,"dd":27.6,"wr":40.9,"days":15.0,"best":56.1}},"max_losing_streak":13}}''')   # {"24_dc20" | "24_half2dc20" | "12_dc20" | "12_half2dc20": {"years", "max_losing_streak"}}
+RBX_RESEARCH = json.loads('''{"24_part":{"years":{"2021":{"n":19,"avg":1.75,"wk":0.4,"sum":33.2,"dd":6.7,"wr":26.3,"days":24.0,"best":32.2},"2022":{"n":15,"avg":1.96,"wk":0.3,"sum":29.5,"dd":2.4,"wr":80.0,"days":52.0,"best":17.8},"2023":{"n":26,"avg":0.01,"wk":0.5,"sum":0.3,"dd":3.0,"wr":57.7,"days":35.0,"best":1.9},"2024":{"n":29,"avg":1.82,"wk":0.6,"sum":52.9,"dd":7.2,"wr":62.1,"days":21.0,"best":36.6},"2025":{"n":40,"avg":0.48,"wk":0.4,"sum":19.3,"dd":5.9,"wr":67.5,"days":39.0,"best":6.2}},"max_losing_streak":9},"12_part":{"years":{"2021":{"n":100,"avg":0.55,"wk":1.9,"sum":54.6,"dd":15.4,"wr":55.0,"days":9.0,"best":33.8},"2022":{"n":66,"avg":0.21,"wk":1.3,"sum":13.6,"dd":5.8,"wr":66.7,"days":13.0,"best":6.3},"2023":{"n":98,"avg":0.34,"wk":1.9,"sum":33.0,"dd":9.0,"wr":57.1,"days":13.0,"best":13.9},"2024":{"n":90,"avg":0.9,"wk":1.7,"sum":81.4,"dd":11.9,"wr":57.8,"days":12.0,"best":58.0},"2025":{"n":161,"avg":0.71,"wk":1.8,"sum":115.0,"dd":17.8,"wr":51.6,"days":14.0,"best":82.9}},"max_losing_streak":12},"24_dc20":{"years":{"2021":{"n":19,"avg":2.61,"wk":0.4,"sum":49.6,"dd":6.5,"wr":15.8,"days":30.0,"best":42.6},"2022":{"n":15,"avg":2.39,"wk":0.3,"sum":35.8,"dd":4.0,"wr":53.3,"days":53.0,"best":23.4},"2023":{"n":25,"avg":-0.15,"wk":0.5,"sum":-3.9,"dd":7.4,"wr":28.0,"days":39.0,"best":2.3},"2024":{"n":26,"avg":3.6,"wk":0.5,"sum":93.5,"dd":15.5,"wr":26.9,"days":29.0,"best":48.5},"2025":{"n":39,"avg":0.86,"wk":0.4,"sum":33.5,"dd":9.9,"wr":53.8,"days":44.0,"best":13.0}},"max_losing_streak":19},"24_half2dc20":{"years":{"2021":{"n":34,"avg":1.55,"wk":0.7,"sum":52.7,"dd":10.2,"wr":47.1,"days":35.0,"best":22.2},"2022":{"n":39,"avg":0.73,"wk":0.7,"sum":28.5,"dd":3.9,"wr":66.7,"days":46.0,"best":2.9},"2023":{"n":44,"avg":0.43,"wk":0.8,"sum":18.9,"dd":12.0,"wr":38.6,"days":38.0,"best":7.8},"2024":{"n":59,"avg":0.59,"wk":1.1,"sum":34.8,"dd":12.8,"wr":39.0,"days":27.0,"best":25.2},"2025":{"n":97,"avg":0.62,"wk":1.1,"sum":59.9,"dd":12.6,"wr":42.3,"days":34.0,"best":38.1}},"max_losing_streak":14},"12_dc20":{"years":{"2021":{"n":83,"avg":0.89,"wk":1.6,"sum":73.6,"dd":18.0,"wr":27.7,"days":13.0,"best":44.8},"2022":{"n":63,"avg":0.29,"wk":1.2,"sum":18.0,"dd":11.9,"wr":38.1,"days":18.0,"best":8.7},"2023":{"n":87,"avg":0.45,"wk":1.7,"sum":39.1,"dd":17.8,"wr":33.3,"days":17.0,"best":18.3},"2024":{"n":85,"avg":0.32,"wk":1.6,"sum":26.9,"dd":31.7,"wr":25.9,"days":15.0,"best":17.1},"2025":{"n":156,"avg":0.75,"wk":1.7,"sum":117.1,"dd":19.3,"wr":31.4,"days":16.0,"best":110.2}},"max_losing_streak":24},"12_half2dc20":{"years":{"2021":{"n":119,"avg":0.39,"wk":2.3,"sum":46.0,"dd":17.4,"wr":39.5,"days":15.0,"best":14.2},"2022":{"n":94,"avg":0.35,"wk":1.8,"sum":33.3,"dd":14.7,"wr":46.8,"days":19.0,"best":4.0},"2023":{"n":135,"avg":0.19,"wk":2.6,"sum":25.3,"dd":25.5,"wr":33.3,"days":15.0,"best":10.1},"2024":{"n":143,"avg":0.41,"wk":2.7,"sum":58.5,"dd":25.1,"wr":35.7,"days":14.0,"best":40.7},"2025":{"n":269,"avg":0.3,"wk":3.0,"sum":81.2,"dd":27.6,"wr":40.9,"days":15.0,"best":56.1}},"max_losing_streak":13}}''')   # {"24_dc20" | "24_half2dc20" | "12_dc20" | "12_half2dc20": {"years", "max_losing_streak"}}
 RBX_RESEARCH_MONTHS = json.loads('''{"months":[["2025-01",1,12.8],["2025-02",1,-0.5],["2025-03",3,2.4],["2025-04",7,8.3],["2025-05",5,-2.9],["2025-06",4,0.5],["2025-07",6,-3.9],["2025-08",6,-1.2],["2025-09",7,-7.2],["2025-11",4,84.6],["2026-01",7,2.2],["2026-02",2,-0.8],["2026-03",3,10.3],["2026-04",8,-1.8],["2026-05",8,-3.2],["2026-07",7,1.8],["2026-08",11,-6.2],["2026-09",4,-4.1],["2026-10",4,20.1]],"pos_months":29,"all_months":69}''')   # the daily trend exit, month by month (2025–26)
 _RBX = {"trades": [], "loaded": False, "scan": None, "watch": [], "err": None}
 _rbx_lock = threading.Lock()
@@ -32833,12 +32871,16 @@ def rbx_scan_once(chart):
                 live[t["contract"]] = float(t.get("last") or 0) or None
             except (TypeError, ValueError):
                 pass
-    opened = 0
+    opened = crowd = 0
     weak = sum(1 for c in cands if c["brk"] < RBX_MIN_BRK)
     for c in sorted(cands, key=lambda c: -c["brk"]):
         if RBX_STOP_ATR * c["atr"] <= c["close"] * 0.003:   # a stop within the fees (as the research skipped)
             continue
         if c["brk"] < RBX_MIN_BRK:     # v0.99.655: a weak breakout (the close barely beyond the range)
+            continue
+        ls = binance_ls_d24(c["symbol"], t_bar) if RBX_LS_MAX else None
+        if ls is not None and c["side"] * ls > RBX_LS_MAX:   # v0.99.667: the crowd already piled into this side
+            crowd += 1
             continue
         with _rbx_lock:
             opn = [t for t in _RBX["trades"] if t["status"] in ("OPEN", "PENDING")]
@@ -32849,7 +32891,7 @@ def rbx_scan_once(chart):
         opened += 1
     with _rbx_lock:
         sc = dict(_RBX.get("scan") or {})
-        sc[chart] = {"t": int(now), "bar": t_bar, "coins": coins, "signals": len(cands) - weak, "weak": weak, "opened": opened}
+        sc[chart] = {"t": int(now), "bar": t_bar, "coins": coins, "signals": len(cands) - weak, "weak": weak, "crowd": crowd, "opened": opened}
         sc["t"] = int(now)
         _RBX["scan"] = sc
         _RBX["watch"] = [w for w in (_RBX.get("watch") or []) if w.get("chart", "1d") != chart] + watch[:8]
@@ -40121,7 +40163,7 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>сделка до <b>${Math.round((rule.hold_h || 24))} ч</b></span><span>просадка до <b>${dd}R</b></span></div>
       <div class="zsub">Вход — ${rule.deep_datr ? `лимиткой на <b>${rule.deep_datr} дневного хода за EMA</b> (не дошла за час касания — сделки нет)` : 'на EMA'}, стоп — <b>${rule.stop_datr} дневного хода</b> монеты за входом${rule.part_r ? `, на <b>+${rule.part_r}R закрыть ${Math.round(rule.part_f * 100)}%</b> и стоп в безубыток` : ''}, тейк — <b>${rule.take_r} риска</b>. Не больше ${m.side_cap || 12} сделок в одну сторону.
-        ${m.sides ? `${m.sides.length === 1 && m.sides[0] === 1 ? 'Только лонги (на шортах модель не различает хорошие касания от плохих). ' : ''}Не входит, если цена уже дальше ${m.max_d_ema200} дневных ATR над EMA200 дня${m.tfs && !m.tfs.includes('4h') ? '; касания на 4ч не берёт (с входом за EMA они слабее)' : '; касания на 4ч — только самые уверенные'}.${m.btc_ema50 ? ' Лонги — только пока BTC выше своей дневной EMA50.' : ''}` : ''}</div>
+        ${m.sides ? `${m.sides.length === 1 && m.sides[0] === 1 ? 'Только лонги (на шортах модель не различает хорошие касания от плохих). ' : ''}Не входит, если цена уже дальше ${m.max_d_ema200} дневных ATR над EMA200 дня${m.tfs && !m.tfs.includes('4h') ? '; касания на 4ч не берёт (с входом за EMA они слабее)' : '; касания на 4ч — только самые уверенные'}.${m.btc_ema50 ? ' Лонги — только пока BTC выше своей дневной EMA50.' : ''}${m.ls_min_d24 != null ? ' Не входит, если толпа (все счета Binance) за сутки не прибавила в лонгах — на истории такие касания заметно хуже.' : ''}` : ''}</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «EMA» в настройках риска (пусто = ${d.risk}%). Сделок много одновременно: просадка на истории до ${dd}R — держите риск маленьким.</div>`}`;
     const sl = d.sel || {}, cr = sl.rule || {}, rsl = sl.research || {};
     if (sl.of) top += `<div class="zsub">🧮 <b>Авто-отбор монет:</b> торгуются <b>${sl.coins} из ${sl.of}</b> — у которых сделки модели были в среднем ≥ ${cr.min_avg != null ? '+' + cr.min_avg : '+0.1'}R (от ${cr.min_n || 10} сделок, история + живые). Остальные — только виртуально, без сигналов и сделок; монета войдёт в список, когда наберёт результат.${rsl.sel ? ` На истории 2025–26: <b>${sgR(rsl.sel.avg)}</b> на сделку, просадка ${rsl.sel.dd}R (без отбора ${sgR(rsl.all.avg)}, просадка ${rsl.all.dd}R).` : ''}</div>`;
@@ -40464,7 +40506,7 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
             wk: all.length ? all.reduce((a, x) => a + x.wk, 0) / all.length : null, dd: Math.max(0, ...all.map(x => x.dd || 0)),
             days: n ? all.reduce((a, x) => a + (x.days || 0) * x.n, 0) / n : null, streak: (R[key] || {}).max_losing_streak}; };
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
-  let top = `<div class="dim hintx">Монета идёт в узком коридоре (день — ${(ch['1d'] || {}).n || 20} свечей, 12ч — ${(ch['12h'] || {}).n || 30}), потом свеча закрывается за ним — в сторону её собственного тренда (EMA200). Вход ${d.lim_atr ? `лимиткой на ${d.lim_atr} ATR лучше цены после закрытия (ждёт до ${d.lim_wait} свечей; не дошла — сделки нет)` : 'сразу после закрытия'}, стоп ${d.stop_atr || 1.5} ATR. ${d.part ? `<b>На +${d.part_r}R закрывается ${Math.round(d.part_f * 100)}%</b>, стоп переносится в безубыток, остаток идёт по тренду — без тейка, пока тренд жив.` : 'Тейка нет: сделка держится, пока тренд жив.'} Выход — свеча закрылась за ${d.dc || 20}-свечным минимумом (для шорта — максимумом)${d.tight_r ? `; после +${d.tight_r}R — за ${d.tight_dc}-свечным, чтобы сохранить большую часть прибыли` : ''}.${d.min_brk ? ` Берутся только сильные пробои — свеча закрылась за границей на ${d.min_brk} ATR и дальше; если в первые ${d.fail_k} свечи цена закрылась обратно в коридор — выход сразу, не дожидаясь стопа (ложный пробой).` : ''}</div>
+  let top = `<div class="dim hintx">Монета идёт в узком коридоре (день — ${(ch['1d'] || {}).n || 20} свечей, 12ч — ${(ch['12h'] || {}).n || 30}), потом свеча закрывается за ним — в сторону её собственного тренда (EMA200). Вход ${d.lim_atr ? `лимиткой на ${d.lim_atr} ATR лучше цены после закрытия (ждёт до ${d.lim_wait} свечей; не дошла — сделки нет)` : 'сразу после закрытия'}, стоп ${d.stop_atr || 1.5} ATR. ${d.part ? `<b>На +${d.part_r}R закрывается ${Math.round(d.part_f * 100)}%</b>, стоп переносится в безубыток, остаток идёт по тренду — без тейка, пока тренд жив.` : 'Тейка нет: сделка держится, пока тренд жив.'} Выход — свеча закрылась за ${d.dc || 20}-свечным минимумом (для шорта — максимумом)${d.tight_r ? `; после +${d.tight_r}R — за ${d.tight_dc}-свечным, чтобы сохранить большую часть прибыли` : ''}.${d.min_brk ? ` Берутся только сильные пробои — свеча закрылась за границей на ${d.min_brk} ATR и дальше; если в первые ${d.fail_k} свечи цена закрылась обратно в коридор — выход сразу, не дожидаясь стопа (ложный пробой). Нет сделки, если толпа (все счета Binance) за последние сутки уже сильно набрала позиций в эту сторону — такие пробои на истории заметно хуже.` : ''}</div>
     <div class="zsub">Проверка на истории 127 монет Binance, 2021–2026; правило выбрано по 2021–23, 2024 и 2025–26 — проверка. Результат на сделку в текущем режиме:</div>`;
   for (const [tf, hk] of [['1d', 24], ['12h', 12]]) {
     const s = sum(`${hk}_${mode}`), o = sum(`${hk}_${d.part ? 'dc20' : 'part'}`);
@@ -40478,7 +40520,7 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
   const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;"><b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.chart === '12h' ? '12ч' : 'день'} · коридор ${a.rg} · до пробоя ${a.dist > 0 ? '+' : ''}${a.dist}%</span></span>`;
   const sc = d.scan || {};
   h += card('👀 В сжатии сейчас', (w.length ? `<div>${w.map(chip).join('')}</div><div class="dim" style="font-size:var(--fs-xs);">монеты в узком коридоре по своему тренду; закроется свеча за границей — будет сигнал${d.auto ? ' и сделка' : ''}</div>` : '<div class="dim" style="font-size:var(--fs-sm);">сейчас подходящих сжатий нет</div>')
-    + `<div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">${['1d', '12h'].map(c => sc[c] ? `${c === '1d' ? 'день' : '12ч'}: проверка ${dd(sc[c].t)}, ${sc[c].coins} монет, пробоев ${sc[c].signals}${sc[c].weak ? ` (+${sc[c].weak} слабых пропущено)` : ''}, открыто ${sc[c].opened}` : '').filter(Boolean).join(' · ')}${sc.t ? ' · ' : ''}следующая — в 03:00 и 15:00 МСК</div>`);
+    + `<div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">${['1d', '12h'].map(c => sc[c] ? `${c === '1d' ? 'день' : '12ч'}: проверка ${dd(sc[c].t)}, ${sc[c].coins} монет, пробоев ${sc[c].signals}${sc[c].weak ? ` (+${sc[c].weak} слабых пропущено)` : ''}${sc[c].crowd ? `, ${sc[c].crowd} — толпа уже там` : ''}, открыто ${sc[c].opened}` : '').filter(Boolean).join(' · ')}${sc.t ? ' · ' : ''}следующая — в 03:00 и 15:00 МСК</div>`);
   const op = d.open || [];
   const row = (t, i) => `<div onclick="btLiveOpen('rbx', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
       <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${t.chart === '12h' ? '12ч' : 'день'}${t.half ? (t.half_done ? ' · ½ взята' : ' · ½ на +2R') : ''}${t.part ? (t.part_done ? ' · ¼ взята' : ` · ¼ на +${t.part_r || 1}R`) : ''}${t.status === 'PENDING' ? ' · ⏳ лимитка ' + fmtNum(t.lv) : ''}${t.real ? ' · 💰' : ''}</span></span>

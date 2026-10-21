@@ -20156,3 +20156,12 @@ v0.99.666 - 🎯 Strong zones: one limit at the zone's far edge instead of the l
          the far edge. Checked and not kept: limits past the far edge (about the same), limits kept only 24 / 72 h
          (worse), stop 0.75 ATR (more growth but runs of 32 losses). A correction to v0.99.660: the reaction-entry
          study had the daily ATR in the wrong units; re-run, it makes +0.06…+0.23R — still below the ladder.
+v0.99.667 - New data (the user: "новые данные"): Binance's archive of open interest, long/short ratios and taker flow
+         (2020-09 .. 2026-09, 127 coins, tools/new_data). 13 features tested as filters on every module; two passed on
+         both sets and in the robustness checks, both on the crowd's long/short ratio (all accounts) over 24 h.
+         📈 Breakout: no trade when the crowd already moved > ~9.6% into the trade's side — +0.62R vs +0.55R, x75 vs
+         x31; the check set +0.45R vs +0.32R, x39 vs x11. 📐 EMA: no long when the crowd's ratio did not rise over
+         the day — +1.00R vs +0.86R (WR 84%, the longest losing run 6); the check set +0.56R vs +0.45R. The bot reads
+         the ratio from Binance (5-min history); no answer = no filter. EMA model ver 9, the breakout and EMA
+         backtest lists and stats redone. Fixed: the EMA tab did not get the model's chart list (still said 4h).
+         Nothing kept for P/R, Cascade, Neuro (OI, ratios and taker flow within the noise).

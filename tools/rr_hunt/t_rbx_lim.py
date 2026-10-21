@@ -16,7 +16,7 @@ for f in ("send_telegram", "rbx_save", "notify_trade_result"): setattr(vp, f, la
 vp.AUTOTRADE_ENABLED_RBX = False
 KR = {"fail": "FAILED", "stop": "LOSS", "be": "BREAKEVEN", "trend": "TREND_END", "time": "TIME_EXIT", "take": "WIN"}
 rng = np.random.default_rng(5)
-rb = [x for x in json.load(open("rbx_bt_v663.json")) if not x["s"].startswith("1000") and load(x["s"].replace("_", ""))]
+rb = [x for x in json.load(open("rbx_bt_v667.json")) if not x["s"].startswith("1000") and load(x["s"].replace("_", ""))]
 ok = bad = 0
 for x in [rb[i] for i in rng.choice(len(rb), 200, replace=False)]:
     cfg = vp.RBX_CHARTS[x["c"]]; s = x["d"]; risk = abs(x["e"] - x["sl"])
