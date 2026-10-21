@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.665"
+APP_VERSION = "0.99.666"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -29803,7 +29803,7 @@ def oc_loop():
 # edges, the stop a day's move of the coin beyond the far edge, the take a multiple of the risk.
 ZM_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_zones_model.json")
 ZM_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_zones_model.json"
-ZM_MODEL_VER = 3   # v0.99.622 — 2: stop 0.75 daily ATR, take 4R (the take sweep)
+ZM_MODEL_VER = 4   # v0.99.666 — 4: one limit at the zone's far edge (rule entry "far"); v0.99.622 — 2: stop 0.75 daily ATR, take 4R (the take sweep)
 # v0.99.651 — 3: the same model, the stop 1.0 daily ATR past the zone: better on the bot's top 5% and a top-15% check set at an
 # equal drawdown (tools/zones_model/zm_hyp.py), WR 43% instead of 39%, the longest losing run 18 instead of 31
 ZM_ENABLED = os.environ.get("VP_ZONES_ZM", "1") == "1"
@@ -29813,7 +29813,7 @@ ZM_TOP = int(os.environ.get("VP_ZONES_ZM_TOP", "120"))   # coins scanned (by 24h
 ZM_SCAN_SEC = 3600
 # v0.99.620 — what to expect (user: «бэктест, чтобы понять чего ожидать»): the walk-forward trades (q 0.95, cap 12)
 # month by month by exit, 2025–26 (models trained only on the years before); tools/zones_model/zm_expect2.py + zm_export2.py
-ZM_EXPECT = json.loads('{"months":[["2025-01",38,-19.6],["2025-02",21,9.5],["2025-03",38,-9.8],["2025-04",29,36.3],["2025-05",34,-15.3],["2025-06",31,-7.2],["2025-07",37,2.3],["2025-08",26,-10.7],["2025-09",34,-4.6],["2025-10",25,0.9],["2025-11",5,0.8],["2025-12",24,-1.0],["2026-01",36,69.9],["2026-02",6,-2.8],["2026-03",49,-24.1],["2026-04",56,15.6],["2026-05",45,10.9],["2026-06",16,1.9],["2026-07",49,6.9],["2026-08",83,36.5],["2026-09",19,19.3]],"all_months":57,"pos_months":32,"worst":-24.1,"best":69.9,"max_gap_d":19,"zone_days_share":0.39}')
+ZM_EXPECT = json.loads('{"months":[["2025-01",20,-6.8],["2025-02",12,24.5],["2025-03",11,-8.5],["2025-04",15,36.6],["2025-05",27,6.8],["2025-06",16,-5.1],["2025-07",32,17.9],["2025-08",24,-7.3],["2025-09",18,-6.5],["2025-10",15,-6.5],["2025-11",1,-1.0],["2025-12",5,-1.3],["2026-01",29,58.2],["2026-02",3,0.7],["2026-03",22,-13.6],["2026-04",36,26.1],["2026-05",29,24.7],["2026-06",7,8.6],["2026-07",11,-2.1],["2026-08",47,31.6],["2026-09",20,23.6]],"all_months":54,"pos_months":31,"worst":-17.0,"best":58.4,"max_gap_d":26,"zone_days_share":0.23}')
 ZM_RISK_DEFAULT = 0.5   # % per strong zone when its own field is empty — never the common risk (ladders at once)
 ZM_SIDE_CAP = int(os.environ.get("VP_ZONES_ZM_SIDE_CAP", "12"))   # active strong zones per side: one market move takes them all
 _ZM = {"model": None, "err": None, "last_scan": None, "loaded_t": None}
@@ -30028,7 +30028,7 @@ def zones_live_prices():
     return out
 
 
-def zones_ahead_ok(px, side, lo, hi):
+def zones_ahead_ok(px, side, lo, hi, far=False):
     """v0.99.660 — a new zone of our finders is made only while the live price is still on its own side of the first
     limit (the user's TRX: a short zone made from the closed hour's candles while the price had already gone up through it
     within the hour — the short "limit" below the price filled at once at the market, a short into support).
@@ -30036,7 +30036,7 @@ def zones_ahead_ok(px, side, lo, hi):
     if not px:
         return True
     s = 1 if side == "long" else -1
-    near = hi if s > 0 else lo
+    near = (lo if s > 0 else hi) if far else (hi if s > 0 else lo)   # v0.99.666 — the first limit is the far edge for «сильные зоны»
     l1 = near * (1 + s * ZONES_LIMIT_OFF / 100)
     return s * (px - l1) > 0
 
@@ -30081,8 +30081,9 @@ def zm_scan_once():
         found += [(sc, sym, c, sf["datr"]) for sc, c in best.values()]
     found.sort(key=lambda t: -t[0])
     live = zones_live_prices() if found else {}
+    far_in = rule.get("entry") == "far"
     for sc, sym, c, datr in found:
-        if not zones_ahead_ok(live.get(sym), c["side"], c["lo"], c["hi"]):
+        if not zones_ahead_ok(live.get(sym), c["side"], c["lo"], c["hi"], far=far_in):
             continue
         with _zones_lock:
             act = [z for z in ZONES["zones"] if z.get("zm") and z.get("status") in ("watch", "in_trade")]
@@ -30090,11 +30091,13 @@ def zm_scan_once():
         if dup or datr <= 0 or sum(1 for z in act if z.get("side") == c["side"]) >= ZM_SIDE_CAP:
             continue
         lv = [c["hi"], c["lo"]] if c["side"] == "long" else [c["lo"], c["hi"]]
+        if far_in:   # v0.99.666 — one limit at the far edge (deeper fills are the better ones: +0.47R vs +0.36R on the history)
+            lv = lv[-1:]
         dec = max(2, 6 - math.floor(math.log10(abs(c["hi"])))) if c["hi"] > 0 else 8
         z = zones_make({"id": f"zm_{sym}_{int(now)}", "symbol": sym, "post_time": now, "train": False}, c["side"],
                        [round(v, dec) for v in lv])
         # "oc" too: every place that keeps the author's statistics clean of our finders' zones skips it
-        z.update({"oc": True, "zm": True, "zm_score": round(sc, 3), "zm_buf": round(rule["buf_datr"] * datr, 3),
+        z.update({"oc": True, "zm": True, "zm_zone": [c["lo"], c["hi"]], "zm_score": round(sc, 3), "zm_buf": round(rule["buf_datr"] * datr, 3),
                   "zm_tpr": rule["tp_r"], "zm_datr": round(datr, 3), "zm_tf": c.get("tf", 1), "zm_ver": m.get("ver")})
         with _zones_lock:
             ZONES["zones"].insert(0, z)
@@ -39350,7 +39353,7 @@ function _zmHtml(d, zmZ) {
       ${zBars(rows, v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b> на сделку</span><span><b>~${wk == null ? '—' : wk.toFixed(1)}</b> сделок в неделю</span><span>держится <b>~${days == null ? '—' : days.toFixed(1)}</b> дн.</span><span>худшая просадка <b>${dd}R</b></span></div>
       <div class="zbanner warn">Сделок много одновременно, и один обвал рынка выбивает их пачкой: просадка на истории доходила до ${dd}R. Поэтому риск на сильную зону свой и маленький — по умолчанию 0.5% (при нём просадка ~${Math.round(dd * 0.5)}% счёта).</div>
-      <div class="zsub">Правило сделки: лимитки на оба края зоны, стоп — <b>${m.rule.buf_datr} дневной ход</b> монеты за дальним краем, тейк — <b>${m.rule.tp_r} риска</b> от средней цены входа, зона ждёт 14 дней. WR низкий по замыслу: тейк в ${m.rule.tp_r} раза дальше стопа.</div>`;
+      <div class="zsub">Правило сделки: ${m.rule.entry === 'far' ? 'одна лимитка на дальний край зоны (глубокий вход на истории лучше: +0.47R против +0.36R на сделку)' : 'лимитки на оба края зоны'}, стоп — <b>${m.rule.buf_datr} дневной ход</b> монеты за дальним краем, тейк — <b>${m.rule.tp_r} риска</b> от средней цены входа, зона ждёт 14 дней. WR низкий по замыслу: тейк в ${m.rule.tp_r} раза дальше стопа.</div>`;
     const ex = o.expect;
     if (ex && ex.months) {   // v0.99.620 — what to expect, month by month
       const mn = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];

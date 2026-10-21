@@ -20149,3 +20149,10 @@ v0.99.665 - Round 4 (the user: "пробуй всё"). 📐 EMA: no 4h touches a
          the EMA model retrained on the new entry's label (more trades, but 2022 and the check set's average worse),
          a LightGBM model picking 📈 breakouts (the check set better on 3 seeds, the bot's set not), keeping the EMA
          limit beyond the touch hour, a ladder entry, adding to winning breakouts.
+v0.99.666 - 🎯 Strong zones: one limit at the zone's far edge instead of the ladder on both edges (the EMA lesson:
+         the deeper fill is the better one). On the bot's set +0.47R a trade vs +0.36R, x20–23 vs x10 at an equal
+         drawdown; the check set +0.33R vs +0.21R; every year better in both, the losing runs as long as now. Model
+         ver 4 (rule "entry": "far"), the yearly stats and the monthly expectation redone; the live-price guard checks
+         the far edge. Checked and not kept: limits past the far edge (about the same), limits kept only 24 / 72 h
+         (worse), stop 0.75 ATR (more growth but runs of 32 losses). A correction to v0.99.660: the reaction-entry
+         study had the daily ATR in the wrong units; re-run, it makes +0.06…+0.23R — still below the ladder.

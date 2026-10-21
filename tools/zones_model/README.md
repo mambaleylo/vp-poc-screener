@@ -39,3 +39,14 @@ and the close back out, or a close back out after a dip; stop past the reaction 
 take 1.5–3R, 24 h–7 d) is ~0R a trade (+0.00…+0.05R) vs the ladder's +0.34R: our zones' edge is in the limits taken
 inside the move, not in a visible bounce. `zm_x3.py`: faster rules (stop 0.75 daily ATR, take 1.5–2R: median 45–55 h
 instead of 155 h) disagree between the sets (the bot's top 5% worse, the top 15% better) — the rule is kept.
+
+v0.99.666 — the EMA lesson (the deeper fill is the better one) for strong zones. `zm_x4.py` re-simulates the bot's
+ladder (100% equal to the G labels) with the legs moved; `zm_x5.py` the neighbours on 2 bootstrap seeds. One limit at
+the zone's FAR edge (0.2% before it) instead of near + far: the bot's set +0.47R a trade vs +0.36R, x20–23 vs x10 at an
+equal drawdown; the check set +0.33R vs +0.21R, x1700–1900 vs x120; every year better in both, the losing runs as
+long as now. Deeper still (past the far edge) is about the same; limits kept only 24 / 72 h are worse (unlike EMA, a late
+fill of a zone is fine); a stop of 0.75 ATR grows more but with runs of 32 losses. `zm_export4.py` -> model ver 4
+(rule "entry": "far", the yearly stats and the monthly expectation); `t_zm_far.py`: the bot's scan + ladder on history
+= `zm_x4.lad` (46/46). **A correction:** the v0.99.660 reaction study (`zm_x2.py`) used `datr_raw` (a % of the price)
+as a price, so its stops were far away and its ~0R numbers were wrong; fixed and re-run: the reaction entries make
++0.06…+0.23R a trade — still below the ladder, so the conclusion holds.

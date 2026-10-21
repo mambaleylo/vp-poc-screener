@@ -1,3 +1,4 @@
+# v0.99.666: datr_raw is in % of the price — the stop / break checks now use datr_raw / 100 × the far edge (it was used as a price before, which made every stop far away and the results ~0R)
 """strong zones — the entry by the reaction (the user: "зоны из паблика иногда просто закладываются фитилем и уже идёт
 отскок; от наших не видно реакции"): instead of the blind ladder, wait for a 1h candle that dips into the zone and
 closes back out (a rejection), enter at the next open; stop past the reaction's extreme / the zone's far edge + buf
@@ -53,7 +54,7 @@ def labels(idx, **kw):
         pos, O, H, L, C = cache[sym]
         i = pos.get(int(Z.T[k]))
         if i is None: continue
-        r, h = react(O, H, L, C, i, 14 * 24, int(Z.SIDE[k]), LO[k], HI[k], DATR[k], kw.get("mode", 0), kw.get("buf", 0.25), kw.get("tk", 2.0), kw.get("hold", 72), kw.get("depth", 0.0))
+        r, h = react(O, H, L, C, i, 14 * 24, int(Z.SIDE[k]), LO[k], HI[k], DATR[k] / 100 * (LO[k] if Z.SIDE[k] > 0 else HI[k]), kw.get("mode", 0), kw.get("buf", 0.25), kw.get("tk", 2.0), kw.get("hold", 72), kw.get("depth", 0.0))
         R[k], Hh[k] = r, max(1, h)
     return R, Hh
 def replay(idx, R, H):
