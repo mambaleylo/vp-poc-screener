@@ -20196,3 +20196,10 @@ v0.99.671 - More trades for the other modules (the user: "а если по др�
          trees over the last year's touches; q 0.97 gives back the old 0.355311). Model ver 10. Not kept: EMA top 5–6%
          (the R a trade falls faster), EMA 20 open at once (x5k–60k: crash-day clusters), 🌊 cascade top 1% (R halved) or
          10 open (within the noise), 📈 breakout 8 / 10 open or breakouts >= 0.5 ATR (worse on both sets).
+v0.99.672 - 📈 Breakout: trades only the research's 127 coins (RBX_COINS) instead of Gate's live top 120. Checked while
+         looking for more trades (tools/adaptation rb_more / rb_age / univ_test): on the 84 extra Binance coins the same
+         rule lost (2024–26 -0.40 / -0.21 / -0.05R a trade, and a coin's age does not fix it); on a live-like universe
+         (the top 120 by the last 30 days' volume among 211 coins at every signal) it made x53 instead of x548 at an
+         equal drawdown, 2025 about 0R a trade (the check set x18 vs x208). So the breakout backtest flatters the live
+         bot; trading the tested coins is the closer match — still expect less than the backtest (the 127 were picked
+         with hindsight). P/R is not sensitive to the universe (top 200 / 120 / 60 by volume: the same R a trade).

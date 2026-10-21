@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.671"
+APP_VERSION = "0.99.672"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -32813,6 +32813,21 @@ RBX_STOP_ATR, RBX_DC, RBX_HALF_R = 2.0, 20, 2.0
 # trend when it turns. Better on both sets for every threshold +4 / +5 / +6 / +8R (x32 vs x29, check x8.4 vs x6.2).
 RBX_TIGHT_R, RBX_TIGHT_DC = 4.0, 15
 RBX_TOP = int(os.environ.get("VP_RBX_TOP", "120"))
+# v0.99.672 — the breakout trades only the research's 127 coins (tools/adaptation/univ_test.py): on Gate's live top 120
+# (young / trending coins come and go) the same rule made x53 instead of x548 at an equal drawdown, 2025 about 0R a trade;
+# on the 84 extra Binance coins it lost (-0.40 / -0.21 / -0.05R in 2024–26). Empty = Gate's top RBX_TOP as before.
+RBX_COINS = tuple(os.environ.get("VP_RBX_COINS", """BONK_USDT FLOKI_USDT PEPE_USDT SHIB_USDT 1INCH_USDT AAVE_USDT ACH_USDT ADA_USDT AEVO_USDT ALGO_USDT ALT_USDT
+ANKR_USDT APE_USDT APT_USDT ARB_USDT ARPA_USDT AR_USDT ATOM_USDT AVAX_USDT AXS_USDT BB_USDT BCH_USDT BLUR_USDT
+BNB_USDT BOME_USDT BRETT_USDT BTC_USDT C98_USDT CATI_USDT CELO_USDT CFX_USDT CHZ_USDT COMP_USDT CRV_USDT
+DASH_USDT DOGE_USDT DOT_USDT DYDX_USDT DYM_USDT EGLD_USDT EIGEN_USDT ENA_USDT ENJ_USDT ENS_USDT EOS_USDT
+ETC_USDT ETHFI_USDT ETH_USDT FET_USDT FIL_USDT FLOW_USDT FTM_USDT GALA_USDT GMT_USDT GMX_USDT GRT_USDT
+HBAR_USDT HMSTR_USDT ICP_USDT ID_USDT IMX_USDT INJ_USDT IO_USDT JASMY_USDT JUP_USDT KAS_USDT KAVA_USDT
+KSM_USDT LDO_USDT LINK_USDT LRC_USDT LTC_USDT MAGIC_USDT MANA_USDT MANTA_USDT MASK_USDT MEW_USDT MKR_USDT
+NEAR_USDT NEIRO_USDT NEO_USDT NOT_USDT ONDO_USDT OP_USDT ORDI_USDT PENDLE_USDT PEOPLE_USDT POPCAT_USDT
+PYTH_USDT QTUM_USDT RENDER_USDT RNDR_USDT ROSE_USDT RSR_USDT RUNE_USDT SAND_USDT SEI_USDT SNX_USDT SOL_USDT
+SSV_USDT STORJ_USDT STRK_USDT STX_USDT SUI_USDT SUSHI_USDT TAO_USDT THETA_USDT TIA_USDT TON_USDT TRB_USDT
+TRX_USDT TURBO_USDT UNI_USDT VET_USDT WIF_USDT WLD_USDT WOO_USDT W_USDT XAI_USDT XLM_USDT XRP_USDT XTZ_USDT
+YFI_USDT ZEC_USDT ZIL_USDT ZK_USDT ZRX_USDT""").split())
 RBX_RISK_DEFAULT = 0.5
 RBX_FEE, RBX_FUND = 0.001, 0.0003
 RBX_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_rbx_state.json")
@@ -32903,7 +32918,7 @@ def rbx_scan_once(chart):
     now = time.time()
     t_bar = int(now // sec * sec)
     cands, watch, coins = [], [], 0
-    for sym in _own_top_syms(RBX_TOP):
+    for sym in (RBX_COINS or _own_top_syms(RBX_TOP)):   # v0.99.672 — the research's coins
         heartbeat("rbx_loop")
         try:
             bars = rbx_bars(sym, chart, now)
@@ -40577,7 +40592,7 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
             wk: all.length ? all.reduce((a, x) => a + x.wk, 0) / all.length : null, dd: Math.max(0, ...all.map(x => x.dd || 0)),
             days: n ? all.reduce((a, x) => a + (x.days || 0) * x.n, 0) / n : null, streak: (R[key] || {}).max_losing_streak}; };
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
-  let top = `<div class="dim hintx">Монета идёт в узком коридоре (день — ${(ch['1d'] || {}).n || 20} свечей, 12ч — ${(ch['12h'] || {}).n || 30}), потом свеча закрывается за ним — в сторону её собственного тренда (EMA200). Вход ${d.lim_atr ? `лимиткой на ${d.lim_atr} ATR лучше цены после закрытия (ждёт до ${d.lim_wait} свечей; не дошла — сделки нет)` : 'сразу после закрытия'}, стоп ${d.stop_atr || 1.5} ATR. ${d.part ? `<b>На +${d.part_r}R закрывается ${Math.round(d.part_f * 100)}%</b>, стоп переносится в безубыток, остаток идёт по тренду — без тейка, пока тренд жив.` : 'Тейка нет: сделка держится, пока тренд жив.'} Выход — свеча закрылась за ${d.dc || 20}-свечным минимумом (для шорта — максимумом)${d.tight_r ? `; после +${d.tight_r}R — за ${d.tight_dc}-свечным, чтобы сохранить большую часть прибыли` : ''}.${d.min_brk ? ` Берутся только сильные пробои — свеча закрылась за границей на ${d.min_brk} ATR и дальше; если в первые ${d.fail_k} свечи цена закрылась обратно в коридор — выход сразу, не дожидаясь стопа (ложный пробой). Нет сделки, если толпа (все счета Binance) за последние сутки уже сильно набрала позиций в эту сторону — такие пробои на истории заметно хуже.` : ''}</div>
+  let top = `<div class="dim hintx">Монета идёт в узком коридоре (день — ${(ch['1d'] || {}).n || 20} свечей, 12ч — ${(ch['12h'] || {}).n || 30}), потом свеча закрывается за ним — в сторону её собственного тренда (EMA200). Вход ${d.lim_atr ? `лимиткой на ${d.lim_atr} ATR лучше цены после закрытия (ждёт до ${d.lim_wait} свечей; не дошла — сделки нет)` : 'сразу после закрытия'}, стоп ${d.stop_atr || 1.5} ATR. ${d.part ? `<b>На +${d.part_r}R закрывается ${Math.round(d.part_f * 100)}%</b>, стоп переносится в безубыток, остаток идёт по тренду — без тейка, пока тренд жив.` : 'Тейка нет: сделка держится, пока тренд жив.'} Выход — свеча закрылась за ${d.dc || 20}-свечным минимумом (для шорта — максимумом)${d.tight_r ? `; после +${d.tight_r}R — за ${d.tight_dc}-свечным, чтобы сохранить большую часть прибыли` : ''}.${d.min_brk ? ` Берутся только сильные пробои — свеча закрылась за границей на ${d.min_brk} ATR и дальше; если в первые ${d.fail_k} свечи цена закрылась обратно в коридор — выход сразу, не дожидаясь стопа (ложный пробой). Нет сделки, если толпа (все счета Binance) за последние сутки уже сильно набрала позиций в эту сторону — такие пробои на истории заметно хуже. Торгуются только 127 монет, на которых правило проверено: на молодых и хайповых монетах из живого топа Gate тот же пробой на истории терял.` : ''}</div>
     <div class="zsub">Проверка на истории 127 монет Binance, 2021–2026; правило выбрано по 2021–23, 2024 и 2025–26 — проверка. Результат на сделку в текущем режиме:</div>`;
   for (const [tf, hk] of [['1d', 24], ['12h', 12]]) {
     const s = sum(`${hk}_${mode}`), o = sum(`${hk}_${d.part ? 'dc20' : 'part'}`);
