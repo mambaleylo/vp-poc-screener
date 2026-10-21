@@ -31,6 +31,7 @@ import queue
 import hmac
 import hashlib
 import bisect
+import calendar   # v0.99.678 — 🧱 SMC: month / year starts
 import io
 import itertools
 import shutil
@@ -63,7 +64,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.677"
+APP_VERSION = "0.99.678"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1153,6 +1154,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "auto_risk_enabled",
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones", "risk_pct_zm", "risk_pct_rbx", "rbx_enabled", "autotrade_rbx", "telegram_alerts_rbx", "rbx_part",
                   "cas_enabled", "autotrade_cas", "telegram_alerts_cas", "risk_pct_cas",   # v0.99.653
+                  "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
@@ -1234,6 +1236,7 @@ def get_settings():
         "risk_pct_rbx": MODULE_RISK_PCT.get("rbx"), "rbx_enabled": RBX_ENABLED, "autotrade_rbx": AUTOTRADE_ENABLED_RBX,   # v0.99.625
         "telegram_alerts_rbx": TELEGRAM_ALERTS_RBX, "rbx_part": RBX_PART,
         "cas_enabled": CAS_ENABLED, "autotrade_cas": AUTOTRADE_ENABLED_CAS, "telegram_alerts_cas": TELEGRAM_ALERTS_CAS, "risk_pct_cas": MODULE_RISK_PCT.get("cas"),   # v0.99.653
+        "smc_enabled": SMC_ENABLED, "autotrade_smc": AUTOTRADE_ENABLED_SMC, "telegram_alerts_smc": TELEGRAM_ALERTS_SMC, "risk_pct_smc": MODULE_RISK_PCT.get("smc"),   # v0.99.678
         "autotrade_zones": AUTOTRADE_ENABLED_ZONES,
         "autotrade_zones_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
         "zones_own_scan": ZONES_OWN_SCAN, "autotrade_zones_own": AUTOTRADE_ENABLED_ZONES_OWN,   # v0.99.452
@@ -1515,7 +1518,8 @@ def apply_settings(updates):
     if "auto_update" in updates:   # v0.99.637
         globals()["AUTO_UPDATE"] = bool(updates["auto_update"])
     for _k, _g in (("rbx_enabled", "RBX_ENABLED"), ("autotrade_rbx", "AUTOTRADE_ENABLED_RBX"), ("telegram_alerts_rbx", "TELEGRAM_ALERTS_RBX"), ("rbx_part", "RBX_PART"),
-                   ("cas_enabled", "CAS_ENABLED"), ("autotrade_cas", "AUTOTRADE_ENABLED_CAS"), ("telegram_alerts_cas", "TELEGRAM_ALERTS_CAS")):   # v0.99.625, v0.99.653
+                   ("cas_enabled", "CAS_ENABLED"), ("autotrade_cas", "AUTOTRADE_ENABLED_CAS"), ("telegram_alerts_cas", "TELEGRAM_ALERTS_CAS"),
+                   ("smc_enabled", "SMC_ENABLED"), ("autotrade_smc", "AUTOTRADE_ENABLED_SMC"), ("telegram_alerts_smc", "TELEGRAM_ALERTS_SMC")):   # v0.99.625, v0.99.653, v0.99.678
         if _k in updates:
             globals()[_g] = bool(updates[_k])
     if "zones_zm_enabled" in updates:   # v0.99.616
@@ -1547,8 +1551,10 @@ def apply_settings(updates):
             globals()[_g] = bool(updates[_k])
     if updates.get("emw_enabled"):
         EMW_BACKTEST_TRIGGER.set()
-    for _mod in ("neuro", "snr", "prv", "zones", "emw", "zm", "rbx", "cas"):   # v0.99.435 — own risk % per module; empty / 0 = the common one
+    for _mod in ("neuro", "snr", "prv", "zones", "emw", "zm", "rbx", "cas", "smc"):   # v0.99.435 — own risk % per module; empty / 0 = the common one
         _key = f"risk_pct_{_mod}"
+        if _key in updates and isinstance(updates[_key], bool):
+            continue   # v0.99.678 — an old page sent the number field's "checked" (false): never a risk reset
         if _key in updates:
             try:
                 v = float(updates[_key]) if updates[_key] not in (None, "") else 0.0
@@ -7533,6 +7539,7 @@ LOOP_MAX_GAP_SEC = {
     "prx_loop": 60 * 60,   # v0.99.624 — Peak Reversal v2
     "rbx_loop": 3 * 3600,   # v0.99.625 — once a day, beats every minute
     "cas_loop": 60 * 60,   # v0.99.653 — 🌊 EMA cascade
+    "smc_loop": 60 * 60,   # v0.99.678 — 🧱 SMC, beats per coin while the hour's levels are counted
     "hdg_loop": 10 * 60,   # v0.99.628 — 🪞 hedge mirror, beats every 5 s
     "auto_update_loop": 30 * 60,   # v0.99.637 — beats every 10 min
     "emx_loop": 60 * 60,   # v0.99.618 — «EMA — касания» (the W/M loops no longer run); v0.99.619 — 15 -> 60 min, the hourly levels of 120 coins take longer on the phone (it beats per coin too)
@@ -7549,7 +7556,7 @@ LOOP_MAX_GAP_SEC = {
 LOOP_LABELS = {
     "scan_loop": "Volume скан", "msnr_live_loop": "MSNR живой скан",
     "lsw_live_loop": "Sweep живой скан", "snr_live_loop": "S/R живой скан",
-    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "cas_loop": "🌊 Каскад", "hdg_loop": "🪞 Хедж", "auto_update_loop": "автообновление", "nx_loop": "Нейро",
+    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "cas_loop": "🌊 Каскад", "smc_loop": "🧱 SMC", "hdg_loop": "🪞 Хедж", "auto_update_loop": "автообновление", "nx_loop": "Нейро",
     "reconcile_loop": "сверка позиций (автоторговля)",
     "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
     "snr_backtest_loop": "S/R бэктест",
@@ -9170,7 +9177,7 @@ def kelly_risk(pairs):
             "auto_risk_n": n, "auto_risk_avg_r": round(mean, 3), "auto_risk_cautious_r": round(mean - se, 3)}
 
 
-MODULE_RISK_PCT = {"neuro": None, "snr": None, "prv": None, "zones": None, "emw": None, "zm": None, "rbx": None, "cas": None}   # v0.99.435 — own risk % per module (None = the common one)
+MODULE_RISK_PCT = {"neuro": None, "snr": None, "prv": None, "zones": None, "emw": None, "zm": None, "rbx": None, "cas": None, "smc": None}   # v0.99.435 — own risk % per module (None = the common one)
 RISK_PCT_MAX = 100.0   # v0.99.435 — user: "не ограничивай 50%"
 
 
@@ -26287,7 +26294,7 @@ def _zones_outbox_save():
 
 TELEGRAM_ALERTS_TRADE_RESULTS = os.environ.get("VP_TG_TRADE_RESULTS", "1") == "1"            # v0.99.457
 TELEGRAM_TRADE_RESULTS_REAL_ONLY = os.environ.get("VP_TG_TRADE_RESULTS_REAL", "0") == "1"
-_TRADE_MOD_NAMES = {"rbx": "📈 Пробой", "cas": "🌊 Каскад", "zones_zm": "🎯 Сильные зоны", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "zones": "Зоны",
+_TRADE_MOD_NAMES = {"rbx": "📈 Пробой", "cas": "🌊 Каскад", "smc": "🧱 SMC", "zones_zm": "🎯 Сильные зоны", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "zones": "Зоны",
                     "zones_own": "Зоны · 🔎 наш поиск", "zones_appr": "Зоны · движение к зоне", "zones_pb": "Зоны · 🧪 откат"}
 
 
@@ -31731,7 +31738,8 @@ def model_refresh_once():
                                          ("📐 EMA", EMX_MODEL_FILE, EMX_MODEL_URL, EMX_MODEL_VER, _emx_lock, _EMX),
                                          ("🧠 Нейро", NX_MODEL_FILE, NX_MODEL_URL, NX_MODEL_VER, _nx_lock, _NX),
                                          ("P/R", PRX_MODEL_FILE, PRX_MODEL_URL, PRX_MODEL_VER, _prx_lock, _PRX),
-                                         ("🌊 Каскад", CAS_MODEL_FILE, CAS_MODEL_URL, CAS_MODEL_VER, _cas_lock, _CAS)):
+                                         ("🌊 Каскад", CAS_MODEL_FILE, CAS_MODEL_URL, CAS_MODEL_VER, _cas_lock, _CAS),
+                                         ("🧱 SMC", SMC_MODEL_FILE, SMC_MODEL_URL, SMC_MODEL_VER, _smc_lock, _SMC)):
         try:
             local = 0
             if os.path.exists(fn):
@@ -31869,7 +31877,7 @@ def bt_gate_trade(mod, t):
                 return res(tp, k)
         k = min(48, len(bars)) - 1
         return res(bars[k]["close"], k)
-    if mod in ("prv", "emx"):
+    if mod in ("prv", "emx", "smc"):   # v0.99.678 — 🧱 SMC: the limit at the level like EMA, no partial take
         hold = 48 if mod == "prv" else 72
         bars = [c for c in bt_gate_bars(t["s"], "1h", t["t"], t["t"] + (hold + 1) * 3600) if c["time"] >= t["t"]]
         if len(bars) < 2 or bars[0]["time"] != t["t"]:
@@ -31971,7 +31979,7 @@ def bt_gate_check(mod, months=12):
 @app.route("/api/bt/gatecheck", methods=["GET", "POST"])
 def api_bt_gatecheck():
     mod = request.args.get("mod", "prv")
-    if mod not in ("prv", "emx", "rbx", "cas"):
+    if mod not in ("prv", "emx", "rbx", "cas", "smc"):
         return jsonify({"err": "модуль?"})
     with _btg_lock:
         st = dict(_BTG.get(mod) or {})
@@ -32845,6 +32853,627 @@ def api_cas_status():
         return jsonify(cas_stats())
     except Exception as e:
         log_error(f"cascade status: {e}")
+        return jsonify({"err": f"статистика не посчиталась: {e}"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v0.99.678 — 🧱 SMC (the user: "пробуем разные варианты индикаторов новых… пока не будет индикатор лучше", then
+# "регулярные сделки… хотя бы 10-15 сделок в месяц"). The hunt (tools/new_ind): levels of the higher charts known in
+# advance — prev day / week / month high-low-mid, the period opens, SMA / Bollinger 1d-1w, the EMAs, and the SMC
+# levels: an unfilled fair-value gap on 4h / 1d / 1w, an untouched swing low / high on 1d / 1w, an order block on
+# 4h / 1d; OI / funding / crowd triggers, 12 classic indicators (Supertrend, Ichimoku, MACD, RSI divergence…). In the
+# same honest walk-forward (a yearly model on the bot's 127 coins, the 84 newer coins never trained on) only the SMC
+# levels held on both sets: the top 1% of first touches by the model — ~10 trades a month, +0.67R, WR 59%, every year
+# 2022–26 in plus; the check coins +0.58R. Alone weaker than 📐 EMA, but trades in twice as many weeks (37% vs 20%);
+# EMA + P/R + SMC at a quarter of EMA's risk: 22 trades a month instead of 12, a trade in 55% of the weeks, the
+# growth at an equal 1-in-10 drawdown the same or a bit higher. A limit at the level (the first touch in its period),
+# stop 1 daily ATR past it, take 3R, out after 72 h.
+SMC_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_smc_model.json")
+SMC_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_smc_model.json"
+SMC_MODEL_VER = 1
+SMC_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_smc_state.json")
+SMC_ENABLED = os.environ.get("VP_SMC", "1") == "1"
+AUTOTRADE_ENABLED_SMC = os.environ.get("VP_AUTOTRADE_SMC", "0") == "1"
+TELEGRAM_ALERTS_SMC = os.environ.get("VP_TG_ALERTS_SMC", "1") == "1"
+SMC_RISK_DEFAULT = 0.25   # % when the module's own risk field is empty: a quarter of EMA's (the portfolio test)
+SMC_POLL_SEC = 10
+SMC_FEE, SMC_FUND = 0.001, 0.0003
+SMC_FNAMES = ["fam", "scope", "side", "datr", "hour", "dow", "dist_prev", "travel", "r24", "r72", "r7d", "b24", "b7d", "b_e50",
+              "rsi_d", "rsi_h", "d_e50", "d_e200", "pos30", "pos90", "pos365", "vol24", "conf", "ema_near", "ema_conf",
+              "round", "prog", "atr_h", "wick_prev"]
+SMC_NAME = {"fvg4_bull": "FVG 4ч ↑", "fvg4_bear": "FVG 4ч ↓", "fvgd_bull": "FVG дня ↑", "fvgd_bear": "FVG дня ↓",
+            "fvgw_bull": "FVG недели ↑", "fvgw_bear": "FVG недели ↓", "swd_low": "минимум дня (свинг)", "swd_high": "максимум дня (свинг)",
+            "sww_low": "минимум недели (свинг)", "sww_high": "максимум недели (свинг)", "obd_bull": "ордерблок дня ↑", "obd_bear": "ордерблок дня ↓",
+            "ob4_bull": "ордерблок 4ч ↑", "ob4_bear": "ордерблок 4ч ↓"}
+_SMC = {"model": None, "err": None, "trades": [], "armed": [], "armed_at": None, "loaded": False, "scan": None}
+_smc_lock = threading.Lock()
+
+
+# The research engine (tools/new_ind/lv_engine.py) re-done for ONE hour: at the start of the hour t_hour the levels of
+# every family known from CLOSED bars, which of them are still untouched in their period, and the model's features of
+# each. Bars are dicts {"time","open","high","low","close","volume"}; h1 / h4 / d1 = closed bars only, oldest first.
+SMC_FAMS = ["pdh", "pdl", "pdm", "d_sma20", "d_sma50", "d_sma100", "d_sma200", "d_bbu", "d_bbl",
+            "pwh", "pwl", "pwm", "wopen", "w_sma10", "w_sma20", "w_sma50", "w_bbu", "w_bbl",
+            "pmh", "pml", "pmm", "mopen", "yopen",
+            "d_ema7", "d_ema14", "d_ema28", "d_ema50", "d_ema100", "d_ema200", "w_ema7", "w_ema14", "w_ema28", "w_ema50",
+            "fvg4_bull", "fvg4_bear", "fvgd_bull", "fvgd_bear", "fvgw_bull", "fvgw_bear",
+            "swd_low", "swd_high", "sww_low", "sww_high", "obd_bull", "obd_bear", "ob4_bull", "ob4_bear"]
+SMC_SCOPE = [0] * 9 + [1] * 9 + [2] * 5 + [0] * 6 + [1] * 4 + [3, 3, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 3, 3]
+SMC_FIRST = 33   # the traded families: index >= 33
+
+
+def smc_sma(x, n):
+    out = [None] * len(x)
+    s = 0.0
+    for i, v in enumerate(x):
+        s += v
+        if i >= n:
+            s -= x[i - n]
+        if i >= n - 1:
+            out[i] = s / n
+    return out
+
+
+def smc_std(x, n):
+    out = [None] * len(x)
+    for i in range(n - 1, len(x)):
+        w = x[i - n + 1:i + 1]
+        m = sum(w) / n
+        out[i] = math.sqrt(sum((v - m) ** 2 for v in w) / n)
+    return out
+
+
+def smc_ema(x, n):
+    """seeded with the first value, None for the first n-1 (the research's ema())"""
+    out = [None] * len(x)
+    k = 2 / (n + 1)
+    e = None
+    for i, v in enumerate(x):
+        e = v if i == 0 else e + k * (v - e)
+        if i >= n - 1:
+            out[i] = e
+    return out
+
+
+def smc_atr(H, L, C, n=14):
+    """Wilder ATR, the first value = the mean of the first n true ranges (index n-1)"""
+    out = [None] * len(C)
+    if len(C) <= n:
+        return out
+    tr = [H[0] - L[0]] + [max(H[i] - L[i], abs(H[i] - C[i - 1]), abs(L[i] - C[i - 1])) for i in range(1, len(C))]
+    a = sum(tr[:n]) / n
+    out[n - 1] = a
+    for i in range(n, len(C)):
+        a = (a * (n - 1) + tr[i]) / n
+        out[i] = a
+    return out
+
+
+def smc_rsi(C, n=14):
+    out = [50.0] * len(C)
+    if len(C) <= n:
+        return out
+    d = [0.0] + [C[i] - C[i - 1] for i in range(1, len(C))]
+    up = [max(v, 0.0) for v in d]
+    dn = [max(-v, 0.0) for v in d]
+    au = sum(up[1:n + 1]) / n
+    ad = sum(dn[1:n + 1]) / n
+    for i in range(n + 1, len(C)):
+        au = (au * (n - 1) + up[i]) / n
+        ad = (ad * (n - 1) + dn[i]) / n
+        out[i] = 100 - 100 / (1 + au / ad) if ad > 0 else 100.0
+    return out
+
+
+def smc_levels_tf(O, H, L, C, atr, kind, side):
+    """after the LAST bar closed: the nearest untouched SMC level (below the close for side +1, above for -1).
+    kind 0 = fair-value gap, 1 = swing (3 bars each side), 2 = order block (the research's smc_levels)"""
+    n = len(C)
+    act = []
+    for k in range(n):
+        if act:
+            act = [v for v in act if not ((side > 0 and L[k] <= v) or (side < 0 and H[k] >= v))]
+        if kind == 0 and k >= 2:
+            if side > 0 and L[k] > H[k - 2]:
+                act.append(L[k])
+            if side < 0 and H[k] < L[k - 2]:
+                act.append(H[k])
+        elif kind == 1 and k >= 6:
+            i = k - 3
+            if side > 0:
+                if all(L[z] >= L[i] for z in range(i - 3, i + 4)) and min(L[i + 1:k + 1]) > L[i]:
+                    act.append(L[i])
+            else:
+                if all(H[z] <= H[i] for z in range(i - 3, i + 4)) and max(H[i + 1:k + 1]) < H[i]:
+                    act.append(H[i])
+        elif kind == 2 and k >= 3:
+            i = k - 2
+            a = atr[k] if atr[k] is not None else float("inf")
+            if side > 0 and C[i] < O[i] and C[k] - H[i] >= 1.0 * a and L[k] > H[i]:
+                act.append(H[i])
+            if side < 0 and C[i] > O[i] and L[i] - C[k] >= 1.0 * a and H[k] < L[i]:
+                act.append(L[i])
+    if not n:
+        return None
+    if side > 0:
+        c = [v for v in act if v < C[-1]]
+        return max(c) if c else None
+    c = [v for v in act if v > C[-1]]
+    return min(c) if c else None
+
+
+def smc_week_start(t):
+    d = t // 86400
+    return (d - (d + 3) % 7) * 86400
+
+
+def smc_month_start(t):
+    g = time.gmtime(t)
+    return calendar.timegm((g.tm_year, g.tm_mon, 1, 0, 0, 0))
+
+
+def smc_year_start(t):
+    return calendar.timegm((time.gmtime(t).tm_year, 1, 1, 0, 0, 0))
+
+
+def _smc_agg(bars, key):
+    """period bars from daily bars: key(time) -> period start"""
+    out = []
+    for c in bars:
+        ps = key(c["time"])
+        if not out or out[-1]["time"] != ps:
+            out.append({"time": ps, "open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"]})
+        else:
+            b = out[-1]
+            b["high"] = max(b["high"], c["high"]); b["low"] = min(b["low"], c["low"]); b["close"] = c["close"]
+    return out
+
+
+def _smc_round(lv):
+    if lv <= 0:
+        return 0.0
+    k = math.floor(math.log10(lv))
+    for scale, w in ((10 ** k, 1.0), (10 ** k / 2, 0.7), (10 ** k / 10, 0.4)):
+        q = math.ceil(lv * 0.997 / scale) * scale
+        if q <= lv * 1.003:
+            return w
+    return 0.0
+
+
+def smc_candidates(h1, h4, d1, bh1, bd1, t_hour):
+    """the untouched levels of every family at the start of the hour t_hour with the features of each.
+    h1 / h4 / d1: the coin's closed bars before t_hour; bh1 / bd1: BTC's. -> [{"fam", "side", "lv", "f": [..]}]"""
+    if len(h1) < 500 or len(d1) < 30 or len(bh1) < 200 or len(bd1) < 60:
+        return []
+    day0 = t_hour // 86400 * 86400
+    d1 = [c for c in d1 if c["time"] < day0]
+    if len(d1) < 30 or d1[-1]["time"] != day0 - 86400:
+        return []   # yesterday's daily bar is missing
+    w0, m0, y0, h40 = smc_week_start(t_hour), smc_month_start(t_hour), smc_year_start(t_hour), t_hour // 14400 * 14400
+    dO = [c["open"] for c in d1]; dH = [c["high"] for c in d1]; dL = [c["low"] for c in d1]; dC = [c["close"] for c in d1]
+    wk = [b for b in _smc_agg(d1, smc_week_start) if b["time"] < w0]
+    mo = [b for b in _smc_agg(d1, smc_month_start) if b["time"] < m0]
+    h4 = [c for c in h4 if c["time"] < h40]
+    if len(wk) < 3 or not mo or len(h4) < 30:
+        return []
+    wO = [b["open"] for b in wk]; wH = [b["high"] for b in wk]; wL = [b["low"] for b in wk]; wC = [b["close"] for b in wk]
+    datr_s = smc_atr(dH, dL, dC)
+    if datr_s[-1] is None:
+        return []
+    datr = datr_s[-1] / dC[-1] * 100
+    if datr < 0.1:
+        return []
+    last = lambda s: s[-1] if s else None
+    sma20, sd20 = smc_sma(dC, 20), smc_std(dC, 20)
+    wsma20, wsd20 = smc_sma(wC, 20), smc_std(wC, 20)
+    lv = {"pdh": dH[-1], "pdl": dL[-1], "pdm": (dH[-1] + dL[-1]) / 2,
+          "d_sma20": sma20[-1], "d_sma50": last(smc_sma(dC, 50)), "d_sma100": last(smc_sma(dC, 100)), "d_sma200": last(smc_sma(dC, 200)),
+          "d_bbu": sma20[-1] + 2 * sd20[-1] if sma20[-1] is not None else None,
+          "d_bbl": sma20[-1] - 2 * sd20[-1] if sma20[-1] is not None else None,
+          "pwh": wH[-1], "pwl": wL[-1], "pwm": (wH[-1] + wL[-1]) / 2, "wopen": None,
+          "w_sma10": last(smc_sma(wC, 10)), "w_sma20": wsma20[-1], "w_sma50": last(smc_sma(wC, 50)),
+          "w_bbu": wsma20[-1] + 2 * wsd20[-1] if wsma20[-1] is not None else None,
+          "w_bbl": wsma20[-1] - 2 * wsd20[-1] if wsma20[-1] is not None else None,
+          "pmh": mo[-1]["high"], "pml": mo[-1]["low"], "pmm": (mo[-1]["high"] + mo[-1]["low"]) / 2, "mopen": None, "yopen": None}
+    for k in (7, 14, 28, 50, 100, 200):
+        lv[f"d_ema{k}"] = last(smc_ema(dC, k))
+    for k in (7, 14, 28, 50):
+        lv[f"w_ema{k}"] = last(smc_ema(wC, k))
+    hT = [c["time"] for c in h1]
+    def open_at(ps):
+        i = bisect.bisect_left(hT, ps)
+        return h1[i]["open"] if i < len(h1) and h1[i]["time"] == ps else None
+    if t_hour - w0 >= 6 * 3600:
+        lv["wopen"] = open_at(w0)
+    if t_hour - m0 >= 6 * 3600:
+        lv["mopen"] = open_at(m0)
+    if t_hour - y0 >= 24 * 3600:
+        yd = [c for c in d1 if c["time"] == y0]
+        lv["yopen"] = yd[0]["open"] if yd else None
+    h4O = [c["open"] for c in h4]; h4H = [c["high"] for c in h4]; h4L = [c["low"] for c in h4]; h4C = [c["close"] for c in h4]
+    for tag, (O_, H_, L_, C_) in (("4", (h4O, h4H, h4L, h4C)), ("d", (dO, dH, dL, dC)), ("w", (wO, wH, wL, wC))):
+        at_ = smc_atr(H_, L_, C_)
+        for side_, nb in ((1, "bull"), (-1, "bear")):
+            if f"fvg{tag}_{nb}" in SMC_FAMS:
+                lv[f"fvg{tag}_{nb}"] = smc_levels_tf(O_, H_, L_, C_, at_, 0, side_)
+            if f"ob{tag}_{nb}" in SMC_FAMS:
+                lv[f"ob{tag}_{nb}"] = smc_levels_tf(O_, H_, L_, C_, at_, 2, side_)
+        for side_, nb in ((1, "low"), (-1, "high")):
+            if f"sw{tag}_{nb}" in SMC_FAMS:
+                lv[f"sw{tag}_{nb}"] = smc_levels_tf(O_, H_, L_, C_, at_, 1, side_)
+    allv = [lv[f] for f in SMC_FAMS if lv.get(f) is not None and lv[f] > 0]
+    # ---- the context, shared by all levels ----
+    hO = [c["open"] for c in h1]; hH = [c["high"] for c in h1]; hL = [c["low"] for c in h1]; hC = [c["close"] for c in h1]
+    hV = [float(c.get("volume") or 0) for c in h1]
+    px = hC[-1]; dpx = datr / 100 * px
+    def ret(k):
+        return (hC[-1] / hC[max(len(hC) - 1 - k, 0)] - 1) * 100
+    r24, r72, r7d = ret(24), ret(72), ret(168)
+    bC = [c["close"] for c in bh1]
+    b24 = (bC[-1] / bC[-25] - 1) * 100 if len(bC) > 25 else 0.0
+    b7d = (bC[-1] / bC[-169] - 1) * 100 if len(bC) > 169 else 0.0
+    # BTC: the daily close of the day before the last closed hour's day, vs its EMA50
+    bday = bh1[-1]["time"] // 86400 * 86400
+    bdd = [c for c in bd1 if c["time"] < bday]
+    bdC = [c["close"] for c in bdd]
+    be = last(smc_ema(bdC, 50)) if bdC else None
+    b_e50 = (bdC[-1] / be - 1) * 100 if be else 0.0
+    rsi_d = smc_rsi(dC)[-1]
+    rsi_h = smc_rsi(hC)[-1]
+    e50, e200 = last(smc_ema(dC, 50)), last(smc_ema(dC, 200))
+    pos = {}
+    for w in (30, 90, 365):
+        hh, ll = max(dH[-w:]), min(dL[-w:])
+        pos[w] = (px - ll) / (hh - ll) if hh > ll else 0.5
+    v24 = sum(hV[-24:]); v20 = sum(hV[-480:]) / 20
+    vol24 = math.log((v24 + 1e-9) / (v20 + 1e-9))
+    emas = [lv[f"d_ema{k}"] for k in (7, 14, 28, 50, 100, 200)] + [lv[f"w_ema{k}"] for k in (7, 14, 28, 50)]
+    ah = smc_atr(hH, hL, hC)[-1]
+    atr_h = (ah / px * 100 / max(datr, 1e-9)) if ah else 0.0
+    lo_w, hi_w = min(hO[-1], hC[-1]) - hL[-1], hH[-1] - max(hO[-1], hC[-1])
+    hour, dow = (t_hour // 3600) % 24, (t_hour // 86400 + 3) % 7
+    starts = {0: day0, 1: w0, 2: m0, 3: h40}
+    plens = {0: 86400, 1: 7 * 86400, 2: 30 * 86400, 3: 14400}
+    out = []
+    for fi, fam in enumerate(SMC_FAMS):
+        v = lv.get(fam)
+        if fi < SMC_FIRST or v is None or v <= 0:
+            continue
+        sc_ = SMC_SCOPE[fi]
+        ps = starts[sc_]
+        # the period's hours so far: the research's first-touch state machine
+        k0 = bisect.bisect_left(hT, ps)
+        done = False
+        for j in range(max(k0, 1), len(h1)):
+            pc = hC[j - 1]
+            if pc > v and (hO[j] <= v or hL[j] <= v * 0.999):
+                done = True; break
+            if pc < v and (hO[j] >= v or hH[j] >= v * 1.001):
+                done = True; break
+        if done or px == v:
+            continue
+        side = 1 if px > v else -1
+        f = [0.0] * 29
+        f[0] = float(fi); f[1] = float(sc_); f[2] = float(side); f[3] = datr; f[4] = float(hour); f[5] = float(dow)
+        f[6] = side * (px - v) / dpx
+        op = open_at(ps) if k0 < len(h1) else px
+        f[7] = side * ((op if op is not None else px) - v) / dpx
+        f[8], f[9], f[10] = side * r24, side * r72, side * r7d
+        f[11], f[12], f[13] = side * b24, side * b7d, side * b_e50
+        f[14] = side * (rsi_d - 50); f[15] = side * (rsi_h - 50)
+        f[16] = side * (px - e50) / dpx if e50 is not None else 0.0
+        f[17] = side * (px - e200) / dpx if e200 is not None else 0.0
+        for c_, w in ((18, 30), (19, 90), (20, 365)):
+            f[c_] = pos[w] if side > 0 else 1 - pos[w]
+        f[21] = vol24
+        f[22] = float(sum(1 for a in allv if abs(a - v) / dpx <= 0.3) - 1)
+        ed = [abs(e - v) / dpx for e in emas if e is not None]
+        f[23] = min(min(ed) if ed else 99.0, 20.0)
+        f[24] = float(sum(1 for x in ed if x <= 0.3))
+        f[25] = _smc_round(v)
+        f[26] = (t_hour - ps) / plens[sc_]
+        f[27] = atr_h
+        f[28] = side * (lo_w - hi_w) / dpx
+        out.append({"fam": fam, "side": side, "lv": v, "datr": datr, "f": f})
+    return out
+
+
+def smc_model():
+    with _smc_lock:
+        m = _SMC["model"]
+    if m and m.get("ver") == SMC_MODEL_VER:
+        return m
+    m = None
+    try:
+        if os.path.exists(SMC_MODEL_FILE):
+            with open(SMC_MODEL_FILE) as f:
+                m = json.load(f)
+            if m.get("ver") != SMC_MODEL_VER or m.get("feats") != SMC_FNAMES or m.get("fams") != SMC_FAMS:
+                m = None
+    except Exception as e:
+        log_error(f"smc model read: {e}")
+        m = None
+    if not m:
+        try:
+            r = requests.get(SMC_MODEL_URL.format(ref="main"), params={"nocache": int(time.time())}, timeout=120)
+            r.raise_for_status()
+            m = r.json()
+            if m.get("ver") != SMC_MODEL_VER or not m.get("models"):
+                raise RuntimeError(f"версия модели {m.get('ver')} вместо {SMC_MODEL_VER}")
+            if m.get("feats") != SMC_FNAMES or m.get("fams") != SMC_FAMS:
+                raise RuntimeError("признаки модели не совпадают с кодом бота — нужно обновить бота")
+            tmp = SMC_MODEL_FILE + ".new"
+            with open(tmp, "w") as f:
+                json.dump(m, f, separators=(",", ":"))
+            os.replace(tmp, SMC_MODEL_FILE)
+        except Exception as e:
+            with _smc_lock:
+                _SMC["err"] = f"модель не скачалась: {e}"
+            log_error(f"smc model download: {e}")
+            return None
+    with _smc_lock:
+        _SMC.update({"model": m, "err": None})
+    return m
+
+
+def smc_load():
+    try:
+        if os.path.exists(SMC_STATE_FILE):
+            with open(SMC_STATE_FILE) as f:
+                d = json.load(f)
+            with _smc_lock:
+                _SMC["trades"] = d.get("trades") or []
+                _SMC["armed"] = d.get("armed") or []
+                _SMC["armed_at"] = d.get("armed_at")
+                _SMC["scan"] = d.get("scan")
+    except Exception as e:
+        log_error(f"smc state load: {e}")
+    _SMC["loaded"] = True
+
+
+def smc_save():
+    try:
+        with _smc_lock:
+            data = json.dumps({"trades": _SMC["trades"][-600:], "armed": _SMC["armed"], "armed_at": _SMC["armed_at"], "scan": _SMC["scan"]})
+        tmp = SMC_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(data)
+        os.replace(tmp, SMC_STATE_FILE)
+    except Exception as e:
+        log_error(f"smc state save: {e}")
+
+
+def smc_score(m, f):
+    return sum(zm_tree_pred(t_, f) for t_ in m["models"]) / len(m["models"])
+
+
+def smc_arm(late=False):
+    """at the start of an hour: the untouched SMC levels of the tested coins scored; the ones above the threshold are
+    armed for this hour. late (a restart well into the hour): a level the price already reached this hour stays out"""
+    m = smc_model()
+    if not m:
+        return
+    now = time.time()
+    t_hour = int(now // 3600 * 3600)
+    bh1 = _zm_closed("BTC_USDT", "1h", 3600, 1000, t_hour)
+    bd1 = _zm_closed("BTC_USDT", "1d", 86400, 3000, t_hour)
+    rule = m.get("rule") or {}
+    armed, coins, cands, best = [], 0, 0, []
+    for sym in _research_syms(RESEARCH_COINS_127):
+        heartbeat("smc_loop")
+        try:
+            h1 = _zm_closed(sym, "1h", 3600, 1000, t_hour)
+            h4 = _zm_closed(sym, "4h", 4 * 3600, 1000, t_hour)
+            d1 = _zm_closed(sym, "1d", 86400, 3000, t_hour)
+            cs = smc_candidates(h1, h4, d1, bh1, bd1, t_hour)
+            coins += 1
+            if not cs:
+                continue
+            px = h1[-1]["close"]
+            for c in cs:
+                if abs(px - c["lv"]) / px * 100 > 1.5 * c["datr"]:
+                    continue   # out of reach this hour
+                cands += 1
+                sc = smc_score(m, c["f"])
+                best.append((sc, sym, c))
+                if sc < float(m["thr"]):
+                    continue
+                if late and limit_touched_since(sym, c["side"], c["lv"], t_hour):
+                    continue
+                s, lv = c["side"], c["lv"]
+                risk = lv * float(rule.get("stop_datr", 1.0)) * c["datr"] / 100
+                armed.append({"symbol": sym, "fam": c["fam"], "side": s, "lv": lv, "score": round(sc, 3), "datr": round(c["datr"], 4),
+                              "sl": lv - s * risk, "tp": lv + s * float(rule.get("take_r", 3.0)) * risk, "hour": t_hour, "px": px,
+                              "dist": round((lv - px) / px * 100, 2)})
+        except Exception as e:
+            log_error(f"smc levels {sym}: {e}")
+    armed.sort(key=lambda a: -a["score"])
+    best.sort(key=lambda x: -x[0])
+    thr = float(m["thr"])
+    near = [{"symbol": sym, "side": c["side"], "fam": c["fam"], "pct": round(100 * sc / thr) if thr > 0 else None}
+            for sc, sym, c in best[:8]]
+    with _smc_lock:
+        _SMC["armed"], _SMC["armed_at"] = armed, t_hour
+        _SMC["scan"] = {"t": int(now), "coins": coins, "levels": cands, "armed": len(armed), "near": near}
+    smc_save()
+
+
+def _smc_can_open(sym, side):
+    m = _SMC.get("model") or {}
+    with _smc_lock:
+        opn = [t for t in _SMC["trades"] if t["status"] == "OPEN"]
+    if any(t["symbol"] == sym and t["side"] == side for t in opn):
+        return False
+    return sum(1 for t in opn if t["side"] == side) < int(m.get("side_cap") or 12)
+
+
+def smc_fire(a, t_touch, live_px=None, how=None):
+    """a touch of an armed level: the signal (and the real order when the switch is on)"""
+    if not _smc_can_open(a["symbol"], a["side"]):
+        return
+    m = _SMC.get("model") or {}
+    hold = int((m.get("rule") or {}).get("hold_h", 72))
+    direction = "LONG" if a["side"] > 0 else "SHORT"
+    tr = {"id": f"smc_{a['symbol']}_{a['fam']}_{a['hour']}", "symbol": a["symbol"], "fam": a["fam"], "side": a["side"],
+          "direction": direction, "entry": a["lv"], "sl": a["sl"], "tp": a["tp"], "score": a["score"], "t_in": int(t_touch),
+          "hour": a["hour"], "until": int(a["hour"] + hold * 3600), "hold": hold, "status": "OPEN", "result": None,
+          "r": None, "exit": None, "t_out": None, "real": False, "live_px": live_px, "rv": SMC_MODEL_VER, "px": live_px or a["lv"], "trig": how}
+    risk_plan = abs(a["lv"] - a["sl"]) or 1e-12
+    if live_px and a["side"] * (live_px - a["lv"]) > risk_plan:   # Gate's price a whole R worse than the limit: no real trade
+        tr["late"] = round(a["side"] * (live_px - a["lv"]) / risk_plan, 2)
+    if AUTOTRADE_ENABLED_SMC and live_px and not tr.get("late"):
+        try:
+            res = execute_autotrade("smc", a["symbol"], direction, live_px, a["sl"], a["tp"], extra={"smc": SMC_NAME.get(a["fam"], a["fam"])},
+                                    risk_pct_override=MODULE_RISK_PCT.get("smc") or SMC_RISK_DEFAULT)
+            tr["real"] = (res or {}).get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+            tr["autotrade"] = {"status": (res or {}).get("status"), "detail": str((res or {}).get("detail") or "")[:200]}
+        except Exception as e:
+            log_error(f"smc autotrade {a['symbol']}: {e}")
+    with _smc_lock:
+        if any(t["id"] == tr["id"] for t in _SMC["trades"]):
+            return
+        _SMC["trades"].append(tr)
+    smc_save()
+    if TELEGRAM_ALERTS_SMC:
+        pct = lambda p: (p - a["lv"]) / a["lv"] * 100
+        send_telegram(f"🧱 {a['symbol'].replace('_USDT', '')} {direction} · SMC: {SMC_NAME.get(a['fam'], a['fam'])} — лимитка на уровне\n"
+                      f"вход {a['lv']:.6g} · стоп {a['sl']:.6g} ({pct(a['sl']):+.1f}%) · тейк {a['tp']:.6g} ({pct(a['tp']):+.1f}%) · держать до {hold} ч\n"
+                      f"оценка модели {a['score']} · " + ("💰 сделка на бирже" if tr["real"] else (f"без сделки: цена на Gate уже на {tr['late']}R от лимитки" if tr.get("late") else "без сделки (только сигнал)"))
+                      + (" · касание по Binance, вход по рынку Gate" if how == "binance" else ""), category="smc")
+
+
+def smc_watch_tick():
+    """every SMC_POLL_SEC: the armed levels of this hour against the price (Gate's last price or Binance's 1-min wick)"""
+    with _smc_lock:
+        armed, hour = list(_SMC["armed"]), _SMC["armed_at"]
+    now = time.time()
+    if not armed or hour is None or now >= hour + 3600:
+        return
+    px = {}
+    for t in get_tickers() or []:
+        try:
+            px[t["contract"]] = float(t.get("last") or 0)
+        except (TypeError, ValueError):
+            pass
+    for a in armed:
+        p = px.get(a["symbol"])
+        how = limit_touched(a["symbol"], a["side"], a["lv"], p, hour)
+        if how and p:
+            smc_fire(a, now, p, how)
+
+
+def smc_settle(now=None):
+    """after each hour: armed levels touched by the 1h candle but not caught live (the record must match the research)
+    and the open trades walked on the 1h candles — stop first, no take in the entry hour, out at 72 h"""
+    now = now or time.time()
+    with _smc_lock:
+        armed, hour = list(_SMC["armed"]), _SMC["armed_at"]
+    if armed and hour is not None and now >= hour + 3600:
+        for a in armed:
+            try:
+                cs = [c for c in (get_candles_range(a["symbol"], "1h", hour, hour) or []) if c["time"] == hour]
+                bn = [c for c in (binance_klines(a["symbol"], "1h", hour, hour) or []) if c["time"] == hour]
+                if any(((c["low"] <= a["lv"]) if a["side"] > 0 else (c["high"] >= a["lv"])) for c in cs + bn):
+                    smc_fire(a, hour)
+            except Exception as e:
+                log_error(f"smc settle {a['symbol']}: {e}")
+        with _smc_lock:
+            if _SMC["armed_at"] == hour:
+                _SMC["armed"] = []
+    with _smc_lock:
+        opn = [t for t in _SMC["trades"] if t["status"] == "OPEN"]
+    changed = False
+    for t in opn:
+        try:
+            cs = [c for c in (get_candles_range(t["symbol"], "1h", t["hour"], int(now)) or []) if c["time"] + 3600 <= now and c["time"] >= t["hour"]]
+            if not cs:
+                continue
+            s, fill, sl, tp = t["side"], t["entry"], t["sl"], t["tp"]
+            risk = abs(fill - sl) or 1e-12
+            hold = int(t.get("hold") or 72)
+            res = None
+            for k, c in enumerate(cs[:hold]):
+                if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
+                    gap = (c["open"] <= sl) if s > 0 else (c["open"] >= sl)
+                    res = ("LOSS", c["open"] if (gap and k > 0) else sl, k)
+                    break
+                if k > 0 and ((c["high"] >= tp) if s > 0 else (c["low"] <= tp)):
+                    res = ("WIN", tp, k)
+                    break
+            if not res and len(cs) >= hold:
+                res = ("TIME_EXIT", cs[hold - 1]["close"], hold - 1)
+            if not res:
+                continue
+            kind, ex, k = res
+            r = s * (ex - fill) / risk - (SMC_FEE + SMC_FUND * (k + 1) / 24) * fill / risk
+            if kind == "TIME_EXIT" and t.get("real") and AUTOTRADE_ENABLED_SMC:
+                log_error(f"smc time exit {t['symbol']}: {close_position_for_mode('smc', t['symbol'], t['direction'])}")
+            with _smc_lock:
+                t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + 3600), "r": round(r, 3)})
+            changed = True
+            notify_trade_result("smc", t["symbol"], t["direction"], fill, ex, kind, round(r, 3), real=bool(t.get("real")),
+                                note=f"SMC: {SMC_NAME.get(t.get('fam'), t.get('fam'))}")
+        except Exception as e:
+            log_error(f"smc trade {t.get('symbol')}: {e}")
+    if changed:
+        smc_save()
+
+
+def smc_loop():
+    time.sleep(100)
+    smc_load()
+    try:
+        smc_model()
+    except Exception as e:
+        log_error(f"smc_loop model: {e}")
+    last_hour = None
+    while True:
+        heartbeat("smc_loop")
+        try:
+            if SMC_ENABLED:
+                now = time.time()
+                h = int(now // 3600 * 3600)
+                if h != last_hour and now - h >= 20:   # a new hour: settle the past one, arm this one
+                    smc_settle(now)
+                    smc_arm(late=now - h >= 20 * 60)   # a restart late in the hour: scanned at once, reached levels left out
+                    last_hour = h
+                with live_http():
+                    smc_watch_tick()
+        except Exception as e:
+            log_error(f"smc_loop: {e}")
+            with _smc_lock:
+                _SMC["err"] = str(e)[:200]
+        time.sleep(SMC_POLL_SEC)
+
+
+def smc_stats():
+    m = _SMC.get("model") or {}
+    with _smc_lock:
+        trades = list(_SMC["trades"])
+        armed = list(_SMC["armed"])
+        scan, err = _SMC.get("scan"), _SMC.get("err")
+    fin = [t for t in trades if t["status"] == "CLOSED" and t.get("r") is not None]
+    rs = [t["r"] for t in fin]
+    t0 = min((t["t_in"] for t in trades), default=None)
+    weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
+    return {"on": SMC_ENABLED, "auto": AUTOTRADE_ENABLED_SMC, "tg": TELEGRAM_ALERTS_SMC,
+            "risk": MODULE_RISK_PCT.get("smc") or SMC_RISK_DEFAULT,
+            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap", "smc_fams")} if m else None,
+            "names": SMC_NAME, "err": err, "scan": scan, "armed": armed[:40], "armed_n": len(armed),
+            "open": [t for t in trades if t["status"] == "OPEN"][-30:],
+            "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
+            "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
+            "live_check": live_vs_bt("smc", [t["r"] for t in fin if t.get("rv") == SMC_MODEL_VER]),
+            "last": [{k: t.get(k) for k in ("symbol", "side", "fam", "t_in", "hour", "r", "result", "real", "entry", "sl", "tp", "exit", "t_out")}
+                     for t in sorted(fin, key=lambda t: -t["t_in"])[:30]]}
+
+
+@app.route("/api/smc/status")
+def api_smc_status():
+    try:
+        return jsonify(smc_stats())
+    except Exception as e:
+        log_error(f"smc status: {e}")
         return jsonify({"err": f"статистика не посчиталась: {e}"})
 
 
@@ -36832,6 +37461,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
   <div class="tab" data-tab="rbx" style="color:#ffb74d;">📈 Пробой</div>
   <div class="tab" data-tab="cas" style="color:#4dd0e1;">🌊 Каскад</div>
+  <div class="tab" data-tab="smc" style="color:#a1887f;">🧱 SMC</div>
   <div class="tab" data-tab="hdg" style="color:#b39ddb;">🪞 Хедж</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
@@ -36854,6 +37484,7 @@ INDEX_HTML = """<!doctype html>
   <div id="neuroPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="rbxPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="casPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="smcPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="hdgPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="snrPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="prvPanel" style="display:block;padding:8px 4px;font-size:var(--fs);"></div>
@@ -37046,6 +37677,23 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">на +1R закрыть четверть позиции и перенести стоп в безубыток, остаток — по тренду. Винрейт 54% вместо 33%, стопов подряд до 14 вместо 26, рост депозита при той же просадке — как без неё. Действует на новые сделки</div>
         </div>
         <label class="switch"><input type="checkbox" id="setRbxPart"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+
+    <details class="settingsGroup" style="--mod-color:#a1887f;"><summary class="settingsGroupTitle">🧱 SMC</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (1ч — 127 монет)</div>
+          <div class="sub">в начале часа: незакрытые FVG 4ч / дня / недели, свинги дня / недели, ордерблоки 4ч / дня — модель оценивает первое касание, лучшие ~1% становятся лимитками этого часа; стоп 1 дневной ATR, тейк 3R, выход через 72 ч; не больше 12 сделок в одну сторону</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setSmc"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ 🧱 SMC в Telegram</div>
+          <div class="sub">новая сделка и её итог</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgSmc"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -37291,6 +37939,7 @@ INDEX_HTML = """<!doctype html>
           <input type="number" id="setRiskPctZm" min="0.1" max="100" step="0.1" placeholder="🎯 0.5" title="🎯 Сильные зоны: пусто — 0.5% (не общий %!)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctRbx" min="0.1" max="100" step="0.1" placeholder="📈 0.5" title="📈 Пробой: пусто — 0.5% (не общий %)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctCas" min="0.1" max="100" step="0.1" placeholder="🌊 0.5" title="🌊 Каскад: пусто — 0.5% (не общий %)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctSmc" min="0.1" max="100" step="0.05" placeholder="🧱 0.25" title="🧱 SMC: пусто — 0.25% (не общий %); на истории — четверть риска EMA" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
         </div>
       </div>
       <div class="settingRow subRow">
@@ -37377,6 +38026,13 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeCas"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ 🧱 SMC</div>
+          <div class="sub">реальная сделка по рынку Gate при касании уровня (по Gate или фитилю Binance): стоп 1 дневной ATR и тейк 3R сразу на бирже, через 72 ч бот закрывает сделку. Риск — поле «🧱» выше (пусто = 0.25%)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeSmc"><span class="switchSlider"></span></label>
+      </div>
     </div></details>
 
     <div class="dim hint-block" style="font-size:var(--fs);margin-top:16px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
@@ -37459,6 +38115,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('neuroPanel').style.display = activeTab === 'neuro' ? 'block' : 'none';
     document.getElementById('rbxPanel').style.display = activeTab === 'rbx' ? 'block' : 'none';
     document.getElementById('casPanel').style.display = activeTab === 'cas' ? 'block' : 'none';
+    document.getElementById('smcPanel').style.display = activeTab === 'smc' ? 'block' : 'none';
     document.getElementById('hdgPanel').style.display = activeTab === 'hdg' ? 'block' : 'none';
     document.getElementById('snrPanel').style.display = activeTab === 'snr' ? 'block' : 'none';
     document.getElementById('prvPanel').style.display = activeTab === 'prv' ? 'block' : 'none';
@@ -37476,6 +38133,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'neuro') refreshNeuro();
     if (activeTab === 'rbx') refreshRbx();
     if (activeTab === 'cas') refreshCas();
+    if (activeTab === 'smc') refreshSmc();
     if (activeTab === 'hdg') refreshHdg();
     if (activeTab === 'snr') refreshSnr();
     if (activeTab === 'prv') refreshPrv();
@@ -40484,8 +41142,12 @@ window._btSt = window._btSt || {};
 window._btLive = window._btLive || {};
 const BT_CH = {'1d': 'день', '12h': '12ч', '1h': '1ч', '4h': '4ч'};
 const BT_EMA_TF = {'4h': '4ч', '1d': 'день', '1w': 'неделя', '1M': 'месяц'};
-const btLabel = t => t.tf ? `EMA ${t.n} · ${BT_EMA_TF[t.tf] || t.tf}` : (BT_CH[t.c] || t.c);
-const btKey = t => t.tf || t.c;
+const BT_SMC = {fvg4_bull: 'FVG 4ч ↑', fvg4_bear: 'FVG 4ч ↓', fvgd_bull: 'FVG дня ↑', fvgd_bear: 'FVG дня ↓', fvgw_bull: 'FVG недели ↑', fvgw_bear: 'FVG недели ↓',
+  swd_low: 'свинг-минимум дня', swd_high: 'свинг-максимум дня', sww_low: 'свинг-минимум недели', sww_high: 'свинг-максимум недели',
+  obd_bull: 'ордерблок дня ↑', obd_bear: 'ордерблок дня ↓', ob4_bull: 'ордерблок 4ч ↑', ob4_bear: 'ордерблок 4ч ↓'};   // v0.99.678 — 🧱
+const BT_SMC_GRP = {fvg4: 'FVG 4ч', fvgd: 'FVG день', fvgw: 'FVG неделя', swd: 'свинг дня', sww: 'свинг недели', obd: 'ордерблок дня', ob4: 'ордерблок 4ч'};
+const btLabel = t => t.lvl ? (BT_SMC[t.lvl] || t.lvl) : (t.tf ? `EMA ${t.n} · ${BT_EMA_TF[t.tf] || t.tf}` : (BT_CH[t.c] || t.c));
+const btKey = t => t.lvl ? t.lvl.split('_')[0] : (t.tf || t.c);
 const BT_KIND = {fail: 'ложный пробой', FAILED: 'ложный пробой', be: 'безубыток после частичной', stop: 'стоп', hard: 'аварийный стоп', STOP_CLOSE: 'стоп по закрытию', HARD_STOP: 'аварийный стоп', take: 'тейк', trend: 'конец тренда', time: 'по времени', LOSS: 'стоп', WIN: 'тейк', TREND_END: 'конец тренда',
   TIME_EXIT: 'по времени', BREAKEVEN: 'безубыток', TIME: 'по времени'};
 function btSection(mod, title) {
@@ -40513,7 +41175,7 @@ function btListHtml(mod) {
   const idx = all.map((t, i) => i).filter(i => st.f === 'all' || btKey(all[i]) === st.f);
   const rs = idx.map(i => all[i].r), avg = rs.reduce((a, b) => a + b, 0) / (rs.length || 1), wr = rs.filter(r => r > 0).length / (rs.length || 1) * 100;
   const chip = (k, lbl, n) => `<span onclick="btSet('${mod}', 'f', '${k}')" style="display:inline-block;padding:3px 9px;margin:0 6px 6px 0;border-radius:999px;cursor:pointer;border:1px solid var(--line);${st.f === k ? 'background:var(--card);color:var(--tx);' : 'color:var(--tx-3);'}">${lbl} · ${n}</span>`;
-  let h = `<div>${chip('all', 'все', all.length)}${charts.length > 1 ? charts.map(c => chip(c, BT_EMA_TF[c] || BT_CH[c] || c, all.filter(t => btKey(t) === c).length)).join('') : ''}</div>
+  let h = `<div>${chip('all', 'все', all.length)}${charts.length > 1 ? charts.map(c => chip(c, BT_SMC_GRP[c] || BT_EMA_TF[c] || BT_CH[c] || c, all.filter(t => btKey(t) === c).length)).join('') : ''}</div>
     <div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">${idx.length} сделок · в среднем ${avg > 0 ? '+' : ''}${avg.toFixed(2)}R · WR ${wr.toFixed(0)}% · тап по сделке — график</div>
     <div id="btg_${mod}" style="font-size:var(--fs-xs);margin-bottom:6px;">${btGateHtml(mod)}</div>`;
   h += idx.slice(0, st.n).map(i => btRowHtml(all[i], `btOpen('${mod}', ${i})`)).join('');
@@ -40574,12 +41236,15 @@ function btFromCas(t) {   // v0.99.653 — a live 🌊 trade -> the chart's trad
   return {mod: 'cas', s: t.symbol, d: t.side, c: '1h', t: t.hour, e, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true,
           pt: t.part_r && t.risk ? e + t.side * t.part_r * t.risk : null};
 }
+function btFromSmc(t) {   // v0.99.678 — a live 🧱 trade -> the chart's trade (1h candles)
+  return {mod: 'smc', s: t.symbol, d: t.side, c: '1h', lvl: t.fam, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+}
 function btFromPrx(t) {
   return {mod: 'prv', s: t.symbol, d: t.side, c: (t.tf || 1) + 'h', t: t.hour, e: t.entry != null ? t.entry : t.px, sl: t.sl, tp: t.tp, hs: t.hs, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
 }
 async function btChart(o) {
   const coin = (o.s || '').replace('_USDT', ''), side = o.d > 0 ? 'ЛОНГ' : 'ШОРТ';
-  document.getElementById('vgiModalTitle').textContent = `${coin} | ${o.mod === 'rbx' ? '📈 Пробой' : (o.mod === 'emx' ? '📐' : (o.mod === 'cas' ? '🌊 Каскад' : 'P/R'))} ${btLabel(o)} | ${side}${o.live ? '' : ' · бэктест'}`;
+  document.getElementById('vgiModalTitle').textContent = `${coin} | ${o.mod === 'rbx' ? '📈 Пробой' : (o.mod === 'emx' ? '📐' : (o.mod === 'cas' ? '🌊 Каскад' : (o.mod === 'smc' ? '🧱 SMC' : 'P/R')))} ${btLabel(o)} | ${side}${o.live ? '' : ' · бэктест'}`;
   document.getElementById('vgiModalParams').textContent = 'загрузка...';
   vgiModal.classList.add('open');
   window._vgiLast = null;
@@ -40602,7 +41267,7 @@ async function btChart(o) {
 function btGateFillNote(o, d) {   // v0.99.668 — the user's IO: a limit filled by Binance's wick that Gate's candles never reached
   if (o.live || d.src !== 'gate' || (d.c && d.c !== o.c) || o.e == null || !(d.bars || []).length) return '';
   const sec = ({'1h': 1, '4h': 4, '12h': 12, '1d': 24}[o.c] || 1) * 3600;
-  const w1 = o.mod === 'emx' ? o.t : (o.mod === 'prv' ? o.t + 2 * 3600 : (o.mod === 'rbx' ? (o.f || o.t) : null));
+  const w1 = (o.mod === 'emx' || o.mod === 'smc') ? o.t : (o.mod === 'prv' ? o.t + 2 * 3600 : (o.mod === 'rbx' ? (o.f || o.t) : null));
   if (w1 == null) return '';
   const win = d.bars.filter(b => b.time >= o.t && b.time <= w1);
   if (!win.length) return '';
@@ -40759,6 +41424,56 @@ async function refreshCas() {   // v0.99.653 — 🌊 EMA cascade: the model on 
   window._btLive.cas = op.slice(-10).reverse().map(btFromCas).concat((d.last || []).map(btFromCas));
   h += btSection('cas', 'Сделки бэктеста — 2022–2026 (каждый год модель не видела)');
   h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Пять EMA (5, 10, 14, 20, 28) на часовом графике. Событие — свеча закрылась выше всех пяти (лонг) или ниже всех пяти (шорт). Таких пробоев много — на 127 монетах Binance за 6 лет почти миллион, и в среднем они убыточны. Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на них: для каждого — чем кончилась бы сделка со стопом за экстремумом 24 свечей и тейком 2R за 48 ч. Торгуется с частичной фиксацией: треть на +0.7R и стоп в безубыток, остаток до 2.5R — так винрейт ~70% вместо ~53%, а серии минусов вдвое короче. Она учитывает и твои картинки: «памп → затухание → пробой вниз» и «пробой вверх → отбой обратно» — последний у модели лучший (шорты после недавнего пробоя вверх: +0.74R, WR 66%). Порог честный: модель учили на прошлых годах и проверяли на следующем. В начале каждого часа бот считает то же самое по только что закрытой свече и открывает сделку, если оценка выше порога (по монете и стороне — одна сделка). Учёт — по свечам 1ч, как в исследовании: вход по открытию следующей свечи, стоп раньше тейка; комиссии и фандинг учтены. Вместе с P/R: месяцы почти независимы (корреляция +0.26), поэтому каскад с риском 1% рядом с P/R 4% на истории растил депозит заметно быстрее при той же просадке.</div></details>`;
+  setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
+}
+
+async function refreshSmc() {   // v0.99.678 — 🧱 SMC: the model on the first touches of FVG / swing / order-block levels
+  const panel = document.getElementById('smcPanel');
+  let d;
+  try { d = await (await fetch('/api/smc/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
+  const card = (title, body) => `<div class="zcard"><div class="zh">${title}</div>${body}</div>`;
+  const tile = (l, v, n) => `<div class="ztile"><div class="zl">${l}</div><div class="zv">${v}</div>${n ? `<div class="zn">${n}</div>` : ''}</div>`;
+  const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  const coin = s => (s || '').replace('_USDT', '');
+  const hm = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
+  const nm = f => (d.names || {})[f] || f;
+  const m = d.model, rs = (m && m.research) || {}, rule = (m && m.rule) || {};
+  const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
+  let h = '';
+  let top = `<div class="dim hintx">Уровни старших графиков, известные заранее: незакрытые FVG (имбалансы) на 4ч, дне и неделе, непробитые свинг-минимумы и максимумы дня и недели, ордерблоки 4ч и дня. Сделка — лимитка на уровне при первом касании; из всех касаний модель берёт лучший ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 1}%.</div>`;
+  if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
+  else {
+    const ys = rs.years || {};
+    const all = Object.values(ys).filter(x => x && x.n);
+    const n = all.reduce((a, x) => a + x.n, 0), avg = n ? all.reduce((a, x) => a + x.avg * x.n, 0) / n : null;
+    const dd = Math.max(0, ...all.map(x => x.dd || 0));
+    top += `<div class="dim" style="font-size:var(--fs-xs);">обучена до ${new Date(m.trained_to * 1000).toLocaleDateString('ru-RU')}</div>
+      <div class="zsub">Проверка на истории ${rs.coins || 127} монет — каждый год модель не видела. Результат на сделку:</div>
+      ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2026'}; }), v => sgR(+(+v).toFixed(2)))}
+      <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${rs.per_month || '—'}</b> сделок в месяц</span><span>WR <b>${rs.wr || '—'}%</b></span><span>просадка до <b>${dd}R</b></span></div>
+      <div class="zsub">Вход — лимиткой на уровне, стоп — <b>${rule.stop_datr || 1} дневной ATR</b> за уровнем, тейк — <b>${rule.take_r || 3} риска</b>, через ${rule.hold_h || 72} ч выход. Не больше ${m.side_cap || 12} сделок в одну сторону, по монете и стороне — одна.${rs.max_losing_streak ? ` Самая длинная серия минусов на истории — ${rs.max_losing_streak}: убытки, как и сигналы, приходят пачками, поэтому риск — четверть от EMA.` : ''}${rs.check ? ` На ${rs.check_coins || 84} монетах, на которых модель не училась: ${sgR(rs.check.avg)} на сделку, WR ${rs.check.wr}%.` : ''}</div>
+      ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «🧱» в настройках риска (пусто = ${d.risk}%).</div>`}`;
+  }
+  h += card(`🧱 SMC ${pill}`, top);
+  const sc = d.scan, armed = d.armed || [], near = (sc && sc.near) || [];
+  const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;">
+      <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${nm(a.fam)}${a.dist != null ? ' · ' + a.dist + '%' : (a.pct != null ? ' · ' + a.pct + '%' : '')}</span></span>`;
+  h += card('🔎 Этот час', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, `монет · уровней рядом ${sc.levels}`)}${tile('лимиток', d.armed_n || 0, 'ждут касания в этом часе')}${tile('сделок', (d.open || []).length, 'открыто')}</div>
+    ${armed.length ? `<div class="zsub" style="margin-top:8px;">лимитки этого часа (расстояние от цены):</div><div>${armed.map(chip).join('')}</div>`
+      : (near.length ? `<div class="zsub" style="margin-top:8px;">ближе всех к порогу (100% — сигнал):</div><div>${near.map(chip).join('')}</div>` : '')}
+    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 3700 ? '⏳ скан старше часа — бот был выключен; после старта он сканирует сразу' : 'следующий пересчёт в начале часа'}</div>`
+    : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
+  const op = d.open || [];
+  const row = (t, i) => `<div onclick="btLiveOpen('smc', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim"> · ${nm(t.fam)}${t.real ? ' · 💰' : ''}</span></span>
+      <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry)} · до ${hm(t.until)}</span></div>`;
+  h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
+    ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
+    ${liveCheckHtml(d.live_check)}
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromSmc(t), `btLiveOpen('smc', ${Math.min(10, op.length) + i})`)).join('')}</details>` : ''}`);
+  window._btLive.smc = op.slice(-10).reverse().map(btFromSmc).concat((d.last || []).map(btFromSmc));
+  h += btSection('smc', 'Сделки бэктеста — 2022–2026 (каждый год модель не видела)');
+  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как нашёлся</summary><div class="zsub">Задача была — сделки регулярнее, не редкими пачками. Проверены (честно: модель каждого года училась только на прошлых годах, ещё 84 монеты в обучение не входили вовсе): максимумы / минимумы / середины прошлого дня, недели и месяца, открытия недели, месяца и года, SMA и полосы Боллинджера на дне и неделе; сигналы по открытому интересу, фандингу, перекосу лонгов / шортов толпы и тейкеров, отрыву монеты от BTC, объёмным всплескам; 12 классических индикаторов на 4ч и дне (Supertrend, Parabolic SAR, Ichimoku, MACD, дивергенции RSI, Stochastic, ADX, Heikin-Ashi, NR7, CCI, Боллинджер, Келтнер) и уровни SMC. Сами по себе почти все около нуля; после отбора моделью устойчиво держатся только уровни SMC — плюс в каждом году и на чужих монетах. В одиночку они слабее 📐 EMA, но сделки идут почти вдвое чаще и в большем числе недель. Вывод по «пачкам»: сильные сигналы у всех индикаторов бывают в моменты больших движений всего рынка; если брать лучшие сигналы каждого дня, результат падает до +0.1–0.2R. Поэтому SMC — добавка к EMA и P/R с небольшим риском: вместе ~22 сделки в месяц, сделка в ~55% недель, рост при той же просадке не хуже.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
 
@@ -41749,6 +42464,7 @@ async function refreshAll() {
   if (activeTab === 'neuro') await refreshNeuro();
   if (activeTab === 'rbx') await refreshRbx();
   if (activeTab === 'cas') await refreshCas();
+  if (activeTab === 'smc') await refreshSmc();
   if (activeTab === 'hdg') await refreshHdg();
   if (activeTab === 'snr') await refreshSnr();
   if (activeTab === 'prv') await refreshPrv();
@@ -42067,7 +42783,6 @@ const setInputs = {
   emw_enabled: document.getElementById('setEmw'),   // v0.99.570
   telegram_alerts_emw: document.getElementById('setTelegramEmw'),
   autotrade_emw: document.getElementById('setAutotradeEmw'),
-  risk_pct_emw: document.getElementById('setRiskPctEmw'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
   hourly_stats_enabled: document.getElementById('setHourlyStats'),
@@ -42095,11 +42810,12 @@ const setInputs = {
   autotrade_rbx: document.getElementById('setAutotradeRbx'),
   telegram_alerts_rbx: document.getElementById('setTgRbx'),
   rbx_part: document.getElementById('setRbxPart'),
-  risk_pct_rbx: document.getElementById('setRiskPctRbx'),
   cas_enabled: document.getElementById('setCas'),   // v0.99.653
   autotrade_cas: document.getElementById('setAutotradeCas'),
   telegram_alerts_cas: document.getElementById('setTgCas'),
-  risk_pct_cas: document.getElementById('setRiskPctCas'),
+  smc_enabled: document.getElementById('setSmc'),   // v0.99.678
+  autotrade_smc: document.getElementById('setAutotradeSmc'),
+  telegram_alerts_smc: document.getElementById('setTgSmc'),
   autotrade_zones_zm: document.getElementById('setAutotradeZonesZm'),
   telegram_alerts_zones_zm: document.getElementById('setTgZonesZm'),
 };
@@ -42111,6 +42827,10 @@ const setValueInputs = {
   risk_pct_prv: document.getElementById('setRiskPctPrv'),
   risk_pct_zones: document.getElementById('setRiskPctZones'),
   risk_pct_zm: document.getElementById('setRiskPctZm'),
+  risk_pct_emw: document.getElementById('setRiskPctEmw'),
+  risk_pct_rbx: document.getElementById('setRiskPctRbx'),
+  risk_pct_cas: document.getElementById('setRiskPctCas'),
+  risk_pct_smc: document.getElementById('setRiskPctSmc'),   // v0.99.678 — these number fields were in the checkbox map: a typed risk was sent as false and reset to the default
   zones_tp_pct: document.getElementById('setZonesTpPct'),
   zones_max_days: document.getElementById('setZonesMaxDays'),
   snr_top_n: document.getElementById('setSnrTopN'),
@@ -43596,6 +44316,7 @@ if __name__ == "__main__":
     threading.Thread(target=prx_loop, daemon=True).start()
     threading.Thread(target=rbx_loop, daemon=True).start()   # v0.99.625 — 📈 range breakout
     threading.Thread(target=cas_loop, daemon=True).start()   # v0.99.653 — 🌊 EMA cascade
+    threading.Thread(target=smc_loop, daemon=True).start()   # v0.99.678 — 🧱 SMC levels
     threading.Thread(target=hdg_loop, daemon=True).start()   # v0.99.628 — 🪞 hedge mirror
     threading.Thread(target=model_refresh_loop, daemon=True).start()   # v0.99.636 — retrained models from the repo, daily
     threading.Thread(target=auto_update_loop, daemon=True).start()   # v0.99.637 — a new version on GitHub -> /update by itself

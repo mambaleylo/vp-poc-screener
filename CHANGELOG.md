@@ -20239,3 +20239,23 @@ v0.99.677 - Зоны: the NOT result post (red price-range label "0,0000207 (5,6
          other chart screenshots recognise as before (45 landscape + 143 phone screenshots compared old vs new;
          two phone screenshots of other apps with coloured price tags now read as a result post instead of junk
          zones). tools/zones_model/t_result_arrow.py.
+v0.99.678 - 🧱 SMC — a new module (the user: "пробуем разные варианты индикаторов новых… пока не будет индикатор лучше
+         чем любой из наших", then "регулярные сделки… хотя бы 10-15 сделок в месяц, но и по винрейту чтобы хорошо").
+         The hunt (tools/new_ind, an honest yearly walk-forward on the bot's 127 coins + 84 check coins never trained
+         on): prev day / week / month levels, period opens, SMA / Bollinger 1d-1w; OI / funding / crowd / taker /
+         residual-vs-BTC / volume-climax triggers; 12 classic indicators on 4h and 1d (Supertrend, PSAR, Ichimoku,
+         MACD, RSI divergence, Stoch, ADX, Heikin-Ashi, NR7, CCI, Bollinger, Keltner); a calm-market model; and SMC
+         levels. None beats 📐 EMA alone; only the SMC levels held on both sets: unfilled FVG on 4h / 1d / 1w,
+         untouched swing lows / highs on 1d / 1w, order blocks on 4h / 1d — the model's top 1% of first touches, a
+         limit at the level, stop 1 daily ATR, take 3R, 72 h: ~10 trades a month, +0.67R, WR 59%, every year
+         2022–26 in plus (2025 the weakest: +0.22R), check coins +0.58R; the longest losing run 23 (losses come in
+         bursts too). Why the batches: the good signals of every family come when the whole market moves; the best
+         signals of every day instead give +0.1–0.25R at WR ~47%. EMA / P/R trade in ~20% of the weeks, SMC in 37%;
+         EMA + P/R + SMC at a quarter of EMA's risk: 22 trades a month instead of 12, a trade in 55% of the weeks, the
+         growth at an equal 1-in-10 drawdown x54/yr vs x48/yr. Default risk 0.25% (the "🧱" field); virtual until the
+         "↳ 🧱 SMC" autotrade switch. The deployed model is the 2026 walk-forward one with its walk-forward threshold
+         (the final model's in-sample threshold would have let ~5x fewer trades); the bot's pure-Python levels and
+         features equal the research engine's (120 events), and it re-makes the 2026 backtest trades to the R.
+         Fix: the risk fields of 📐 EMA, 📈 Breakout and 🌊 Cascade were wired as switches in the settings page — a
+         typed risk was sent as "false" and reset to the module's default (0.5%); now number fields, and a stray
+         "false" never resets a risk. t_smc_parity.py, t_smc_bot.py, t_smc_ui.py.
