@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.668"
+APP_VERSION = "0.99.669"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30209,7 +30209,7 @@ EMX_TF_NAME = {"4h": "4ч", "1d": "день", "1w": "неделя", "1M": "ме�
 EMX_TOP = int(os.environ.get("VP_EMX_TOP", "120"))
 EMX_RISK_DEFAULT = 0.5      # % when the EMA module's own risk field is empty — never the common risk (many at once)
 EMX_FEE, EMX_FUND = 0.001, 0.0003
-EMX_POLL_SEC = 30
+EMX_POLL_SEC = 10   # v0.99.669 — 10 s: the market entry after Binance's wick loses ~0.2R a minute of delay
 _EMX = {"model": None, "err": None, "armed": [], "armed_at": None, "trades": [], "loaded": False, "scan": None}
 _emx_lock = threading.Lock()
 
@@ -30572,7 +30572,7 @@ def _emx_can_open(sym, side):
     return sum(1 for t in opn if t["side"] == side) < int(m.get("side_cap") or 12)
 
 
-def emx_fire(a, t_touch, live_px=None):
+def emx_fire(a, t_touch, live_px=None, how=None):
     """a touch of an armed level: the signal (and the real order when the switch is on)"""
     if not _emx_can_open(a["symbol"], a["side"]):
         return
@@ -30584,8 +30584,11 @@ def emx_fire(a, t_touch, live_px=None):
           "status": "OPEN", "result": None,
           "r": None, "exit": None, "t_out": None, "real": False, "live_px": live_px, "sel": emx_coin_ok(a["symbol"]), "rv": EMX_MODEL_VER,
           "px": live_px or a["lv"], "part_r": float(m.get("rule", {}).get("part_r") or 0), "part_f": float(m.get("rule", {}).get("part_f") or 0),
-          "part_done": False, "part": False}
-    if AUTOTRADE_ENABLED_EMW and live_px and tr["sel"]:
+          "part_done": False, "part": False, "trig": how}
+    risk_plan = abs(a["lv"] - a["sl"]) or 1e-12
+    if live_px and a["side"] * (live_px - a["lv"]) > risk_plan:   # v0.99.669 — Gate's price a whole R worse than the limit: no real trade
+        tr["late"] = round(a["side"] * (live_px - a["lv"]) / risk_plan, 2)
+    if AUTOTRADE_ENABLED_EMW and live_px and tr["sel"] and not tr.get("late"):
         try:
             risk = MODULE_RISK_PCT.get("emw") or EMX_RISK_DEFAULT
             res = execute_autotrade("emw", a["symbol"], direction, live_px, a["sl"], a["tp"], extra={"ema": f"{a['tf']} {a['n']}"},
@@ -30604,11 +30607,13 @@ def emx_fire(a, t_touch, live_px=None):
         send_telegram(f"{'🟢' if a['side'] > 0 else '🔴'} {a['symbol'].replace('_USDT', '')} {direction} · EMA {a['n']} ({EMX_TF_NAME[a['tf']]}) — " + (f"лимитка за EMA ({a['ema']:.6g})" if a.get("ema") and a["ema"] != a["lv"] else "касание") + "\n"
                       f"вход {a['lv']:.6g} · стоп {a['sl']:.6g} ({pct(a['sl']):+.1f}%) · тейк {a['tp']:.6g} ({pct(a['tp']):+.1f}%) · держать до {int(m.get('rule', {}).get('hold_h', 24))} ч\n"
                       + (f"на {a['lv'] + a['side'] * tr['part_r'] * abs(a['lv'] - a['sl']):.6g} закрыть {round(tr['part_f'] * 100)}% и стоп в безубыток\n" if tr["part_r"] else "") +
-                      f"оценка модели {a['score']} · " + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"), category="emw")
+                      f"оценка модели {a['score']} · " + ("💰 сделка на бирже" if tr["real"] else (f"без сделки: цена на Gate уже на {tr['late']}R от лимитки" if tr.get("late") else "без сделки (только сигнал)"))
+                      + (" · касание по Binance" if how == "binance" else ""), category="emw")
 
 
 def emx_watch_tick():
-    """every 30 s: the armed levels of this hour against the price"""
+    """every EMX_POLL_SEC: the armed levels of this hour against the price (Gate's last price or, v0.99.669, Binance's
+    1-min wick — the deep limit lives on wicks; the trade is opened at Gate's market)"""
     with _emx_lock:
         armed, hour = list(_EMX["armed"]), _EMX["armed_at"]
     now = time.time()
@@ -30622,8 +30627,9 @@ def emx_watch_tick():
             pass
     for a in armed:
         p = px.get(a["symbol"])
-        if p and ((p <= a["lv"]) if a["side"] > 0 else (p >= a["lv"])):
-            emx_fire(a, now, p)
+        how = limit_touched(a["symbol"], a["side"], a["lv"], p, hour)
+        if how and p:
+            emx_fire(a, now, p, how)
 
 
 def emx_settle(now=None):
@@ -30636,7 +30642,8 @@ def emx_settle(now=None):
         for a in armed:
             try:
                 cs = [c for c in (get_candles_range(a["symbol"], "1h", hour, hour) or []) if c["time"] == hour]
-                if cs and ((cs[0]["low"] <= a["lv"]) if a["side"] > 0 else (cs[0]["high"] >= a["lv"])):
+                bn = [c for c in (binance_klines(a["symbol"], "1h", hour, hour) or []) if c["time"] == hour]   # v0.99.669 — the backtests' exchange
+                if any(((c["low"] <= a["lv"]) if a["side"] > 0 else (c["high"] >= a["lv"])) for c in cs + bn):
                     emx_fire(a, hour)
             except Exception as e:
                 log_error(f"ema settle {a['symbol']}: {e}")
@@ -31467,9 +31474,11 @@ def nx_watch_tick():
             pass
     for t in todo:
         p = px.get(t["symbol"]); s = t["side"]
-        if not p or not ((p <= t["lv"]) if s > 0 else (p >= t["lv"])):
+        how = limit_touched(t["symbol"], s, t["lv"], p, t["hour"]) if p else None
+        if not how or s * (p - t["lv"]) > float(t.get("risk") or 0):   # v0.99.669: Binance's wick too; not > 1R past the limit
             continue
         with _nx_lock:
+            t["trig"] = how
             t["rt"] = True
         risk = t["risk"]
         try:
@@ -31938,6 +31947,52 @@ def binance_klines(symbol, interval, start, end):
     return []
 
 
+_BN_REC, _BN_MISS = {}, {}
+
+
+def binance_recent(symbol, since):
+    """v0.99.669 — (low, high) of Binance's USDT-M 1-min candles from `since` (the last 3 minutes at most), in the Gate
+    contract's prices (1000-coins divided). The backtests' fills are Binance's candles: the user — "проверку на Binance
+    делать, исполнять у нас" — a limit is reached when Binance's wick reaches it, the trade is opened at Gate's market.
+    None when Binance does not answer / has no such coin (then only Gate's price counts)."""
+    now = time.time()
+    if _BN_MISS.get(symbol, 0) > now:
+        return None
+    key = (symbol, int(now // 8))
+    if key in _BN_REC:
+        rows = _BN_REC[key]
+    else:
+        rows, base = None, symbol.replace("_USDT", "")
+        for sym, scl in ((base + "USDT", 1.0), ("1000" + base + "USDT", 1000.0)):
+            try:
+                r = requests.get("https://fapi.binance.com/fapi/v1/klines", params={"symbol": sym, "interval": "1m", "limit": 3}, timeout=6)
+                if r.status_code != 200:
+                    continue
+                rows = [(int(k[0]) // 1000, float(k[3]) / scl, float(k[2]) / scl) for k in r.json()]
+                break
+            except Exception as e:
+                log_error(f"binance 1m {sym}: {e}")
+                break
+        if rows is None:
+            _BN_MISS[symbol] = now + 3600
+        if len(_BN_REC) > 5000:
+            _BN_REC.clear()
+        _BN_REC[key] = rows
+    sel = [x for x in (rows or []) if x[0] + 60 > since]
+    return (min(x[1] for x in sel), max(x[2] for x in sel)) if sel else None
+
+
+def limit_touched(symbol, side, lv, gate_px, since):
+    """v0.99.669 — has a limit at lv been reached: Gate's last price, or Binance's 1-min wick since `since`.
+    -> "gate" / "binance" / None"""
+    if gate_px and ((gate_px <= lv) if side > 0 else (gate_px >= lv)):
+        return "gate"
+    bn = binance_recent(symbol, max(since, time.time() - 200))
+    if bn and ((bn[0] <= lv) if side > 0 else (bn[1] >= lv)):
+        return "binance"
+    return None
+
+
 _BN_LS = {}
 
 
@@ -32261,9 +32316,11 @@ def prx_watch_tick():
             pass
     for t in todo:
         p = px.get(t["symbol"]); s = t["side"]
-        if not p or not ((p <= t["lv"]) if s > 0 else (p >= t["lv"])):
+        how = limit_touched(t["symbol"], s, t["lv"], p, t["hour"]) if p else None
+        if not how or s * (p - t["lv"]) > float(rule.get("stop_atr") or 3) * float(t.get("atr") or 0):   # v0.99.669: Binance's wick too
             continue
         with _prx_lock:
+            t["trig"] = how
             t["rt"] = True
         a = float(t["atr"]); soft = float(rule["stop_atr"]) * a
         hs = p - s * (float(rule["hard_atr"]) * a if rule.get("hard_atr") else soft); tp = p + s * float(rule["take_r"]) * soft
@@ -33127,9 +33184,11 @@ def rbx_watch_tick():
             pass
     for t in todo:
         p = px.get(t["symbol"]); s = t["side"]
-        if not p or not ((p <= t["lv"]) if s > 0 else (p >= t["lv"])):
+        how = limit_touched(t["symbol"], s, t["lv"], p, t["day"]) if p else None
+        if not how or s * (p - t["lv"]) > float(t.get("risk") or 0):   # v0.99.669: Binance's wick too; not > 1R past the limit
             continue
         with _rbx_lock:
+            t["trig"] = how
             t["rt"] = True
         risk = t["risk"]; sl = p - s * risk
         tp = p + 40 * risk if s > 0 else max(p - 40 * risk, p * 0.05)

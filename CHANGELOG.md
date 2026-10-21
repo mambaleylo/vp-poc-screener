@@ -20172,3 +20172,12 @@ v0.99.668 - The user's IO EMA backtest trade "входа не вижу": the bac
          breakout (up to the fill bar). On Binance ~19% of the EMA trades filled within 0.3% of the limit and they are
          no better than the rest (+1.07R vs ~+1.0R), so shorter wicks on Gate mean fewer trades, not worse ones; the
          "🔁 сверить с Gate (12 мес)" check of the backtest list counts the limits Gate would not have filled.
+v0.99.669 - The user: "исполнять по рынку такие сделки, проверку на Binance делать, исполнять у нас". The limit entries
+         (📐 EMA, P/R, 🧠 Neuro, 📈 Breakout) are now reached when Gate's last price OR Binance's 1-min wick (the last
+         2–3 min) gets to the limit — the backtests' fills are Binance's candles — and the trade is opened at Gate's
+         market. EMA checks every 10 s (was 30 s); no real trade when Gate's price is already more than 1R past the
+         limit (Telegram says so). The EMA virtual record also counts Binance's touch-hour candle. What to expect for
+         EMA (tools/ema_model/emx_mkt.py, Binance 1-min candles of every backtest trade): the limit +1.00R a trade; at
+         the market at the touch minute's close +0.66R (WR 82%), 1 min later +0.49R, 2–5 min later +0.44…+0.50R
+         (the check set +0.56R / +0.43R / +0.32R / +0.21…+0.28R) — fewer R than the limit but no missed trades when
+         Gate's wick is shorter. Without an answer from Binance only Gate's price counts. t_bn_trigger.py: 5/5.
