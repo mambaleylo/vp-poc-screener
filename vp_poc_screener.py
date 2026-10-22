@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.682"
+APP_VERSION = "0.99.683"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1156,7 +1156,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones", "risk_pct_zm", "risk_pct_rbx", "rbx_enabled", "autotrade_rbx", "telegram_alerts_rbx", "rbx_part",
                   "cas_enabled", "autotrade_cas", "telegram_alerts_cas", "risk_pct_cas",   # v0.99.653
                   "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
-                  "dlm_enabled", "autotrade_dlm", "telegram_alerts_dlm", "risk_pct_dlm",   # v0.99.679
+                  "dlm_enabled", "autotrade_dlm", "telegram_alerts_dlm", "risk_pct_dlm", "dlm_single",   # v0.99.679, v0.99.683
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
@@ -1240,6 +1240,7 @@ def get_settings():
         "cas_enabled": CAS_ENABLED, "autotrade_cas": AUTOTRADE_ENABLED_CAS, "telegram_alerts_cas": TELEGRAM_ALERTS_CAS, "risk_pct_cas": MODULE_RISK_PCT.get("cas"),   # v0.99.653
         "smc_enabled": SMC_ENABLED, "autotrade_smc": AUTOTRADE_ENABLED_SMC, "telegram_alerts_smc": TELEGRAM_ALERTS_SMC, "risk_pct_smc": MODULE_RISK_PCT.get("smc"),   # v0.99.678
         "dlm_enabled": DLM_ENABLED, "autotrade_dlm": AUTOTRADE_ENABLED_DLM, "telegram_alerts_dlm": TELEGRAM_ALERTS_DLM, "risk_pct_dlm": MODULE_RISK_PCT.get("dlm"),   # v0.99.679
+        "dlm_single": DLM_SINGLE,   # v0.99.683
         "autotrade_zones": AUTOTRADE_ENABLED_ZONES,
         "autotrade_zones_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
         "zones_own_scan": ZONES_OWN_SCAN, "autotrade_zones_own": AUTOTRADE_ENABLED_ZONES_OWN,   # v0.99.452
@@ -1526,7 +1527,8 @@ def apply_settings(updates):
     for _k, _g in (("rbx_enabled", "RBX_ENABLED"), ("autotrade_rbx", "AUTOTRADE_ENABLED_RBX"), ("telegram_alerts_rbx", "TELEGRAM_ALERTS_RBX"), ("rbx_part", "RBX_PART"),
                    ("cas_enabled", "CAS_ENABLED"), ("autotrade_cas", "AUTOTRADE_ENABLED_CAS"), ("telegram_alerts_cas", "TELEGRAM_ALERTS_CAS"),
                    ("smc_enabled", "SMC_ENABLED"), ("autotrade_smc", "AUTOTRADE_ENABLED_SMC"), ("telegram_alerts_smc", "TELEGRAM_ALERTS_SMC"),
-                   ("dlm_enabled", "DLM_ENABLED"), ("autotrade_dlm", "AUTOTRADE_ENABLED_DLM"), ("telegram_alerts_dlm", "TELEGRAM_ALERTS_DLM")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
+                   ("dlm_enabled", "DLM_ENABLED"), ("autotrade_dlm", "AUTOTRADE_ENABLED_DLM"), ("telegram_alerts_dlm", "TELEGRAM_ALERTS_DLM"),
+                   ("dlm_single", "DLM_SINGLE")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
         if _k in updates:
             globals()[_g] = bool(updates[_k])
     if "zones_zm_enabled" in updates:   # v0.99.616
@@ -33636,6 +33638,12 @@ TELEGRAM_ALERTS_DLM = os.environ.get("VP_TG_ALERTS_DLM", "0") == "1"   # ~10 tra
 DLM_RISK_DEFAULT = 0.5
 DLM_MAX_LIVE_ORDERS = int(os.environ.get("VP_DLM_MAX_LIVE", "10"))   # real limits + open positions at once (v0.99.682: positions too)
 DLM_POLL_SEC = 5
+# v0.99.683 — "1 сделка за раз" (the user's plan: a big risk on one trade at a time, half withdrawn every few trades):
+# at most one position; the chosen limits stay armed in the bot and only the one the price comes within DLM_ARM_ATR of
+# goes to Gate (one order's margin is most of the account at a 40-70% risk); filled -> the rest dropped, no new ones
+# while the trade is open; the risk scaled down when the account's free margin cannot carry it.
+DLM_SINGLE = os.environ.get("VP_DLM_SINGLE", "0") == "1"
+DLM_ARM_ATR = 0.5
 DLM_FEE_IN, DLM_FEE_TAKE, DLM_FEE_OUT, DLM_FUND = 0.0002, 0.0002, 0.0005, 0.0003
 _DLM = {"model": None, "err": None, "orders": [], "trades": [], "scan": None, "bar_done": None, "loaded": False}
 _dlm_lock = threading.Lock()
@@ -33852,6 +33860,7 @@ def dlm_scan(t_bar):
     with _dlm_lock:
         busy = {(t["symbol"], t["side"]) for t in _DLM["trades"] if t["status"] == "OPEN"}
         n_open = {s: sum(1 for t in _DLM["trades"] if t["status"] == "OPEN" and t["side"] == s) for s in (1, -1)}
+        single_busy = DLM_SINGLE and any(t["status"] == "OPEN" for t in _DLM["trades"])
     new, coins, cands, best = [], 0, 0, []
     for sym in _research_syms(RESEARCH_COINS_127):
         heartbeat("dlm_loop")
@@ -33867,7 +33876,7 @@ def dlm_scan(t_bar):
                 cands += 1
                 sc = sum(zm_tree_pred(t_, c["f"]) for t_ in m["models"]) / len(m["models"])
                 best.append((sc, sym, c["side"]))
-                if sc < thr or (sym, c["side"]) in busy:
+                if sc < thr or (sym, c["side"]) in busy or single_busy:
                     continue
                 s, lv, a = c["side"], c["lv"], c["atr"]
                 if _sl_too_tight(lv, float(rule.get("stop_atr", 2.0)) * a):
@@ -33883,7 +33892,7 @@ def dlm_scan(t_bar):
     with _dlm_lock:
         _DLM["orders"].extend(new)
         _DLM["scan"] = {"t": int(time.time()), "bar": t_bar, "coins": coins, "cands": cands, "orders": len(new), "near": near, "src": src}
-    if AUTOTRADE_ENABLED_DLM:
+    if AUTOTRADE_ENABLED_DLM and not DLM_SINGLE:   # the single mode places its one order when the price comes near
         for o in new:
             if n_open.get(o["side"], 0) >= int(m.get("side_cap") or 12):
                 continue
@@ -33908,8 +33917,8 @@ def _dlm_open_trade(o, t_fill_bar, fill, real=None):
         if any(t["id"] == tr["id"] for t in _DLM["trades"]):
             return None
         _DLM["trades"].append(tr)
-        for x in _DLM["orders"]:   # the other orders of this coin & side: the research blocks them while the trade is open
-            if x["symbol"] == o["symbol"] and x["side"] == s and x["status"] == "OPEN" and x is not o:
+        for x in _DLM["orders"]:   # the other orders of this coin & side (all of them in the single mode): blocked while the trade is open
+            if (DLM_SINGLE or (x["symbol"] == o["symbol"] and x["side"] == s)) and x["status"] == "OPEN" and x is not o:
                 x["status"] = "SKIP"
         o["status"] = "FILLED"
     return tr
@@ -33926,6 +33935,7 @@ def dlm_settle(now):
     the virtual trades walked on the 15m candles — the stop first, no take in the fill bar, out after 16 bars"""
     with _dlm_lock:
         orders = [o for o in _DLM["orders"] if o["status"] == "OPEN" and not (o.get("real") or {}).get("id")]
+    orders.sort(key=lambda o: o["t0"])
     for o in orders:
         try:
             cs = [c for c in (get_candles_range(o["symbol"], "15m", o["t0"], min(int(now), o["until"])) or [])
@@ -33933,9 +33943,11 @@ def dlm_settle(now):
             hit = next((c for c in cs if ((c["low"] <= o["lv"]) if o["side"] > 0 else (c["high"] >= o["lv"]))), None)
             if hit:
                 with _dlm_lock:
-                    taken = any(t["symbol"] == o["symbol"] and t["side"] == o["side"] and t["status"] == "OPEN" for t in _DLM["trades"])
+                    taken = any(t["status"] == "OPEN" and (DLM_SINGLE or (t["symbol"] == o["symbol"] and t["side"] == o["side"])) for t in _DLM["trades"])
                 if taken:
                     o["status"] = "SKIP"
+                elif DLM_SINGLE and AUTOTRADE_ENABLED_DLM:
+                    o["status"] = "MISSED"   # the single mode trades for real: a limit that never went to Gate is no trade
                 else:
                     fill = min(o["lv"], hit["open"]) if o["side"] > 0 else max(o["lv"], hit["open"])
                     _dlm_open_trade(o, hit["time"], fill)
@@ -34005,6 +34017,12 @@ def dlm_real_place(o):
         margin, lev, skip = compute_risk_based_position(direction, o["lv"], sl, cap, mmr, equity, risk_pct=risk, symbol=sym,
                                                         tiers_by_symbol={sym: tiers} if tiers else None)
         contracts = 0
+        if not skip and margin and DLM_SINGLE:   # v0.99.683 — a big risk: the margin within the free balance, the risk scaled down
+            free = get_futures_wallet_balance()
+            if free and margin > free * 0.9:
+                risk = round(risk * free * 0.9 / margin, 2)
+                margin, lev, skip = compute_risk_based_position(direction, o["lv"], sl, cap, mmr, equity, risk_pct=risk, symbol=sym,
+                                                                tiers_by_symbol={sym: tiers} if tiers else None)
         if not skip:
             contracts, _n, _m, skip = compute_contracts_from_margin(sym, o["lv"], margin, lev)
         if skip or not contracts:
@@ -34047,6 +34065,43 @@ def _dlm_place_exits(t):
             log_error(f"dlm take limit {sym}: {e} — a trigger instead")
             o = place_close_trigger_order(sym, d, round_to_tick_directional(t["tp"], tick, round_up=(s > 0)), 1 if s > 0 else 2, tick)
             r["tp_id"], r["tp_kind"] = str((o or {}).get("id") or "") or None, "trigger"
+
+
+def dlm_single_arm():
+    """v0.99.683 — the single mode: no position and no order on Gate -> the armed limit the price came nearest to (within
+    DLM_ARM_ATR x ATR) goes to Gate"""
+    now = time.time()
+    with _dlm_lock:
+        if any(t["status"] == "OPEN" for t in _DLM["trades"]) or any((o.get("real") or {}).get("id") and o["status"] == "OPEN" for o in _DLM["orders"]):
+            return
+        armed = [o for o in _DLM["orders"] if o["status"] == "OPEN" and not o.get("real") and o["t0"] <= now < o["until"]]
+    if not armed:
+        return
+    px = {}
+    for t in get_tickers() or []:
+        try:
+            px[t["contract"]] = float(t.get("last") or 0)
+        except (TypeError, ValueError):
+            pass
+    near = []
+    for o in armed:
+        p = px.get(o["symbol"])
+        if p and o["atr"] > 0:
+            d = o["side"] * (p - o["lv"]) / o["atr"]   # how far the price still is from the limit, in ATR
+            if d <= DLM_ARM_ATR:
+                near.append((d, o))
+    if not near:
+        return
+    near.sort(key=lambda x: (x[0], -x[1]["score"]))
+    d, o = near[0]
+    if d < -0.5:
+        o["status"] = "SKIP"   # already well past the level (the bot was busy / off): no chase
+        return
+    try:
+        dlm_real_place(o)
+        dlm_save()
+    except Exception as e:
+        log_error(f"dlm single place {o['symbol']}: {e}")
 
 
 def dlm_real_tick():
@@ -34192,6 +34247,8 @@ def dlm_loop():
                 if AUTOTRADE_ENABLED_DLM:
                     with live_http():
                         dlm_real_tick()
+                        if DLM_SINGLE:
+                            dlm_single_arm()
         except Exception as e:
             log_error(f"dlm_loop: {e}")
             with _dlm_lock:
@@ -34210,7 +34267,7 @@ def dlm_stats():
     t0 = min((t["t_in"] for t in trades), default=None)
     days = max(1.0, (time.time() - t0) / 86400) if t0 else None
     real = [t for t in fin if t.get("real")]
-    return {"on": DLM_ENABLED, "auto": AUTOTRADE_ENABLED_DLM, "tg": TELEGRAM_ALERTS_DLM, "dry": AUTOTRADE_DRY_RUN,
+    return {"on": DLM_ENABLED, "auto": AUTOTRADE_ENABLED_DLM, "tg": TELEGRAM_ALERTS_DLM, "dry": AUTOTRADE_DRY_RUN, "single": DLM_SINGLE,
             "risk": MODULE_RISK_PCT.get("dlm") or DLM_RISK_DEFAULT,
             "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap")} if m else None,
             "err": err, "scan": scan, "orders": orders[:40], "orders_n": len(orders),
@@ -38452,6 +38509,13 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setTgDlm"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ ⚡ Одна сделка за раз</div>
+          <div class="sub">для большого риска (40–70%): одна позиция; лимитка уходит на Gate, когда цена подошла к ней на 0.5 ATR; исполнилась — остальные снимаются, новых нет, пока сделка открыта; не хватает свободной маржи — риск уменьшается. Вывод — сам, по плану во вкладке</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setDlmSingle"><span class="switchSlider"></span></label>
+      </div>
     </div></details>
 
     <details class="settingsGroup" style="--mod-color:#a1887f;"><summary class="settingsGroupTitle">🧱 SMC</summary><div class="settingsGroupBody">
@@ -42284,7 +42348,8 @@ async function refreshDlm() {   // v0.99.679 — ⚡ 15m deep limits: many small
   const coin = s => (s || '').replace('_USDT', '');
   const hm = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
   const m = d.model, rs = (m && m.research) || {}, rule = (m && m.rule) || {};
-  const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? `<span class="pill pos">${d.dry ? 'торгует (dry-run)' : 'торгует'}</span>` : '<span class="pill">виртуально</span>');
+  const pill = (d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? `<span class="pill pos">${d.dry ? 'торгует (dry-run)' : 'торгует'}</span>` : '<span class="pill">виртуально</span>'))
+    + (d.single ? ' <span class="pill">1 сделка за раз</span>' : '');
   let top = `<div class="dim hintx">Каждые 15 минут модель смотрит все ${rs.coins || 127} монет и в лучших ~${m && m.q ? +((1 - m.q) * 100).toFixed(0) : 2}% моментов ставит лимитку на ${rule.depth_atr || 2} ATR(15м) от цены — ловит прострел. Лимитка живёт ${rule.alive_bars || 4} свечи (час). Исполнилась — тейк ${rule.take_atr || 0.5} ATR, стоп ${rule.stop_atr || 2} ATR, через ${(rule.hold_bars || 16) / 4} ч выход. Тейк маленький, поэтому винрейт высокий; плюс на сделку небольшой.</div>`;
   if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
   else {
@@ -43663,6 +43728,7 @@ const setInputs = {
   dlm_enabled: document.getElementById('setDlm'),   // v0.99.679
   autotrade_dlm: document.getElementById('setAutotradeDlm'),
   telegram_alerts_dlm: document.getElementById('setTgDlm'),
+  dlm_single: document.getElementById('setDlmSingle'),   // v0.99.683
   autotrade_smc: document.getElementById('setAutotradeSmc'),
   telegram_alerts_smc: document.getElementById('setTgSmc'),
   autotrade_zones_zm: document.getElementById('setAutotradeZonesZm'),

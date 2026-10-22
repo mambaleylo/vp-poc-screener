@@ -20294,3 +20294,9 @@ v0.99.681 - Signals from Binance's candles, trades on Gate (the user: "можн�
 v0.99.682 - ⚡ Лимитки 15м: the cap of 10 now counts the open positions too, not only the limits waiting on the
          exchange — in a crash the fills could pile up to ~20 positions at once (the risk table for the user's $100
          at 3% was computed with at most 10 at once).
+v0.99.683 - ⚡ Лимитки 15м: "Одна сделка за раз" mode (the user: "1 сделка за раз добавь режим"). The signals are
+         still scored at every 15m close, but a limit goes to Gate only when the price is within 0.5 ATR of it, one
+         order and one position at a time; a fill drops the other armed limits, no new ones while a trade is open, the
+         risk is scaled down to fit the free margin, and a limit the price ran past is dropped (no chasing). With
+         autotrade on, a virtual touch of a limit never placed is counted as missed, not as a trade.
+         tools/winrate/t_dlm_single.py.
