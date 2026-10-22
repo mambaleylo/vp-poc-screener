@@ -31,6 +31,7 @@ import queue
 import hmac
 import hashlib
 import bisect
+import array   # v0.99.681 — ⚡ compact Binance bars in memory
 import calendar   # v0.99.678 — 🧱 SMC: month / year starts
 import io
 import itertools
@@ -64,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.680"
+APP_VERSION = "0.99.681"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1160,7 +1161,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
                   "zones_zm_enabled", "autotrade_zones_zm", "telegram_alerts_zones_zm",   # v0.99.616
-                  "telegram_alerts_trade_results", "telegram_trade_results_real_only", "auto_update",
+                  "telegram_alerts_trade_results", "telegram_trade_results_real_only", "auto_update", "research_binance",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
@@ -1248,6 +1249,7 @@ def get_settings():
         "telegram_alerts_trade_results": TELEGRAM_ALERTS_TRADE_RESULTS,   # v0.99.457
         "telegram_trade_results_real_only": TELEGRAM_TRADE_RESULTS_REAL_ONLY,
         "auto_update": AUTO_UPDATE,   # v0.99.637
+        "research_binance": RESEARCH_SOURCE_BINANCE,   # v0.99.681
         "telegram_alerts_zones": TELEGRAM_ALERTS_ZONES,
         "zones_tp_pct": ZONES_TP_PCT,
         "zones_max_days": ZONES_MAX_DAYS,
@@ -1519,6 +1521,8 @@ def apply_settings(updates):
         globals()["TELEGRAM_TRADE_RESULTS_REAL_ONLY"] = bool(updates["telegram_trade_results_real_only"])
     if "auto_update" in updates:   # v0.99.637
         globals()["AUTO_UPDATE"] = bool(updates["auto_update"])
+    if "research_binance" in updates:   # v0.99.681
+        globals()["RESEARCH_SOURCE_BINANCE"] = bool(updates["research_binance"])
     for _k, _g in (("rbx_enabled", "RBX_ENABLED"), ("autotrade_rbx", "AUTOTRADE_ENABLED_RBX"), ("telegram_alerts_rbx", "TELEGRAM_ALERTS_RBX"), ("rbx_part", "RBX_PART"),
                    ("cas_enabled", "CAS_ENABLED"), ("autotrade_cas", "AUTOTRADE_ENABLED_CAS"), ("telegram_alerts_cas", "TELEGRAM_ALERTS_CAS"),
                    ("smc_enabled", "SMC_ENABLED"), ("autotrade_smc", "AUTOTRADE_ENABLED_SMC"), ("telegram_alerts_smc", "TELEGRAM_ALERTS_SMC"),
@@ -30068,7 +30072,118 @@ def zm_score(m, x):
     return sum(zm_tree_pred(t, x) for t in m["models"]) / len(m["models"])
 
 
+# v0.99.681 — the signal from Binance, the trade on Gate (the user: "можно же обучаться по Бинансу, а реальные лимитки
+# ставить уже по Gate… так же и по другим индикаторам"): every model of the bot learned on Binance's candles (prices,
+# wicks, quote volume), the bot read Gate's. The research modules' closed candles (_zm_closed: 📐 EMA, P/R, 🧠 Neuro,
+# 🌊 Cascade, 🧱 SMC, 🎯 strong zones, 📈 breakout, ⚡ 15m limits) now come from Binance — kept in memory as compact
+# columns, filled once and then topped up with the new bars; Gate's candles when Binance has no such coin or does not
+# answer. Entries, limits, stops and the trades' records stay on Gate.
+RESEARCH_SOURCE_BINANCE = os.environ.get("VP_RESEARCH_BINANCE", "1") == "1"
+_BNC = {}
+_bnc_lock = threading.Lock()
+_bnc_rate = threading.Lock()
+_bnc_state = {"next": 0.0, "ban": 0.0, "calls": 0, "fails": 0}
+
+
+def _bnc_get(bsym, interval, start, end, limit):
+    """one klines call under a shared pace (~1200 weight / min, Binance allows 2400); None = no answer, False = no such symbol"""
+    w = 1 if limit < 100 else (2 if limit < 500 else (5 if limit <= 1000 else 10))
+    with _bnc_rate:
+        now = time.time()
+        if _bnc_state["ban"] > now:
+            return None
+        if _bnc_state["next"] > now:
+            time.sleep(_bnc_state["next"] - now)
+        _bnc_state["next"] = time.time() + w / 20.0   # ~1200 weight / min: room for the bot's other Binance calls
+    try:
+        r = requests.get("https://fapi.binance.com/fapi/v1/klines", params={"symbol": bsym, "interval": interval, "startTime": int(start) * 1000,
+                                                                           "endTime": int(end) * 1000, "limit": limit}, timeout=15)
+    except Exception:
+        _bnc_state["fails"] += 1
+        return None
+    _bnc_state["calls"] += 1
+    if r.status_code in (418, 429):
+        _bnc_state["ban"] = time.time() + 300   # rate-limited: Gate's candles for 5 min
+        return None
+    if r.status_code != 200:
+        return False   # no such symbol
+    return r.json()
+
+
+def bn_closed(symbol, interval, sec, n, now):
+    """the last n CLOSED Binance bars before `now` of a Gate contract (1000-coins divided, quote volume), or None"""
+    key = (symbol, interval)
+    with _bnc_lock:
+        c = _BNC.get(key)
+    if c is not None and c.get("miss", 0) > now:
+        return None
+    try:
+        if c is None or (len(c["cols"][0]) < n and not c.get("full")):
+            base = symbol.replace("_USDT", "")
+            cands = ((c["bsym"], c["scl"]),) if c else ((base + "USDT", 1.0), ("1000" + base + "USDT", 1000.0))
+            got = None
+            for bsym, scl in cands:
+                rows, end, full = [], int(now), False
+                while len(rows) < n + 2:
+                    part = _bnc_get(bsym, interval, end - 1500 * sec, end, 1500)
+                    if part is None:
+                        return None   # Binance not answering: Gate this time, retried next time
+                    if not part:
+                        full = bool(rows)
+                        break
+                    rows = part + rows
+                    end = int(part[0][0]) // 1000 - 1
+                    if len(part) < 1500:
+                        full = True
+                        break
+                if rows:
+                    got = (bsym, scl, rows, full)
+                    break
+            if not got:
+                with _bnc_lock:
+                    _BNC[key] = {"miss": now + 6 * 3600}
+                return None
+            bsym, scl, rows, full = got
+            c = {"bsym": bsym, "scl": scl, "full": full, "cols": [array.array("q"), array.array("d"), array.array("d"), array.array("d"), array.array("d"), array.array("d")]}
+        else:
+            T0 = c["cols"][0]
+            if T0 and T0[-1] + 2 * sec > now:
+                rows = []   # nothing new closed yet
+            else:
+                rows = _bnc_get(c["bsym"], interval, (T0[-1] + sec) if T0 else int(now) - n * sec, int(now), 1500)
+                if rows is None:
+                    return None
+                rows = rows or []
+        T, O, H, L, C, V = c["cols"]
+        scl = c["scl"]
+        for k in rows:
+            t = int(k[0]) // 1000
+            if t + sec > now or (T and t <= T[-1]):
+                continue   # the forming bar / kept already
+            T.append(t); O.append(float(k[1]) / scl); H.append(float(k[2]) / scl); L.append(float(k[3]) / scl); C.append(float(k[4]) / scl); V.append(float(k[7]))
+        keep = max(n, c.get("n", 0))
+        c["n"] = keep
+        if len(T) > keep + 300:
+            for col in c["cols"]:
+                del col[:len(col) - keep]
+        with _bnc_lock:
+            _BNC[key] = c
+    except Exception as e:
+        log_error(f"binance candles {symbol} {interval}: {e}")
+        return None
+    T, O, H, L, C, V = c["cols"]
+    j = bisect.bisect_right(T, int(now) - sec)   # the bars closed by `now` (a caller may ask for an earlier moment)
+    i0 = max(0, j - n)
+    if j == 0 or (j - i0 < n and not c.get("full")):
+        return None   # not enough kept for that moment: Gate's candles
+    return [{"time": T[i], "open": O[i], "high": H[i], "low": L[i], "close": C[i], "volume": V[i], "bn": 1} for i in range(i0, j)]
+
+
 def _zm_closed(sym, tf, sec, n, now):
+    if RESEARCH_SOURCE_BINANCE:   # v0.99.681 — Binance first (the models' own candles), Gate as the fallback
+        b = bn_closed(sym, tf, sec, n, now)
+        if b and b[-1]["time"] + 2 * sec > now:
+            return b
     cs = get_candles_range(sym, tf, int(now) - (n + 2) * sec, int(now)) or []
     return [c for c in cs if c["time"] + sec <= now][-n:]
 
@@ -33716,6 +33831,10 @@ def dlm_save():
 
 
 def _dlm_closed(sym, tf, sec, n, now):
+    return _zm_closed(sym, tf, sec, n, now)   # v0.99.681 — Binance first
+
+
+def _dlm_closed_gate(sym, tf, sec, n, now):
     cs = get_candles_range(sym, tf, int(now) - (n + 2) * sec, int(now)) or []
     return [c for c in cs if c["time"] + sec <= now][-n:]
 
@@ -33729,6 +33848,7 @@ def dlm_scan(t_bar):
     rule = m.get("rule") or {}
     bb15 = _dlm_closed("BTC_USDT", "15m", 900, 400, t_bar)
     thr = float(m["thr"])
+    src = {"binance": 0, "gate": 0}
     with _dlm_lock:
         busy = {(t["symbol"], t["side"]) for t in _DLM["trades"] if t["status"] == "OPEN"}
         n_open = {s: sum(1 for t in _DLM["trades"] if t["status"] == "OPEN" and t["side"] == s) for s in (1, -1)}
@@ -33740,6 +33860,7 @@ def dlm_scan(t_bar):
             if not b15 or b15[-1]["time"] != t_bar - 900:
                 continue   # the bar just closed is missing
             d1 = _dlm_closed(sym, "1d", 86400, 400, t_bar)
+            src["binance" if b15[-1].get("bn") else "gate"] += 1
             cs = dlm_candidates(b15, d1, bb15)
             coins += 1
             for c in cs:
@@ -33761,7 +33882,7 @@ def dlm_scan(t_bar):
     near = [{"symbol": s_, "side": sd, "pct": round(100 * sc / thr) if thr > 0 else None} for sc, s_, sd in best[:8]]
     with _dlm_lock:
         _DLM["orders"].extend(new)
-        _DLM["scan"] = {"t": int(time.time()), "bar": t_bar, "coins": coins, "cands": cands, "orders": len(new), "near": near}
+        _DLM["scan"] = {"t": int(time.time()), "bar": t_bar, "coins": coins, "cands": cands, "orders": len(new), "near": near, "src": src}
     if AUTOTRADE_ENABLED_DLM:
         for o in new:
             if n_open.get(o["side"], 0) >= int(m.get("side_cap") or 12):
@@ -38515,6 +38636,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">Сигналы по свечам Binance</div>
+          <div class="sub">модели (📐 EMA, P/R, 🧠 Нейро, 🌊 Каскад, 🧱 SMC, 🎯 зоны, 📈 пробой, ⚡ лимитки) учились на свечах Binance — по ним и считаются сигналы; входы, лимитки, стопы и учёт сделок — на Gate. Монета, которой нет на Binance, или Binance не отвечает — свечи Gate</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setResearchBinance"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Нестабильность сети</div>
           <div class="sub">разово, когда за 10 минут накопилось 5+ сетевых ошибок (Read timed out / ConnectionError) — не про открытые позиции, только про сбор данных</div>
         </div>
@@ -42170,7 +42298,8 @@ async function refreshDlm() {   // v0.99.679 — ⚡ 15m deep limits: many small
   const sc = d.scan, ords = d.orders || [];
   const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;">
       <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.lv != null ? fmtNum(a.lv) + (a.px ? ' · ' + ((a.lv - a.px) / a.px * 100).toFixed(1) + '%' : '') : (a.pct != null ? a.pct + '%' : '')}${(a.real || {}).id ? ' · 💰' : ''}</span></span>`;
-  h += card('🔎 Сейчас', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, 'монет · последняя 15м свеча')}${tile('лимиток', d.orders_n || 0, 'ждут прострела')}${tile('сделок', (d.open || []).length, 'открыто')}</div>
+  const srcTxt = sc && sc.src ? (sc.src.gate ? `свечи Binance ${sc.src.binance} · Gate ${sc.src.gate}` : 'по свечам Binance') : 'монет · последняя 15м свеча';
+  h += card('🔎 Сейчас', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, srcTxt)}${tile('лимиток', d.orders_n || 0, 'ждут прострела')}${tile('сделок', (d.open || []).length, 'открыто')}</div>
     ${ords.length ? `<div class="zsub" style="margin-top:8px;">лимитки (цена · расстояние):</div><div>${ords.map(chip).join('')}</div>`
       : ((sc.near || []).length ? `<div class="zsub" style="margin-top:8px;">ближе всех к порогу (100% — лимитка):</div><div>${sc.near.map(chip).join('')}</div>` : '')}
     <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 1900 ? '⏳ скан старше получаса — бот был выключен' : 'пересчёт на закрытии каждой 15м свечи'}</div>`
@@ -43507,6 +43636,7 @@ const setInputs = {
   telegram_alerts_trade_results: document.getElementById('setTgTradeResults'),
   telegram_trade_results_real_only: document.getElementById('setTgTradeResultsReal'),
   auto_update: document.getElementById('setAutoUpdate'),   // v0.99.637
+  research_binance: document.getElementById('setResearchBinance'),   // v0.99.681
   telegram_alerts_network: document.getElementById('setTelegramNetwork'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_neuro: document.getElementById('setAutotradeNeuro'),

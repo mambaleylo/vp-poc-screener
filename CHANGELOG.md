@@ -20280,3 +20280,14 @@ v0.99.680 - ⚡ Лимитки 15м — the backtest chart (the user's ORDI: "З
          the 21:30 bar with its wick to 4.829, the take on the 22:00 bar). Now the entry dot is on the fill bar, the
          limit is a yellow line from its placement, the exit on its own bar, the window ~4 h before / 3 h after, and a
          warning when Gate's candles never reached the limit within its hour.
+v0.99.681 - Signals from Binance's candles, trades on Gate (the user: "можно же обучаться по Бинансу, а реальные
+         лимитки ставить уже по Gate", "так же и по другим индикаторам"). Every model of the bot learned on Binance's
+         candles (prices, wicks, quote volume) while the bot read Gate's. Now the research modules' closed candles
+         (📐 EMA, P/R, 🧠 Neuro, 🌊 Cascade, 🧱 SMC, 🎯 strong zones, 📈 breakout, ⚡ 15m limits — all through _zm_closed)
+         come from Binance USDT-M: kept in memory as compact columns, loaded once (under a shared pace of ~1200 weight
+         a minute, a 418 / 429 pauses it for 5 min) and then topped up with only the new bars; the 1000-coins divided
+         as before. Gate's candles when Binance has no such coin (remembered for 6 h), does not answer, or its last bar
+         is stale. Entries, limits, stops, takes and the trades' records stay on Gate; the ⚡ limit is placed on Gate at
+         the level computed from Binance. Settings → "Сигналы по свечам Binance" (on by default). The ⚡ tab shows how
+         many coins were scanned on Binance / Gate. The first start loads ~6 minutes of Binance history in the
+         background of the modules' first scans. t_bn_source.py.
