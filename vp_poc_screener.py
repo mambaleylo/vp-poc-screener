@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.683"
+APP_VERSION = "0.99.684"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1156,7 +1156,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones", "risk_pct_zm", "risk_pct_rbx", "rbx_enabled", "autotrade_rbx", "telegram_alerts_rbx", "rbx_part",
                   "cas_enabled", "autotrade_cas", "telegram_alerts_cas", "risk_pct_cas",   # v0.99.653
                   "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
-                  "dlm_enabled", "autotrade_dlm", "telegram_alerts_dlm", "risk_pct_dlm", "dlm_single",   # v0.99.679, v0.99.683
+                  "dlm_enabled", "autotrade_dlm", "telegram_alerts_dlm", "risk_pct_dlm", "dlm_single", "dlm_binance",   # v0.99.679, v0.99.683, v0.99.684
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
@@ -1241,6 +1241,7 @@ def get_settings():
         "smc_enabled": SMC_ENABLED, "autotrade_smc": AUTOTRADE_ENABLED_SMC, "telegram_alerts_smc": TELEGRAM_ALERTS_SMC, "risk_pct_smc": MODULE_RISK_PCT.get("smc"),   # v0.99.678
         "dlm_enabled": DLM_ENABLED, "autotrade_dlm": AUTOTRADE_ENABLED_DLM, "telegram_alerts_dlm": TELEGRAM_ALERTS_DLM, "risk_pct_dlm": MODULE_RISK_PCT.get("dlm"),   # v0.99.679
         "dlm_single": DLM_SINGLE,   # v0.99.683
+        "dlm_binance": DLM_BINANCE,   # v0.99.684
         "autotrade_zones": AUTOTRADE_ENABLED_ZONES,
         "autotrade_zones_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
         "zones_own_scan": ZONES_OWN_SCAN, "autotrade_zones_own": AUTOTRADE_ENABLED_ZONES_OWN,   # v0.99.452
@@ -1528,7 +1529,7 @@ def apply_settings(updates):
                    ("cas_enabled", "CAS_ENABLED"), ("autotrade_cas", "AUTOTRADE_ENABLED_CAS"), ("telegram_alerts_cas", "TELEGRAM_ALERTS_CAS"),
                    ("smc_enabled", "SMC_ENABLED"), ("autotrade_smc", "AUTOTRADE_ENABLED_SMC"), ("telegram_alerts_smc", "TELEGRAM_ALERTS_SMC"),
                    ("dlm_enabled", "DLM_ENABLED"), ("autotrade_dlm", "AUTOTRADE_ENABLED_DLM"), ("telegram_alerts_dlm", "TELEGRAM_ALERTS_DLM"),
-                   ("dlm_single", "DLM_SINGLE")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
+                   ("dlm_single", "DLM_SINGLE"), ("dlm_binance", "DLM_BINANCE")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
         if _k in updates:
             globals()[_g] = bool(updates[_k])
     if "zones_zm_enabled" in updates:   # v0.99.616
@@ -33617,6 +33618,353 @@ def api_smc_status():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# v0.99.684 — ⚡ on Binance (the user: "делай для этого модуля все по binance, свечи, лимитки, настройку api и тп, с
+# проверкой баланса… ну и автоторговлю"): the model learned on Binance's candles, so the limits now can rest on Binance
+# USDⓈ-M futures too — the same bars that decide the signal decide the fill. The keys in their own file (chmod 600),
+# requests signed HMAC-SHA256 with the server's clock; the entry a GTC limit, the stop a STOP_MARKET (the Algo Order API,
+# the old order endpoint as a fallback) closing the whole position, the take a reduce-only limit; isolated margin, the
+# leverage from Binance's own brackets so the liquidation stays beyond the stop; the account's free margin checked before
+# every order. The bot keeps its prices in Gate's scale (1000-coins divided); the exchange calls multiply back.
+BINANCE_CREDENTIALS_FILE = os.environ.get("VP_BINANCE_CREDENTIALS_FILE",
+                                          os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_binance_credentials.json"))
+BINANCE_API_KEY = ""
+BINANCE_API_SECRET = ""
+DLM_BINANCE = os.environ.get("VP_DLM_BINANCE", "0") == "1"
+BNF_BASE = "https://fapi.binance.com"
+_BNF = {"offset": 0.0, "synced": 0.0, "info": None, "info_t": 0.0, "brackets": {}, "dual": None, "dual_t": 0.0, "check": None}
+_bnf_lock = threading.Lock()
+
+
+class BinanceError(RuntimeError):
+    def __init__(self, code, msg, status=0):
+        super().__init__(f"Binance {code if code is not None else status}: {msg}")
+        self.code, self.msg, self.status = code, msg, status
+
+
+def load_binance_credentials():
+    global BINANCE_API_KEY, BINANCE_API_SECRET
+    try:
+        if os.path.exists(BINANCE_CREDENTIALS_FILE):
+            with open(BINANCE_CREDENTIALS_FILE) as f:
+                saved = json.load(f) or {}
+            BINANCE_API_KEY, BINANCE_API_SECRET = saved.get("api_key", ""), saved.get("api_secret", "")
+    except Exception as e:
+        log_error(f"load_binance_credentials: {e}")
+
+
+def save_binance_credentials(api_key=None, api_secret=None):
+    """both given -> set, both None -> cleared"""
+    global BINANCE_API_KEY, BINANCE_API_SECRET
+    with _credentials_lock:
+        BINANCE_API_KEY, BINANCE_API_SECRET = api_key or "", api_secret or ""
+        try:
+            if not api_key:
+                if os.path.exists(BINANCE_CREDENTIALS_FILE):
+                    os.remove(BINANCE_CREDENTIALS_FILE)
+            else:
+                tmp = BINANCE_CREDENTIALS_FILE + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump({"api_key": api_key, "api_secret": api_secret}, f)
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, BINANCE_CREDENTIALS_FILE)
+        except Exception as e:
+            log_error(f"save_binance_credentials: {e}")
+    with _bnf_lock:
+        _BNF.update({"brackets": {}, "dual": None, "dual_t": 0.0, "check": None})
+
+
+def bnf_time_sync():
+    t0 = time.time()
+    r = requests.get(BNF_BASE + "/fapi/v1/time", timeout=10)
+    r.raise_for_status()
+    t1 = time.time()
+    _BNF["offset"] = float(r.json()["serverTime"]) - (t0 + t1) / 2 * 1000
+    _BNF["synced"] = t1
+
+
+def bnf_req(method, path, params=None, signed=True, base=BNF_BASE, timeout=15):
+    """one Binance request; the parameters go in the query string (Binance takes them so for every method); an error
+    answer -> BinanceError(code, msg)"""
+    key, secret = BINANCE_API_KEY, BINANCE_API_SECRET
+    if signed and not (key and secret):
+        raise BinanceError(None, "ключи Binance не заданы")
+    p = {k: v for k, v in (params or {}).items() if v is not None}
+    qs = "&".join(f"{k}={requests.utils.quote(str(v), safe='')}" for k, v in p.items())
+    if signed:
+        if time.time() - _BNF["synced"] > 1800:
+            try:
+                bnf_time_sync()
+            except Exception as e:
+                log_error(f"binance time sync: {e}")
+        qs += ("&" if qs else "") + f"recvWindow=10000&timestamp={int(time.time() * 1000 + _BNF['offset'])}"
+        qs += "&signature=" + hmac.new(secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
+    try:
+        r = requests.request(method, base + path + ("?" + qs if qs else ""), headers={"X-MBX-APIKEY": key} if key else {}, timeout=timeout)
+    except Exception as e:
+        raise BinanceError(None, f"нет связи: {e}")
+    try:
+        j = r.json()
+    except ValueError:
+        j = None
+    if r.status_code != 200 or (isinstance(j, dict) and isinstance(j.get("code"), int) and j["code"] < 0):
+        code = j.get("code") if isinstance(j, dict) else None
+        msg = (j.get("msg") if isinstance(j, dict) else None) or (r.text or "")[:200]
+        if code == -1021:
+            _BNF["synced"] = 0.0   # the clock is off: synced again on the next call
+        raise BinanceError(code, msg, r.status_code)
+    return j
+
+
+def bnf_err_ru(e):
+    """a Binance error for the user"""
+    code, st = getattr(e, "code", None), getattr(e, "status", 0)
+    if st == 451:
+        return "Binance не обслуживает запросы с этого IP / из этой страны"
+    if code in (-2015, -2014) or st == 401:
+        return "ключ не принят: неверный ключ, IP не в списке разрешённых или у ключа нет права «Фьючерсы»"
+    if code == -1022:
+        return "неверный Secret Key"
+    if code == -1021:
+        return "часы телефона расходятся с Binance — повторите"
+    if code == -2019:
+        return "не хватает маржи"
+    return str(e)[:200]
+
+
+def bnf_any(method, paths, params=None):
+    """the first of the API versions that answers (Binance moves endpoints between v1 / v2 / v3)"""
+    err = None
+    for p in paths:
+        try:
+            return bnf_req(method, p, params)
+        except BinanceError as e:
+            err = e
+            if e.status not in (404, 410) and e.code not in (-5000, -1000):
+                raise
+    raise err
+
+
+def bnf_symbols():
+    """{bsym: {"tick", "step", "min_qty", "min_notional", "ok"}} from exchangeInfo, kept 6 h"""
+    with _bnf_lock:
+        if _BNF["info"] and time.time() - _BNF["info_t"] < 6 * 3600:
+            return _BNF["info"]
+    j = bnf_req("GET", "/fapi/v1/exchangeInfo", signed=False, timeout=30)
+    out = {}
+    for s in j.get("symbols") or []:
+        f = {x.get("filterType"): x for x in s.get("filters") or []}
+        try:
+            out[s["symbol"]] = {"tick": float(f["PRICE_FILTER"]["tickSize"]), "step": float(f["LOT_SIZE"]["stepSize"]),
+                                "min_qty": float(f["LOT_SIZE"]["minQty"]), "min_notional": float((f.get("MIN_NOTIONAL") or {}).get("notional") or 5),
+                                "ok": s.get("status") == "TRADING" and s.get("contractType") == "PERPETUAL"}
+        except (KeyError, TypeError, ValueError):
+            continue
+    with _bnf_lock:
+        _BNF.update({"info": out, "info_t": time.time()})
+    return out
+
+
+def bnf_tiers(bsym):
+    """Binance's leverage brackets of the symbol as the bot's risk tiers [(notional cap, mmr, max leverage)], kept 6 h"""
+    with _bnf_lock:
+        c = _BNF["brackets"].get(bsym)
+    if c and time.time() - c[0] < 6 * 3600:
+        return c[1]
+    j = bnf_req("GET", "/fapi/v1/leverageBracket", {"symbol": bsym})
+    row = (j[0] if isinstance(j, list) and j else j) or {}
+    tiers = sorted((float(b["notionalCap"]), float(b["maintMarginRatio"]), int(b["initialLeverage"])) for b in row.get("brackets") or [])
+    with _bnf_lock:
+        _BNF["brackets"][bsym] = (time.time(), tiers)
+    return tiers
+
+
+def bnf_account():
+    """{"wallet", "equity", "free"} in USDT"""
+    a = bnf_any("GET", ["/fapi/v3/account", "/fapi/v2/account"])
+    return {"wallet": float(a.get("totalWalletBalance") or 0), "equity": float(a.get("totalMarginBalance") or 0),
+            "free": float(a.get("availableBalance") or 0), "upnl": float(a.get("totalUnrealizedProfit") or 0)}
+
+
+def bnf_positions():
+    """{bsym: [{"amt", "entry", "mark", "pside"}]} — the open ones"""
+    out = {}
+    for p in bnf_any("GET", ["/fapi/v3/positionRisk", "/fapi/v2/positionRisk"]) or []:
+        amt = float(p.get("positionAmt") or 0)
+        if amt:
+            out.setdefault(p["symbol"], []).append({"amt": amt, "entry": float(p.get("entryPrice") or 0), "mark": float(p.get("markPrice") or 0),
+                                                    "pside": p.get("positionSide") or "BOTH"})
+    return out
+
+
+def bnf_dual():
+    """the account's position mode; a hedge-mode account is switched to one-way when it has nothing open (else the orders
+    carry positionSide)"""
+    with _bnf_lock:
+        if _BNF["dual"] is not None and time.time() - _BNF["dual_t"] < 600:
+            return _BNF["dual"]
+    dual = bool(bnf_req("GET", "/fapi/v1/positionSide/dual").get("dualSidePosition"))
+    if dual:
+        try:
+            bnf_req("POST", "/fapi/v1/positionSide/dual", {"dualSidePosition": "false"})
+            dual = False
+        except BinanceError as e:
+            log_error(f"binance one-way mode: {e}")
+    with _bnf_lock:
+        _BNF.update({"dual": dual, "dual_t": time.time()})
+    return dual
+
+
+def bn_fmt(x, step, up=False):
+    """x snapped to the step (down, or up) as Binance's decimal string"""
+    d = Decimal(str(step))
+    n = Decimal(str(x)) / d
+    r = n.to_integral_value(rounding="ROUND_HALF_EVEN")
+    if abs(n - r) < Decimal("1e-6"):
+        n = r   # float noise (10.040000000000001) is not a step up
+    q = n.to_integral_value(rounding="ROUND_CEILING" if up else "ROUND_FLOOR") * d
+    return format(q.normalize(), "f") if q != 0 else "0"
+
+
+def bn_map(sym):
+    """a Gate contract -> (Binance symbol, price scale) as the candle cache found it, or None"""
+    with _bnc_lock:
+        c = _BNC.get((sym, "15m")) or _BNC.get((sym, "1d"))
+    if c and c.get("bsym"):
+        return c["bsym"], float(c.get("scl") or 1.0)
+    return None
+
+
+def bnf_prices():
+    """{bsym: last price} (public)"""
+    try:
+        return {x["symbol"]: float(x["price"]) for x in bnf_req("GET", "/fapi/v1/ticker/price", signed=False) or []}
+    except Exception as e:
+        log_error(f"binance prices: {e}")
+        return {}
+
+
+def _bnf_side_params(s, closing, dual):
+    """BUY / SELL and the one-way / hedge flags of an order of a position of side s (1 long, -1 short)"""
+    p = {"side": ("BUY" if s > 0 else "SELL") if not closing else ("SELL" if s > 0 else "BUY")}
+    if dual:
+        p["positionSide"] = "LONG" if s > 0 else "SHORT"
+    elif closing:
+        p["reduceOnly"] = "true"
+    return p
+
+
+def bnf_place_cond(bsym, s, kind, trigger, dual):
+    """a STOP_MARKET / TAKE_PROFIT_MARKET closing the whole position of side s at `trigger` (exchange price string):
+    the Algo Order API first, the old order endpoint when it is not there -> ("algo" | "order", id)"""
+    sp = _bnf_side_params(s, True, dual)
+    sp.pop("reduceOnly", None)   # closePosition closes it all, reduceOnly not allowed with it
+    try:
+        r = bnf_req("POST", "/fapi/v1/algoOrder", dict(sp, algoType="CONDITIONAL", symbol=bsym, type=kind, triggerPrice=trigger,
+                                                      closePosition="true", workingType="CONTRACT_PRICE"))
+        return "algo", str(r.get("algoId"))
+    except BinanceError as e:
+        log_error(f"binance algo {kind} {bsym}: {e} — the order endpoint")
+    r = bnf_req("POST", "/fapi/v1/order", dict(sp, symbol=bsym, type=kind, stopPrice=trigger, closePosition="true", workingType="CONTRACT_PRICE"))
+    return "order", str(r.get("orderId"))
+
+
+def bnf_cancel(bsym, kind, oid):
+    """True when gone (cancelled or already finished)"""
+    if not oid:
+        return True
+    try:
+        if kind == "algo":
+            bnf_req("DELETE", "/fapi/v1/algoOrder", {"algoId": oid})
+        else:
+            bnf_req("DELETE", "/fapi/v1/order", {"symbol": bsym, "orderId": oid})
+        return True
+    except BinanceError as e:
+        if e.code in (-2011, -2013) or "unknown order" in str(e.msg).lower() or "not exist" in str(e.msg).lower():
+            return True
+        log_error(f"binance cancel {bsym} {oid}: {e}")
+        return False
+
+
+def bnf_order(bsym, oid):
+    return bnf_req("GET", "/fapi/v1/order", {"symbol": bsym, "orderId": oid})
+
+
+def bnf_cond_done(bsym, kind, oid):
+    """did a stop / take trigger order fire"""
+    try:
+        if kind == "algo":
+            x = bnf_req("GET", "/fapi/v1/algoOrder", {"algoId": oid})
+            return str(x.get("algoStatus") or "").upper() in ("TRIGGERED", "TRIGGERING", "FINISHED", "FILLED")
+        return bnf_order(bsym, oid).get("status") == "FILLED"
+    except BinanceError as e:
+        log_error(f"binance trigger status {bsym} {oid}: {e}")
+        return None
+
+
+def binance_check():
+    """the settings check: the clock, the key's rights, the futures balance, the position mode"""
+    out = {"configured": bool(BINANCE_API_KEY and BINANCE_API_SECRET), "key_suffix": ("…" + BINANCE_API_KEY[-6:]) if BINANCE_API_KEY else None,
+           "t": int(time.time()), "ok": False}
+    if not out["configured"]:
+        out["err"] = "ключи не заданы"
+        return out
+    try:
+        bnf_time_sync()
+        out["clock_ms"] = int(_BNF["offset"])
+    except Exception as e:
+        out["err"] = f"Binance не отвечает: {e}"[:200]
+        return out
+    try:
+        rs = bnf_req("GET", "/sapi/v1/account/apiRestrictions", base="https://api.binance.com")
+        out["rights"] = {"futures": bool(rs.get("enableFutures")), "withdraw": bool(rs.get("enableWithdrawals")), "ip": bool(rs.get("ipRestrict")),
+                         "read": bool(rs.get("enableReading"))}
+    except Exception as e:
+        out["rights_err"] = bnf_err_ru(e)
+    try:
+        out["balance"] = bnf_account()
+        out["dual"] = bnf_dual()
+        out["positions"] = sum(len(v) for v in bnf_positions().values())
+        out["ok"] = True
+    except Exception as e:
+        out["err"] = bnf_err_ru(e)
+    with _bnf_lock:
+        _BNF["check"] = out
+    return out
+
+
+@app.route("/api/binance/credentials", methods=["GET"])
+def api_binance_credentials_get():
+    return jsonify({"configured": bool(BINANCE_API_KEY and BINANCE_API_SECRET), "key_suffix": ("…" + BINANCE_API_KEY[-6:]) if BINANCE_API_KEY else None,
+                    "check": _BNF.get("check")})
+
+
+@app.route("/api/binance/credentials", methods=["POST"])
+def api_binance_credentials_post():
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        if body.get("clear"):
+            save_binance_credentials()
+            return jsonify({"ok": True, "configured": False})
+        k, s = (body.get("api_key") or "").strip(), (body.get("api_secret") or "").strip()
+        if not k or not s:
+            return jsonify({"ok": False, "error": "нужны оба: API Key и Secret Key"}), 400
+        save_binance_credentials(k, s)
+        return jsonify({"ok": True, "configured": True, "check": binance_check()})
+    except Exception as e:
+        log_error(f"api binance credentials: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/binance/check")
+def api_binance_check():
+    try:
+        return jsonify(binance_check())
+    except Exception as e:
+        log_error(f"api binance check: {e}")
+        return jsonify({"ok": False, "err": str(e)[:200]})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # v0.99.679 — ⚡ 15m deep limits (the user: "найти индикатор… главная цель только винрейт и количество сделок, пусть
 # это будет хоть минутный тайм фрейм… rr не важен, главное положительный"). The hunt (tools/winrate) on 15m bars of the
 # 127 coins, 2020–26, small takes and wide stops: deep limits into wicks, Bollinger / VWAP bands, EMA pullbacks, 24 h
@@ -33839,7 +34187,18 @@ def dlm_save():
 
 
 def _dlm_closed(sym, tf, sec, n, now):
+    if DLM_BINANCE:   # v0.99.684 — trading on Binance: Binance's bars only (a coin Binance has no fresh bar of is not scanned)
+        return bn_closed(sym, tf, sec, n, now) or []
     return _zm_closed(sym, tf, sec, n, now)   # v0.99.681 — Binance first
+
+
+def _dlm_bars(sym, start, now):
+    """v0.99.684 — the closed 15m bars from `start` for the virtual fills / exits: Binance's when trading there"""
+    if DLM_BINANCE:
+        b = bn_closed(sym, "15m", 900, 400, now)
+        if b:
+            return [c for c in b if c["time"] >= start]
+    return [c for c in (get_candles_range(sym, "15m", start, int(now)) or []) if c["time"] >= start and c["time"] + 900 <= now]
 
 
 def _dlm_closed_gate(sym, tf, sec, n, now):
@@ -33938,8 +34297,7 @@ def dlm_settle(now):
     orders.sort(key=lambda o: o["t0"])
     for o in orders:
         try:
-            cs = [c for c in (get_candles_range(o["symbol"], "15m", o["t0"], min(int(now), o["until"])) or [])
-                  if o["t0"] <= c["time"] < o["until"] and c["time"] + 900 <= now]
+            cs = [c for c in _dlm_bars(o["symbol"], o["t0"], now) if c["time"] < o["until"]]
             hit = next((c for c in cs if ((c["low"] <= o["lv"]) if o["side"] > 0 else (c["high"] >= o["lv"]))), None)
             if hit:
                 with _dlm_lock:
@@ -33960,7 +34318,7 @@ def dlm_settle(now):
     for t in opn:
         try:
             hold = int(((_DLM.get("model") or {}).get("rule") or {}).get("hold_bars", 16))
-            cs = [c for c in (get_candles_range(t["symbol"], "15m", t["fbar"], int(now)) or []) if c["time"] >= t["fbar"] and c["time"] + 900 <= now]
+            cs = _dlm_bars(t["symbol"], t["fbar"], now)
             res = None
             s, sl, tp = t["side"], t["sl"], t["tp"]
             for k, c in enumerate(cs[:hold]):
@@ -33999,6 +34357,8 @@ def dlm_real_place(o):
     # alone could let ~20 positions pile up in a crash, 3% each)
     if mine or any(x["symbol"] == sym for x in live) or len(live) + len(held) >= DLM_MAX_LIVE_ORDERS:
         return
+    if DLM_BINANCE:   # v0.99.684
+        return dlm_bn_place(o)
     with using_account("dlm"):
         pos = [p for p in (get_open_positions() or []) if p.get("contract") == sym]
         if pos:
@@ -34067,6 +34427,182 @@ def _dlm_place_exits(t):
             r["tp_id"], r["tp_kind"] = str((o or {}).get("id") or "") or None, "trigger"
 
 
+# ---- v0.99.684 — the same on Binance: the limit, then the stop (STOP_MARKET, the whole position) and the take ----
+def dlm_bn_place(o):
+    sym, s = o["symbol"], o["side"]
+    direction = "LONG" if s > 0 else "SHORT"
+    mp = bn_map(sym)
+    if not mp:
+        o["real"] = {"status": "SKIPPED", "ex": "binance", "detail": "монеты нет на Binance"}
+        return
+    bsym, scl = mp
+    info = bnf_symbols().get(bsym)
+    if not info or not info["ok"]:
+        o["real"] = {"status": "SKIPPED", "ex": "binance", "detail": f"{bsym} сейчас не торгуется на Binance"}
+        return
+    if bnf_positions().get(bsym):
+        o["real"] = {"status": "SKIPPED", "ex": "binance", "detail": "по монете уже есть позиция"}
+        return
+    dual = bnf_dual()
+    rule = ((_DLM.get("model") or {}).get("rule") or {})
+    lv = o["lv"] * scl
+    sl = (o["lv"] - s * float(rule.get("stop_atr", 2.0)) * o["atr"]) * scl
+    tiers = bnf_tiers(bsym)
+    cap = max((t_[2] for t_ in tiers), default=20)
+    mmr = tiers[0][1] if tiers else SCALP_DEFAULT_MMR_PCT
+    acct = bnf_account()
+    risk = MODULE_RISK_PCT.get("dlm") or DLM_RISK_DEFAULT
+    tb = {bsym: tiers} if tiers else None
+    margin, lev, skip = compute_risk_based_position(direction, lv, sl, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb)
+    if not skip and margin > acct["free"] * 0.9:   # the free margin checked: the risk scaled down to what the account carries
+        if acct["free"] <= 1:
+            skip = f"нет свободной маржи (свободно {acct['free']:.2f}$)"
+        else:
+            risk = round(risk * acct["free"] * 0.9 / margin, 2)
+            margin, lev, skip = compute_risk_based_position(direction, lv, sl, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb)
+    if skip:
+        o["real"] = {"status": "SKIPPED", "ex": "binance", "detail": str(skip)[:160]}
+        return
+    qty = bn_fmt(margin * lev / lv, info["step"])
+    q = float(qty)
+    if q < info["min_qty"] or q * lv < info["min_notional"]:
+        o["real"] = {"status": "SKIPPED", "ex": "binance", "detail": f"позиция {q * lv:.2f}$ меньше минимума Binance ({info['min_notional']:g}$)"}
+        return
+    try:
+        bnf_req("POST", "/fapi/v1/marginType", {"symbol": bsym, "marginType": "ISOLATED"})
+    except BinanceError as e:
+        if e.code != -4046:   # -4046 = already isolated
+            log_error(f"binance isolated {bsym}: {e}")
+    bnf_req("POST", "/fapi/v1/leverage", {"symbol": bsym, "leverage": int(lev)})
+    px = bn_fmt(lv, info["tick"], up=(s < 0))
+    r = bnf_req("POST", "/fapi/v1/order", dict(_bnf_side_params(s, False, dual), symbol=bsym, type="LIMIT", timeInForce="GTC", quantity=qty,
+                                               price=px, newClientOrderId=f"vpdlm{int(time.time() * 1000)}"))
+    o["real"] = {"status": "LIMIT", "ex": "binance", "id": str(r.get("orderId")), "bsym": bsym, "scl": scl, "qty": q, "price": float(px) / scl,
+                 "lev": int(lev), "risk": risk, "dual": dual, "tick": info["tick"], "step": info["step"]}
+
+
+def _dlm_bn_exits(t):
+    r = t["real"]; s = t["side"]; bsym, scl = r["bsym"], r["scl"]
+    if not r.get("sl_id"):
+        r["sl_kind"], r["sl_id"] = bnf_place_cond(bsym, s, "STOP_MARKET", bn_fmt(t["sl"] * scl, r["tick"], up=(s < 0)), r.get("dual"))
+    if not r.get("tp_id"):
+        tp = bn_fmt(t["tp"] * scl, r["tick"], up=(s > 0))
+        try:
+            x = bnf_req("POST", "/fapi/v1/order", dict(_bnf_side_params(s, True, r.get("dual")), symbol=bsym, type="LIMIT", timeInForce="GTC",
+                                                       quantity=bn_fmt(r["filled"], r["step"]), price=tp))
+            r["tp_kind"], r["tp_id"] = "limit", str(x.get("orderId"))
+        except BinanceError as e:
+            log_error(f"binance take limit {bsym}: {e} — a trigger instead")
+            r["tp_kind"], r["tp_id"] = bnf_place_cond(bsym, s, "TAKE_PROFIT_MARKET", tp, r.get("dual"))
+
+
+def _dlm_bn_cancel_exits(t, keep_tp_limit=False):
+    r = t["real"]
+    if r.get("sl_id"):
+        bnf_cancel(r["bsym"], r.get("sl_kind") or "algo", r["sl_id"])
+    if r.get("tp_id") and not (keep_tp_limit and r.get("tp_kind") == "limit"):
+        bnf_cancel(r["bsym"], "order" if r.get("tp_kind") == "limit" else r.get("tp_kind"), r["tp_id"])
+
+
+def dlm_bn_tick(orders, trades):
+    """dlm_real_tick() for the Binance orders and trades -> changed"""
+    now = time.time()
+    changed = False
+    try:
+        pos = bnf_positions()
+    except Exception as e:
+        log_error(f"dlm binance positions: {e}")
+        return False
+    for o in orders:
+        r = o["real"]
+        try:
+            x = bnf_order(r["bsym"], r["id"])
+        except BinanceError as e:
+            log_error(f"dlm binance order {o['symbol']}: {e}")
+            continue
+        filled = float(x.get("executedQty") or 0)
+        done = x.get("status") in ("FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH")
+        foreign = not filled and pos.get(r["bsym"])
+        if not done and (now >= o["until"] or foreign or filled):
+            if not bnf_cancel(r["bsym"], "order", r["id"]):   # the rest of a partly filled limit goes too
+                continue
+            try:
+                x = bnf_order(r["bsym"], r["id"])
+                filled = float(x.get("executedQty") or 0)
+            except BinanceError:
+                pass
+            done = True
+        if not done:
+            continue
+        changed = True
+        if filled > 0:
+            fill = (float(x.get("avgPrice") or 0) / r["scl"]) or r["price"]
+            t = _dlm_open_trade(o, int(now // 900 * 900), fill, real=dict({k: r.get(k) for k in ("ex", "bsym", "scl", "tick", "step", "dual", "risk", "lev")},
+                                                                                        filled=filled, order=r["id"]))
+            if t:
+                try:
+                    _dlm_bn_exits(t)
+                except Exception as e:
+                    log_error(f"dlm binance exits {t['symbol']}: {e}")
+                if TELEGRAM_ALERTS_DLM:
+                    send_telegram(f"⚡ {t['symbol'].replace('_USDT', '')} {t['direction']} · лимитка 15м исполнилась на Binance @ {fill:.6g}\n"
+                                  f"тейк {t['tp']:.6g} · стоп {t['sl']:.6g} · до {time.strftime('%H:%M', time.localtime(t['until']))}", category="dlm")
+        else:
+            o["status"] = "EXPIRED" if now >= o["until"] else "CANCELLED"
+    for t in trades:
+        r = t["real"]; bsym, s = r["bsym"], t["side"]
+        p = next((x for x in pos.get(bsym) or [] if (x["amt"] > 0) == (s > 0)), None)
+        if p:
+            r["seen"] = True
+            if not r.get("sl_id") or not r.get("tp_id"):
+                try:
+                    _dlm_bn_exits(t); changed = True
+                except Exception as e:
+                    log_error(f"dlm binance exits {bsym}: {e}")
+            nostop = not r.get("sl_id") and now - t["t_in"] > 30   # Binance refused the stop for 30 s: no position left without one
+            if nostop:
+                send_telegram(f"⚠️ ⚡ {bsym}: Binance не принял стоп — позиция закрыта по рынку", category="dlm")
+            if now >= t["until"] or nostop:   # the time exit: the take / stop off, the rest at the market
+                _dlm_bn_cancel_exits(t)
+                try:
+                    res = bnf_req("POST", "/fapi/v1/order", dict(_bnf_side_params(s, True, r.get("dual")), symbol=bsym, type="MARKET",
+                                                                 quantity=bn_fmt(abs(p["amt"]), r["step"])))
+                    r["close"] = str(res.get("orderId"))
+                except BinanceError as e:
+                    log_error(f"dlm binance time exit {bsym}: {e}")
+                    send_telegram(f"⚠️ ⚡ {bsym}: выход по времени на Binance не прошёл ({bnf_err_ru(e)}) — закройте позицию вручную", category="dlm")
+                    continue
+                px = (p["mark"] / r["scl"]) or t["entry"]
+                with _dlm_lock:
+                    t.update({"status": "CLOSED", "result": "TIME_EXIT", "exit": px, "t_out": int(now), "r": _dlm_r(t, px, 15, "TIME_EXIT")})
+                changed = True
+                notify_trade_result("dlm", t["symbol"], t["direction"], t["entry"], px, "TIME_EXIT", t["r"], real=True, note="⚡ лимитка 15м · Binance")
+            continue
+        # no position: which exit took it (a just-filled position may not show yet — given a minute unless the take filled)
+        win = False
+        if r.get("tp_kind") == "limit" and r.get("tp_id"):
+            try:
+                x = bnf_order(bsym, r["tp_id"])
+                win = float(x.get("executedQty") or 0) > 0
+                if not win and not r.get("seen") and now - t["t_in"] < 60:
+                    continue
+            except BinanceError as e:
+                log_error(f"dlm binance take status {bsym}: {e}")
+                continue
+        elif not r.get("seen") and now - t["t_in"] < 60:
+            continue
+        elif r.get("tp_id"):
+            win = bool(bnf_cond_done(bsym, r.get("tp_kind"), r["tp_id"]))
+        _dlm_bn_cancel_exits(t)
+        ex = t["tp"] if win else t["sl"]
+        kind = "WIN" if win else "LOSS"
+        with _dlm_lock:
+            t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(now), "r": _dlm_r(t, ex, int((now - t["fbar"]) // 900), kind)})
+        changed = True
+        notify_trade_result("dlm", t["symbol"], t["direction"], t["entry"], ex, kind, t["r"], real=True, note="⚡ лимитка 15м · Binance")
+    return changed
+
+
 def dlm_single_arm():
     """v0.99.683 — the single mode: no position and no order on Gate -> the armed limit the price came nearest to (within
     DLM_ARM_ATR x ATR) goes to Gate"""
@@ -34078,11 +34614,18 @@ def dlm_single_arm():
     if not armed:
         return
     px = {}
-    for t in get_tickers() or []:
-        try:
-            px[t["contract"]] = float(t.get("last") or 0)
-        except (TypeError, ValueError):
-            pass
+    if DLM_BINANCE:   # v0.99.684 — Binance's last prices (in the bot's scale)
+        bp = bnf_prices()
+        for o in armed:
+            mp = bn_map(o["symbol"])
+            if mp and bp.get(mp[0]):
+                px[o["symbol"]] = bp[mp[0]] / mp[1]
+    else:
+        for t in get_tickers() or []:
+            try:
+                px[t["contract"]] = float(t.get("last") or 0)
+            except (TypeError, ValueError):
+                pass
     near = []
     for o in armed:
         p = px.get(o["symbol"])
@@ -34111,9 +34654,15 @@ def dlm_real_tick():
     with _dlm_lock:
         orders = [o for o in _DLM["orders"] if (o.get("real") or {}).get("id") and o["status"] == "OPEN"]
         trades = [t for t in _DLM["trades"] if t.get("real") and t["status"] == "OPEN"]
+    bo = [o for o in orders if o["real"].get("ex") == "binance"]   # v0.99.684 — each order / trade on its own exchange
+    bt = [t for t in trades if t["real"].get("ex") == "binance"]
+    orders = [o for o in orders if o not in bo]
+    trades = [t for t in trades if t not in bt]
+    changed = bool((bo or bt) and dlm_bn_tick(bo, bt))
     if not orders and not trades:
+        if changed:
+            dlm_save()
         return
-    changed = False
     with using_account("dlm"):
         try:
             pos = {}
@@ -34268,6 +34817,7 @@ def dlm_stats():
     days = max(1.0, (time.time() - t0) / 86400) if t0 else None
     real = [t for t in fin if t.get("real")]
     return {"on": DLM_ENABLED, "auto": AUTOTRADE_ENABLED_DLM, "tg": TELEGRAM_ALERTS_DLM, "dry": AUTOTRADE_DRY_RUN, "single": DLM_SINGLE,
+            "binance": DLM_BINANCE, "bn_keys": bool(BINANCE_API_KEY and BINANCE_API_SECRET), "bn_check": _BNF.get("check"),   # v0.99.684
             "risk": MODULE_RISK_PCT.get("dlm") or DLM_RISK_DEFAULT,
             "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap")} if m else None,
             "err": err, "scan": scan, "orders": orders[:40], "orders_n": len(orders),
@@ -38516,6 +39066,13 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setDlmSingle"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ ⚡ Торговать на Binance</div>
+          <div class="sub">реальные лимитки, стоп и тейк — на Binance USDⓈ-M (модель училась на его свечах), сигналы и виртуальные сделки — тоже по свечам Binance; выключено — на Gate. Ключи и баланс — во вкладке ⚡</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setDlmBinance"><span class="switchSlider"></span></label>
+      </div>
     </div></details>
 
     <details class="settingsGroup" style="--mod-color:#a1887f;"><summary class="settingsGroupTitle">🧱 SMC</summary><div class="settingsGroupBody">
@@ -42338,8 +42895,43 @@ async function refreshSmc() {   // v0.99.678 — 🧱 SMC: the model on the firs
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
 
-async function refreshDlm() {   // v0.99.679 — ⚡ 15m deep limits: many small, high win-rate trades
+async function dlmSetEx(on) {   // v0.99.684 — the exchange of the real limits
+  try {
+    await fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({dlm_binance: on})});
+  } catch (e) { alert('Не удалось сохранить: ' + e); }
+  refreshDlm(true);
+}
+
+async function bnSaveKeys() {
+  const k = document.getElementById('bnKey').value.trim(), s = document.getElementById('bnSecret').value.trim();
+  if (!k || !s) { alert('Вставьте оба ключа: API Key и Secret Key'); return; }
+  const btn = document.getElementById('bnSaveBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'проверяю…'; }
+  try {
+    const res = await (await fetch('/api/binance/credentials', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({api_key: k, api_secret: s})})).json();
+    if (!res.ok) alert(res.error || 'Не сохранилось');
+  } catch (e) { alert('Не сохранилось: ' + e); }
+  document.getElementById('bnKey').value = ''; document.getElementById('bnSecret').value = '';
+  refreshDlm(true);
+}
+
+async function bnClearKeys() {
+  if (!confirm('Удалить ключи Binance с этого устройства?')) return;
+  await fetch('/api/binance/credentials', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({clear: true})});
+  refreshDlm(true);
+}
+
+async function bnCheck() {
+  const btn = document.getElementById('bnCheckBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'проверяю…'; }
+  try { await fetch('/api/binance/check'); } catch (e) {}
+  refreshDlm(true);
+}
+
+async function refreshDlm(force) {   // v0.99.679 — ⚡ 15m deep limits: many small, high win-rate trades
   const panel = document.getElementById('dlmPanel');
+  const kIn = document.getElementById('bnKey'), sIn = document.getElementById('bnSecret');   // v0.99.684 — keys being typed: no redraw
+  if (!force && kIn && (kIn.value || (sIn && sIn.value) || document.activeElement === kIn || document.activeElement === sIn)) return;
   let d;
   try { d = await (await fetch('/api/dlm/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
   const card = (title, body) => `<div class="zcard"><div class="zh">${title}</div>${body}</div>`;
@@ -42360,9 +42952,40 @@ async function refreshDlm() {   // v0.99.679 — ⚡ 15m deep limits: many small
       ${zBars(rows, v => sgR(+(+v).toFixed(3)))}
       <div class="zstrip"><span>WR <b>~84%</b></span><span>в среднем <b>${sgR(0.045)}</b></span><span><b>~9</b> сделок в день</span><span>сделка в <b>99%</b> недель</span></div>
       <div class="zsub">По минутным свечам Binance (точный порядок стопа и тейка): WR ${(rs.m1 || {}).wr || 85}%, <b>+${(rs.m1 || {}).avg_through || 0.05}R</b>, если лимитка исполняется только при проходе цены сквозь неё; со всеми комиссиями по рынку — +${(rs.m1 || {}).avg_taker || 0.02}R. Плюс на сделку маленький, а стопы при обвалах идут сериями (до ~12 подряд): при той же просадке рост ~x${(rs.money || {}).train_x || 3} в год (x${(rs.money || {}).check_x || 1.4} на чужих монетах) при риске ~1%.</div>
-      ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на Gate — переключатель «↳ ⚡ Лимитки 15м» в автоторговле; риск — поле «⚡» (пусто = ${d.risk}%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
+      ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} — переключатель «↳ ⚡ Лимитки 15м» в автоторговле; риск — поле «⚡» (пусто = ${d.risk}%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
   }
   let h = card(`⚡ Лимитки 15м ${pill}`, top);
+  {   // v0.99.684 — the exchange: Gate or Binance (the keys, the balance)
+    const c = d.bn_check;
+    const on = s_ => `margin-top:0;${s_ ? 'background:#f0b90b;color:#000;font-weight:600;' : ''}`;
+    let b = `<div class="dim" style="font-size:var(--fs-sm);">Где ставить реальные лимитки. Модель училась на свечах Binance — там исполнение ближе всего к бэктесту; на Binance и сигналы, и виртуальные сделки считаются по его свечам.</div>
+      <div style="display:flex;gap:6px;margin-top:8px;"><button class="zbtn" style="${on(!d.binance)}" onclick="dlmSetEx(false)">Gate</button><button class="zbtn" style="${on(d.binance)}" onclick="dlmSetEx(true)">Binance</button></div>`;
+    if (d.binance || d.bn_keys) {
+      if (c && c.ok) {
+        const bl = c.balance || {}, rt = c.rights || {}, usd = v => v == null ? '—' : '$' + (+v).toFixed(2);
+        const warn = [];
+        if (rt.withdraw) warn.push('⚠️ у ключа включён вывод средств — выключите его в настройках API на Binance');
+        if (c.rights && !rt.futures) warn.push('у ключа нет права «Включить фьючерсы» — сделки не откроются');
+        if (c.dual) warn.push('счёт в режиме хеджирования — бот работает, но закройте всё и переключите на односторонний (бот переключит сам, когда нет позиций)');
+        if ((bl.free || 0) < 6) warn.push('на фьючерсном счёте почти нет USDT — переведите со спота: Активы → Перевод → USDⓈ-M Фьючерсы');
+        b += `<div class="ztiles z3" style="margin-top:8px;">${tile('баланс', usd(bl.equity), 'фьючерсы USDⓈ-M')}${tile('свободно', usd(bl.free), 'под новые сделки')}${tile('позиций', c.positions || 0, 'открыто')}</div>
+          ${warn.map(w => `<div class="zbanner warn" style="margin-top:6px;">${w}</div>`).join('')}
+          <div class="dim" style="font-size:var(--fs-xs);">ключ ${c.key_suffix || ''} · проверено ${hm(c.t)}${rt.ip ? ' · по IP' : ''}</div>`;
+      } else if (c) {
+        b += `<div class="zbanner neg" style="margin-top:8px;">Binance: ${String(c.err || c.rights_err || 'не проверено').replace(/</g, '&lt;')}</div>`;
+      } else if (d.bn_keys) {
+        b += `<div class="dim" style="margin-top:8px;font-size:var(--fs-sm);">ключи заданы — нажмите «проверить», чтобы увидеть баланс</div>`;
+      }
+      if (d.bn_keys) b += `<button class="zbtn" id="bnCheckBtn" onclick="bnCheck()">🔄 проверить ключ и баланс</button>`;
+      b += `<details ${d.bn_keys ? '' : 'open'} style="margin-top:8px;"><summary>${d.bn_keys ? '🔑 заменить / удалить ключи Binance' : '🔑 ключи Binance'}</summary>
+        <div class="dim" style="font-size:var(--fs-xs);margin:6px 0;">Binance → профиль → Управление API → Создать API. Включить «Фьючерсы», вывод <b>не</b> включать. Ключи хранятся только на этом устройстве.</div>
+        <input id="bnKey" placeholder="API Key" autocomplete="off" autocapitalize="off" spellcheck="false" style="width:100%;box-sizing:border-box;margin-bottom:6px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:8px;border-radius:var(--r-xs);">
+        <input id="bnSecret" type="password" placeholder="Secret Key" autocomplete="off" style="width:100%;box-sizing:border-box;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:8px;border-radius:var(--r-xs);">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;"><button class="zbtn" id="bnSaveBtn" onclick="bnSaveKeys()">Сохранить и проверить</button>${d.bn_keys ? '<button class="zbtn" onclick="bnClearKeys()">Удалить ключи</button>' : ''}</div></details>`;
+      if (d.binance && !d.bn_keys) b += `<div class="zbanner warn" style="margin-top:8px;">Выбран Binance, но ключей нет — реальные сделки не откроются</div>`;
+    }
+    h += card(`🏦 Биржа: ${d.binance ? 'Binance' : 'Gate'}`, b);
+  }
   const sc = d.scan, ords = d.orders || [];
   const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;">
       <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.lv != null ? fmtNum(a.lv) + (a.px ? ' · ' + ((a.lv - a.px) / a.px * 100).toFixed(1) + '%' : '') : (a.pct != null ? a.pct + '%' : '')}${(a.real || {}).id ? ' · 💰' : ''}</span></span>`;
@@ -43729,6 +44352,7 @@ const setInputs = {
   autotrade_dlm: document.getElementById('setAutotradeDlm'),
   telegram_alerts_dlm: document.getElementById('setTgDlm'),
   dlm_single: document.getElementById('setDlmSingle'),   // v0.99.683
+  dlm_binance: document.getElementById('setDlmBinance'),   // v0.99.684
   autotrade_smc: document.getElementById('setAutotradeSmc'),
   telegram_alerts_smc: document.getElementById('setTgSmc'),
   autotrade_zones_zm: document.getElementById('setAutotradeZonesZm'),
@@ -45207,6 +45831,7 @@ if __name__ == "__main__":
     load_settings()
     load_credentials()
     load_module_credentials()   # v0.99.331
+    load_binance_credentials()   # v0.99.684
     _load_alert_cfg()
     threading.Thread(target=_telegram_sender_worker, daemon=True).start()
     t = threading.Thread(target=scan_loop, daemon=True)

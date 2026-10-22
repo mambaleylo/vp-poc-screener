@@ -20300,3 +20300,15 @@ v0.99.683 - ⚡ Лимитки 15м: "Одна сделка за раз" mode (t
          risk is scaled down to fit the free margin, and a limit the price ran past is dropped (no chasing). With
          autotrade on, a virtual touch of a limit never placed is counted as missed, not as a trade.
          tools/winrate/t_dlm_single.py.
+v0.99.684 - ⚡ Лимитки 15м on Binance (the user: "делай для этого модуля все по binance, свечи, лимитки, настройку api
+         и тп, с проверкой баланса… ну и автоторговлю"). A Gate / Binance switch in the ⚡ tab and in the settings; on
+         Binance the signals and the virtual fills / exits use Binance's 15m bars only, the real limits go to Binance
+         USDⓈ-M: isolated margin, the leverage from Binance's own brackets (the liquidation beyond the stop), the size
+         and the price snapped to the symbol's step / tick (1000-coins scaled), the free margin checked before every
+         order (the risk scaled down to it), the stop a STOP_MARKET closing the whole position (the Algo Order API, the
+         old order endpoint as a fallback; a position Binance refuses a stop for is closed at the market after 30 s),
+         the take a reduce-only limit, the time exit at the market; a hedge-mode account switched to one-way when it
+         is flat, else the orders carry the position side. The keys in vp_binance_credentials.json (chmod 600, git
+         ignored), entered in the ⚡ tab; "проверить" shows the futures balance, the free margin, the key's rights
+         (a warning if withdrawals are on) and the position mode. Orders and trades remember their exchange, so the
+         switch never strands an open trade. tools/winrate/t_dlm_binance.py (a fake signed Binance API).
