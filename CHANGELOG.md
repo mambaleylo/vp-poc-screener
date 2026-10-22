@@ -20312,3 +20312,14 @@ v0.99.684 - ⚡ Лимитки 15м on Binance (the user: "делай для э�
          ignored), entered in the ⚡ tab; "проверить" shows the futures balance, the free margin, the key's rights
          (a warning if withdrawals are on) and the position mode. Orders and trades remember their exchange, so the
          switch never strands an open trade. tools/winrate/t_dlm_binance.py (a fake signed Binance API).
+v0.99.685 - ⚡ 🪜 the risk / withdrawal ladder (the user: "лесенку, включать кнопкой в настройках… давай сразу второй
+         вариант"): a settings switch; the risk of a new ⚡ trade by the account size relative to the start deposit B
+         (the risk field unused): "больше прибыли" (default) 50% below 3B, 30% below 10B, 15% above; at 5 x the money
+         kept working K a Telegram reminder to withdraw half the profit, the rest keeps working ("надёжнее": 50% / 25%
+         / 15% at 2B / 5B, all above B withdrawn). The bot reads the account every 10 min; on Binance a transfer out of
+         the futures wallet after the reminder is taken as the withdrawal (a stop drops the balance as much, so the
+         balance alone never moves K), on Gate a "запомнить баланс" button; a burnt account starts over from B. The
+         ⚡ tab shows the balance, the risk step, the next withdrawal, and both ladders replayed on the real trades.
+         Research (tools/winrate, trades drawn independently, 12 months from $100): "больше" backtest +$12 950 /
+         cautious +$1 500 (16% of years in minus) / harsh +$200; "надёжнее" +$1 940 / +$890 (8%) / +$400; the flat
+         50% with all above $100 at $500 +$1 920 / +$860 (12%) / +$360. tools/winrate/t_dlm_ladder.py.

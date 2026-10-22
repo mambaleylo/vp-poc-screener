@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.684"
+APP_VERSION = "0.99.685"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1156,7 +1156,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones", "risk_pct_zm", "risk_pct_rbx", "rbx_enabled", "autotrade_rbx", "telegram_alerts_rbx", "rbx_part",
                   "cas_enabled", "autotrade_cas", "telegram_alerts_cas", "risk_pct_cas",   # v0.99.653
                   "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
-                  "dlm_enabled", "autotrade_dlm", "telegram_alerts_dlm", "risk_pct_dlm", "dlm_single", "dlm_binance",   # v0.99.679, v0.99.683, v0.99.684
+                  "dlm_enabled", "autotrade_dlm", "telegram_alerts_dlm", "risk_pct_dlm", "dlm_single", "dlm_binance", "dlm_ladder", "dlm_ladder_mode", "dlm_ladder_base",   # v0.99.679, v0.99.683, v0.99.684, v0.99.685
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
@@ -1242,6 +1242,7 @@ def get_settings():
         "dlm_enabled": DLM_ENABLED, "autotrade_dlm": AUTOTRADE_ENABLED_DLM, "telegram_alerts_dlm": TELEGRAM_ALERTS_DLM, "risk_pct_dlm": MODULE_RISK_PCT.get("dlm"),   # v0.99.679
         "dlm_single": DLM_SINGLE,   # v0.99.683
         "dlm_binance": DLM_BINANCE,   # v0.99.684
+        "dlm_ladder": DLM_LADDER, "dlm_ladder_mode": DLM_LADDER_MODE, "dlm_ladder_base": DLM_LADDER_BASE,   # v0.99.685
         "autotrade_zones": AUTOTRADE_ENABLED_ZONES,
         "autotrade_zones_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
         "zones_own_scan": ZONES_OWN_SCAN, "autotrade_zones_own": AUTOTRADE_ENABLED_ZONES_OWN,   # v0.99.452
@@ -1529,9 +1530,18 @@ def apply_settings(updates):
                    ("cas_enabled", "CAS_ENABLED"), ("autotrade_cas", "AUTOTRADE_ENABLED_CAS"), ("telegram_alerts_cas", "TELEGRAM_ALERTS_CAS"),
                    ("smc_enabled", "SMC_ENABLED"), ("autotrade_smc", "AUTOTRADE_ENABLED_SMC"), ("telegram_alerts_smc", "TELEGRAM_ALERTS_SMC"),
                    ("dlm_enabled", "DLM_ENABLED"), ("autotrade_dlm", "AUTOTRADE_ENABLED_DLM"), ("telegram_alerts_dlm", "TELEGRAM_ALERTS_DLM"),
-                   ("dlm_single", "DLM_SINGLE"), ("dlm_binance", "DLM_BINANCE")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
+                   ("dlm_single", "DLM_SINGLE"), ("dlm_binance", "DLM_BINANCE"), ("dlm_ladder", "DLM_LADDER")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
         if _k in updates:
             globals()[_g] = bool(updates[_k])
+    if updates.get("dlm_ladder_mode") in ("grow", "safe"):   # v0.99.685
+        globals()["DLM_LADDER_MODE"] = updates["dlm_ladder_mode"]
+    if "dlm_ladder_base" in updates and not isinstance(updates["dlm_ladder_base"], bool):
+        try:
+            v = float(updates["dlm_ladder_base"])
+            if v >= 10:
+                globals()["DLM_LADDER_BASE"] = min(v, 1e6)
+        except (TypeError, ValueError):
+            pass
     if "zones_zm_enabled" in updates:   # v0.99.616
         globals()["ZM_ENABLED"] = bool(updates["zones_zm_enabled"])
     if "autotrade_zones_zm" in updates:
@@ -33992,8 +34002,21 @@ DLM_POLL_SEC = 5
 # while the trade is open; the risk scaled down when the account's free margin cannot carry it.
 DLM_SINGLE = os.environ.get("VP_DLM_SINGLE", "0") == "1"
 DLM_ARM_ATR = 0.5
+# v0.99.685 — 🪜 the risk / withdrawal ladder (the user: "лесенку, включать кнопкой в настройках"; tools/winrate dlm_ladder.py:
+# trades drawn independently from the one-at-a-time sequence, 12 months from $100, a wipe -> a new deposit). The risk by
+# the account's size relative to the start deposit B, a withdrawal reminder when the account reached 5 x the money kept
+# working K:
+#   "grow" (more if live ~ backtest): 50% < 3B, 30% < 10B, 15% above; at 5K withdraw half the profit, the rest keeps working
+#            — backtest +$12 950 / cautious +$1 500 (16% of years in minus) / harsh +$200 (38%)
+#   "safe": 50% < 2B, 25% < 5B, 15% above; at 5K withdraw all above B — +$1 940 / +$890 (8%) / +$400 (25%)
+# (the plain 50% with all above $100 at $500: +$1 920 / +$860 (12%) / +$360 (29%)). The bot never withdraws (the key has no
+# such right): it tells when and how much, notices the balance drop after the withdrawal and moves K.
+DLM_LADDER = os.environ.get("VP_DLM_LADDER", "0") == "1"
+DLM_LADDER_MODE = "grow"
+DLM_LADDER_BASE = 100.0
+DLM_LADDERS = {"grow": ((3.0, 50.0), (10.0, 30.0), (None, 15.0)), "safe": ((2.0, 50.0), (5.0, 25.0), (None, 15.0))}
 DLM_FEE_IN, DLM_FEE_TAKE, DLM_FEE_OUT, DLM_FUND = 0.0002, 0.0002, 0.0005, 0.0003
-_DLM = {"model": None, "err": None, "orders": [], "trades": [], "scan": None, "bar_done": None, "loaded": False}
+_DLM = {"model": None, "err": None, "orders": [], "trades": [], "scan": None, "bar_done": None, "loaded": False, "ladder": {}}
 _dlm_lock = threading.Lock()
 
 
@@ -34166,7 +34189,7 @@ def dlm_load():
             with open(DLM_STATE_FILE) as f:
                 d = json.load(f)
             with _dlm_lock:
-                for k in ("orders", "trades", "scan", "bar_done"):
+                for k in ("orders", "trades", "scan", "bar_done", "ladder"):
                     if d.get(k) is not None:
                         _DLM[k] = d[k]
     except Exception as e:
@@ -34177,7 +34200,8 @@ def dlm_load():
 def dlm_save():
     try:
         with _dlm_lock:
-            data = json.dumps({"orders": _DLM["orders"][-400:], "trades": _DLM["trades"][-3000:], "scan": _DLM["scan"], "bar_done": _DLM.get("bar_done")})
+            data = json.dumps({"orders": _DLM["orders"][-400:], "trades": _DLM["trades"][-3000:], "scan": _DLM["scan"], "bar_done": _DLM.get("bar_done"),
+                               "ladder": _DLM.get("ladder") or {}})
         tmp = DLM_STATE_FILE + ".tmp"
         with open(tmp, "w") as f:
             f.write(data)
@@ -34204,6 +34228,135 @@ def _dlm_bars(sym, start, now):
 def _dlm_closed_gate(sym, tf, sec, n, now):
     cs = get_candles_range(sym, tf, int(now) - (n + 2) * sec, int(now)) or []
     return [c for c in cs if c["time"] + sec <= now][-n:]
+
+
+def dlm_risk(equity):
+    """the risk % of a new ⚡ trade: the ladder's step by the account size when it is on, else the module's field"""
+    if DLM_LADDER and equity:
+        base = DLM_LADDER_BASE or 100.0
+        for lim, r in DLM_LADDERS.get(DLM_LADDER_MODE, DLM_LADDERS["grow"]):
+            if lim is None or equity < lim * base:
+                return r
+    return MODULE_RISK_PCT.get("dlm") or DLM_RISK_DEFAULT
+
+
+def dlm_ladder_plan(eq):
+    """the ladder for an account of eq: the risk now, the money kept working K, the next withdrawal (at 5 K: how much)"""
+    base = DLM_LADDER_BASE or 100.0
+    L = _DLM.get("ladder") or {}
+    K = float(L.get("K") or base)
+    target = 5.0 * K
+    if eq is not None and eq >= target:
+        w = (eq - K) / 2 if DLM_LADDER_MODE == "grow" else max(0.0, eq - base)
+    else:
+        w = (target - K) / 2 if DLM_LADDER_MODE == "grow" else target - base
+    steps = [{"below": (lim * base if lim else None), "risk": r} for lim, r in DLM_LADDERS.get(DLM_LADDER_MODE, DLM_LADDERS["grow"])]
+    return {"on": DLM_LADDER, "mode": DLM_LADDER_MODE, "base": base, "K": round(K, 2), "eq": eq, "eq_t": L.get("eq_t"),
+            "risk": dlm_risk(eq) if eq else None, "target": round(target, 2), "withdraw": round(w, 2),
+            "keep": round((eq if eq and eq >= target else target) - w, 2), "due": bool(eq is not None and eq >= target), "steps": steps,
+            "note": L.get("note")}
+
+
+def dlm_ladder_replay(rs, mode, base):
+    """both ladders side by side (the user: "торговать одну, а вторую логировать"): the real trades' R played through a
+    ladder from the start deposit — withdrawn, on the account, deposited (a wipe -> a new deposit)"""
+    eq, K, deps, wd, nw = base, base, base, 0.0, 0
+    for r in rs:
+        risk = 15.0
+        for lim, rr in DLM_LADDERS[mode]:
+            if lim is None or eq < lim * base:
+                risk = rr
+                break
+        eq *= max(0.0, 1 + risk / 100.0 * r)
+        if eq < max(0.1 * base, 6.0):
+            eq, K, deps = base, base, deps + base
+        elif eq >= 5 * K:
+            w = (eq - K) / 2 if mode == "grow" else eq - base
+            wd += w; eq -= w; K = eq; nw += 1
+    return {"withdrawn": round(wd, 2), "account": round(eq, 2), "deposited": round(deps, 2), "net": round(wd + eq - deps, 2), "withdrawals": nw}
+
+
+def dlm_equity():
+    """the account the real ⚡ trades use (Binance or Gate), USDT incl. the open P&L; None when it can't be read"""
+    try:
+        if DLM_BINANCE:
+            return bnf_account()["equity"] if (BINANCE_API_KEY and BINANCE_API_SECRET) else None
+        with using_account("dlm"):
+            return get_futures_total_equity()
+    except Exception as e:
+        log_error(f"dlm equity: {e}")
+        return None
+
+
+def bnf_transfers_out(since):
+    """USDT moved out of the Binance futures wallet since `since` (unix s): the TRANSFER income records, negative = out"""
+    rows = bnf_req("GET", "/fapi/v1/income", {"incomeType": "TRANSFER", "startTime": int(since * 1000), "limit": 1000}) or []
+    return -sum(float(x.get("income") or 0) for x in rows if x.get("asset") in ("USDT", None) and float(x.get("income") or 0) < 0)
+
+
+def dlm_ladder_tick(eq=None):
+    """every 10 min with the ladder on: the account read; 5 K reached -> one Telegram reminder; on Binance a transfer out
+    of the futures wallet after the reminder (>= half the sum) = the withdrawal done, K = the balance now (a stop drops
+    the balance as much, so the balance alone never decides); on Gate the "rebase" button; the account burnt -> K = B"""
+    if eq is None:
+        eq = dlm_equity()
+    if eq is None:
+        return
+    base = DLM_LADDER_BASE or 100.0
+    with _dlm_lock:
+        L = _DLM.setdefault("ladder", {})
+        busy = any(t["status"] == "OPEN" and t.get("real") for t in _DLM["trades"])
+        L.update({"eq": round(eq, 2), "eq_t": int(time.time())})
+        if not L.get("K"):
+            L["K"] = base
+        K = float(L["K"])
+    msg = None
+    p = dlm_ladder_plan(eq)
+    out = 0.0
+    if L.get("due_K") and DLM_BINANCE:
+        try:
+            out = bnf_transfers_out(L.get("due_t") or time.time())
+        except Exception as e:
+            log_error(f"dlm ladder transfers: {e}")
+    with _dlm_lock:
+        if L.get("due_K") and out >= 0.5 * (L.get("due_w") or 0) and not busy:   # withdrawn
+            L.update({"K": round(eq, 2), "due_K": None, "note": f"вывод ${out:.0f} замечен {time.strftime('%d.%m %H:%M')}: работает ${eq:.0f}"})
+            msg = f"🪜 ⚡ Вывод ${out:.0f} замечен. Теперь работает ${eq:.0f}, следующий вывод — при ${5 * eq:.0f}"
+        elif eq < max(0.1 * base, 6.0) and not busy:   # burnt: the next attempt starts from the base
+            if not L.get("burnt"):
+                L.update({"K": base, "burnt": True, "due_K": None, "note": f"счёт сгорел {time.strftime('%d.%m %H:%M')} — новая попытка с ${base:.0f}"})
+                msg = f"🪜 ⚡ Счёт сгорел (${eq:.2f}). Для новой попытки пополните фьючерсный счёт до ${base:.0f}"
+        elif p["due"] and L.get("due_K") != K:
+            L.update({"due_K": K, "due_t": time.time(), "due_w": p["withdraw"]})
+            msg = (f"🪜 ⚡ Пора вывести ${p['withdraw']:.0f}: на счёте ${eq:.0f} (цель была ${p['target']:.0f}), "
+                   f"оставьте работать ${p['keep']:.0f}. " + ("Активы → Перевод: Фьючерсы USDⓈ-M → Спот — бот заметит перевод сам"
+                                                          if DLM_BINANCE else "После вывода нажмите во вкладке ⚡ «запомнить баланс»"))
+        if eq >= base * 0.5:
+            L["burnt"] = False
+    if msg:
+        send_telegram(msg, category="dlm")
+    dlm_save()
+
+
+@app.route("/api/dlm/ladder", methods=["POST"])
+def api_dlm_ladder():
+    """the ladder's buttons: "rebase" = the current balance becomes the money kept working (after a manual withdrawal /
+    deposit)"""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        if body.get("action") == "rebase":
+            eq = dlm_equity()
+            if eq is None:
+                return jsonify({"ok": False, "error": "баланс не прочитался — проверьте ключи"})
+            with _dlm_lock:
+                L = _DLM.setdefault("ladder", {})
+                L.update({"K": round(eq, 2), "eq": round(eq, 2), "eq_t": int(time.time()), "due_K": None,
+                          "note": f"база задана вручную {time.strftime('%d.%m %H:%M')}: ${eq:.0f}"})
+            dlm_save()
+        return jsonify({"ok": True, "ladder": dlm_ladder_plan((_DLM.get("ladder") or {}).get("eq"))})
+    except Exception as e:
+        log_error(f"api dlm ladder: {e}")
+        return jsonify({"ok": False, "error": str(e)[:200]})
 
 
 def dlm_scan(t_bar):
@@ -34370,8 +34523,8 @@ def dlm_real_place(o):
         with state_lock:
             mmr = (STATE.get("scalp_mmr_map") or {}).get(sym, SCALP_DEFAULT_MMR_PCT)
         tiers = get_risk_limit_tiers_for_symbol(sym)
-        risk = MODULE_RISK_PCT.get("dlm") or DLM_RISK_DEFAULT
         equity = get_futures_total_equity()
+        risk = dlm_risk(equity)
         rule = ((_DLM.get("model") or {}).get("rule") or {})
         sl = o["lv"] - s * float(rule.get("stop_atr", 2.0)) * o["atr"]
         margin, lev, skip = compute_risk_based_position(direction, o["lv"], sl, cap, mmr, equity, risk_pct=risk, symbol=sym,
@@ -34451,7 +34604,7 @@ def dlm_bn_place(o):
     cap = max((t_[2] for t_ in tiers), default=20)
     mmr = tiers[0][1] if tiers else SCALP_DEFAULT_MMR_PCT
     acct = bnf_account()
-    risk = MODULE_RISK_PCT.get("dlm") or DLM_RISK_DEFAULT
+    risk = dlm_risk(acct["equity"])
     tb = {bsym: tiers} if tiers else None
     margin, lev, skip = compute_risk_based_position(direction, lv, sl, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb)
     if not skip and margin > acct["free"] * 0.9:   # the free margin checked: the risk scaled down to what the account carries
@@ -34793,6 +34946,9 @@ def dlm_loop():
                         dlm_scan(t_bar)
                     with _dlm_lock:
                         _DLM["bar_done"] = t_bar
+                if DLM_LADDER and AUTOTRADE_ENABLED_DLM and time.time() - _DLM.get("ladder_t", 0) >= 600:   # v0.99.685
+                    _DLM["ladder_t"] = time.time()
+                    dlm_ladder_tick()
                 if AUTOTRADE_ENABLED_DLM:
                     with live_http():
                         dlm_real_tick()
@@ -34818,7 +34974,10 @@ def dlm_stats():
     real = [t for t in fin if t.get("real")]
     return {"on": DLM_ENABLED, "auto": AUTOTRADE_ENABLED_DLM, "tg": TELEGRAM_ALERTS_DLM, "dry": AUTOTRADE_DRY_RUN, "single": DLM_SINGLE,
             "binance": DLM_BINANCE, "bn_keys": bool(BINANCE_API_KEY and BINANCE_API_SECRET), "bn_check": _BNF.get("check"),   # v0.99.684
-            "risk": MODULE_RISK_PCT.get("dlm") or DLM_RISK_DEFAULT,
+            "ladder": dlm_ladder_plan((_DLM.get("ladder") or {}).get("eq")),   # v0.99.685
+            "ladder_cmp": {m: dlm_ladder_replay([t["r"] for t in sorted(real, key=lambda t: t.get("t_out") or 0)], m, DLM_LADDER_BASE or 100.0)
+                           for m in ("grow", "safe")} if real else None,
+            "risk": MODULE_RISK_PCT.get("dlm") or DLM_RISK_DEFAULT, "risk_now": dlm_risk((_DLM.get("ladder") or {}).get("eq")),
             "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap")} if m else None,
             "err": err, "scan": scan, "orders": orders[:40], "orders_n": len(orders),
             "open": [t for t in trades if t["status"] == "OPEN"][-40:],
@@ -39073,6 +39232,13 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setDlmBinance"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ ⚡ Лесенка риска и вывода</div>
+          <div class="sub">риск по размеру счёта: 50% пока меньше 3 стартовых депозитов, 30% до 10, дальше 15% (поле риска «⚡» не используется); когда счёт вырос в 5 раз от оставленного работать — напоминание в Telegram вывести половину прибыли. Старт, режим и кнопки — во вкладке ⚡</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setDlmLadder"><span class="switchSlider"></span></label>
+      </div>
     </div></details>
 
     <details class="settingsGroup" style="--mod-color:#a1887f;"><summary class="settingsGroupTitle">🧱 SMC</summary><div class="settingsGroupBody">
@@ -42902,6 +43068,20 @@ async function dlmSetEx(on) {   // v0.99.684 — the exchange of the real limits
   refreshDlm(true);
 }
 
+async function dlmLadderSet(obj) {   // v0.99.685 — the ladder's mode / start deposit
+  try { await fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(obj)}); } catch (e) { alert('Не сохранилось: ' + e); }
+  refreshDlm(true);
+}
+
+async function dlmLadderRebase() {
+  if (!confirm('Запомнить текущий баланс как сумму, которая работает? (после ручного вывода или пополнения)')) return;
+  try {
+    const r = await (await fetch('/api/dlm/ladder', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'rebase'})})).json();
+    if (!r.ok) alert(r.error || 'Не получилось');
+  } catch (e) { alert('Не получилось: ' + e); }
+  refreshDlm(true);
+}
+
 async function bnSaveKeys() {
   const k = document.getElementById('bnKey').value.trim(), s = document.getElementById('bnSecret').value.trim();
   if (!k || !s) { alert('Вставьте оба ключа: API Key и Secret Key'); return; }
@@ -42932,6 +43112,8 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ 15m deep limits: many 
   const panel = document.getElementById('dlmPanel');
   const kIn = document.getElementById('bnKey'), sIn = document.getElementById('bnSecret');   // v0.99.684 — keys being typed: no redraw
   if (!force && kIn && (kIn.value || (sIn && sIn.value) || document.activeElement === kIn || document.activeElement === sIn)) return;
+  const lbIn = document.getElementById('ladderBase');
+  if (!force && lbIn && document.activeElement === lbIn) return;
   let d;
   try { d = await (await fetch('/api/dlm/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
   const card = (title, body) => `<div class="zcard"><div class="zh">${title}</div>${body}</div>`;
@@ -42985,6 +43167,24 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ 15m deep limits: many 
       if (d.binance && !d.bn_keys) b += `<div class="zbanner warn" style="margin-top:8px;">Выбран Binance, но ключей нет — реальные сделки не откроются</div>`;
     }
     h += card(`🏦 Биржа: ${d.binance ? 'Binance' : 'Gate'}`, b);
+  }
+  if (d.ladder && d.ladder.on) {   // v0.99.685 — the risk / withdrawal ladder
+    const L = d.ladder, usd = v => v == null ? '—' : '$' + Math.round(v).toLocaleString('ru-RU');
+    const on = s_ => `margin-top:0;${s_ ? 'background:#ffd54f;color:#000;font-weight:600;' : ''}`;
+    const steps = (L.steps || []).map(x => `<div style="display:flex;justify-content:space-between;padding:4px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);${L.risk === x.risk ? 'font-weight:700;' : ''}">
+        <span>${x.below ? 'счёт меньше ' + usd(x.below) : 'дальше'}</span><span>риск ${x.risk}%${L.risk === x.risk ? ' ← сейчас' : ''}</span></div>`).join('');
+    let b = `<div class="ztiles z3">${tile('на счёте', usd(L.eq), L.eq_t ? hm(L.eq_t) : 'ждёт первой проверки')}${tile('риск сейчас', L.risk != null ? L.risk + '%' : '—', 'на сделку')}${tile('работает', usd(L.K), 'оставлено после вывода')}</div>
+      ${L.due ? `<div class="zbanner pos" style="margin-top:8px;">Пора вывести <b>${usd(L.withdraw)}</b>, оставить работать ${usd(L.keep)}</div>`
+        : `<div class="zsub" style="margin-top:8px;">Следующий вывод — когда на счёте будет <b>${usd(L.target)}</b>: вывести ~${usd(L.withdraw)}${L.mode === 'grow' ? ' (половину прибыли), остальное работает дальше' : ', оставить старт'}</div>`}
+      <div style="margin-top:6px;">${steps}</div>
+      <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;"><button class="zbtn" style="${on(L.mode === 'grow')}" onclick="dlmLadderSet({dlm_ladder_mode: 'grow'})">больше прибыли</button><button class="zbtn" style="${on(L.mode === 'safe')}" onclick="dlmLadderSet({dlm_ladder_mode: 'safe'})">надёжнее</button></div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:var(--fs-sm);"><span style="white-space:nowrap;">старт $</span><input id="ladderBase" type="number" min="10" step="10" value="${L.base}" onchange="dlmLadderSet({dlm_ladder_base: this.value})" style="width:80px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px;border-radius:var(--r-xs);"><span class="dim">ступени и новые попытки считаются от него</span></div>
+      ${d.ladder_cmp ? `<div class="zsub" style="margin-top:8px;">Обе лесенки на твоих реальных сделках (${d.real_n}) со старта ${usd(L.base)}:</div>
+        ${['grow', 'safe'].map(m => { const c = d.ladder_cmp[m]; return `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);${m === L.mode ? 'font-weight:700;' : ''}">
+          <span>${m === 'grow' ? 'больше прибыли' : 'надёжнее'}${m === L.mode ? ' ← включена' : ''}</span><span class="dim">выведено ${usd(c.withdrawn)} · на счёте ${usd(c.account)} · внесено ${usd(c.deposited)} · итог <b class="${c.net >= 0 ? 'win' : 'loss'}">${c.net >= 0 ? '+' : '−'}${usd(Math.abs(c.net))}</b></span></div>`; }).join('')}` : ''}
+      <button class="zbtn" onclick="dlmLadderRebase()">📌 запомнить текущий баланс как рабочий</button>
+      <div class="dim" style="font-size:var(--fs-xs);margin-top:6px;">${L.note ? L.note + ' · ' : ''}Бот сам не выводит (у ключа нет такого права): напомнит в Telegram${d.binance ? ', а перевод с фьючерсного счёта заметит сам' : ', после вывода нажмите кнопку выше'}. ${L.mode === 'grow' ? 'Если реальность как бэктест — около +$13 000 за год со $100; осторожно — около +$1 500 (минус 1 год из 6).' : 'Около +$1 900 за год со $100 при бэктесте, осторожно — около +$900 (минус 1 год из 12).'}</div>`;
+    h += card(`🪜 Лесенка: ${L.mode === 'grow' ? 'больше прибыли' : 'надёжнее'}`, b);
   }
   const sc = d.scan, ords = d.orders || [];
   const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;">
@@ -44353,6 +44553,7 @@ const setInputs = {
   telegram_alerts_dlm: document.getElementById('setTgDlm'),
   dlm_single: document.getElementById('setDlmSingle'),   // v0.99.683
   dlm_binance: document.getElementById('setDlmBinance'),   // v0.99.684
+  dlm_ladder: document.getElementById('setDlmLadder'),   // v0.99.685
   autotrade_smc: document.getElementById('setAutotradeSmc'),
   telegram_alerts_smc: document.getElementById('setTgSmc'),
   autotrade_zones_zm: document.getElementById('setAutotradeZonesZm'),
