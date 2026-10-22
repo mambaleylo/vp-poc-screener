@@ -20259,3 +20259,18 @@ v0.99.678 - 🧱 SMC — a new module (the user: "пробуем разные в
          Fix: the risk fields of 📐 EMA, 📈 Breakout and 🌊 Cascade were wired as switches in the settings page — a
          typed risk was sent as "false" and reset to the module's default (0.5%); now number fields, and a stray
          "false" never resets a risk. t_smc_parity.py, t_smc_bot.py, t_smc_ui.py.
+v0.99.679 - ⚡ Лимитки 15м — a new module (the user: "главная цель только винрейт и количество сделок, пусть это будет
+         хоть минутный тайм фрейм… не важно rr какой, главное положительный", then "Все делай"). The hunt
+         (tools/winrate) on 15m bars of the 127 coins 2020–26 with small takes and wide stops: deep limits 2 / 3 ATR
+         into wicks, Bollinger / day-VWAP bands, EMA20 pullbacks, 24 h sweeps — on their own WR 75–89% but all at or
+         below zero after fees; with a walk-forward model (every 3rd coin never trained on) one held: at the close of a
+         15m bar a limit 2 x ATR(15m) away, alive 4 bars; the model's top 2% — take 0.5 ATR, stop 2 ATR, out after 4 h:
+         WR 84%, +0.045R a trade (check coins +0.034R), every year 2022–26 in plus, a trade in 99% of the weeks,
+         ~270 a month on the 127 coins. On Binance 1m bars (the exact stop / take order) WR 87%, +0.07R; a fill only
+         0.05% through the limit: WR 85%, +0.05R; all fees taker: +0.02R. Small per trade and stops come in runs (up
+         to ~12): the growth at an equal 1-in-10 drawdown ~x3/yr (x1.4 on the check coins) at ~1% risk. The same on
+         5m bars (1m klines of 40 coins, 2 years): below zero. The bot scans every 15m close (features equal the
+         research to float precision; it re-makes the backtest trades to the R); virtual by default, the real mode
+         ("↳ ⚡ Лимитки 15м") places GTC limits on Gate (at most 10 at once, only on coins without a position), then
+         the stop as a trigger and the take as a reduce-only limit (maker), closes the rest after 4 h. Risk default
+         0.5% (the "⚡" field), Telegram off by default (~10 trades a day). The backtest chart draws 15m candles.

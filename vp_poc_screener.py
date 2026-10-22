@@ -64,7 +64,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.678"
+APP_VERSION = "0.99.679"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1155,6 +1155,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones", "risk_pct_zm", "risk_pct_rbx", "rbx_enabled", "autotrade_rbx", "telegram_alerts_rbx", "rbx_part",
                   "cas_enabled", "autotrade_cas", "telegram_alerts_cas", "risk_pct_cas",   # v0.99.653
                   "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
+                  "dlm_enabled", "autotrade_dlm", "telegram_alerts_dlm", "risk_pct_dlm",   # v0.99.679
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
@@ -1237,6 +1238,7 @@ def get_settings():
         "telegram_alerts_rbx": TELEGRAM_ALERTS_RBX, "rbx_part": RBX_PART,
         "cas_enabled": CAS_ENABLED, "autotrade_cas": AUTOTRADE_ENABLED_CAS, "telegram_alerts_cas": TELEGRAM_ALERTS_CAS, "risk_pct_cas": MODULE_RISK_PCT.get("cas"),   # v0.99.653
         "smc_enabled": SMC_ENABLED, "autotrade_smc": AUTOTRADE_ENABLED_SMC, "telegram_alerts_smc": TELEGRAM_ALERTS_SMC, "risk_pct_smc": MODULE_RISK_PCT.get("smc"),   # v0.99.678
+        "dlm_enabled": DLM_ENABLED, "autotrade_dlm": AUTOTRADE_ENABLED_DLM, "telegram_alerts_dlm": TELEGRAM_ALERTS_DLM, "risk_pct_dlm": MODULE_RISK_PCT.get("dlm"),   # v0.99.679
         "autotrade_zones": AUTOTRADE_ENABLED_ZONES,
         "autotrade_zones_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
         "zones_own_scan": ZONES_OWN_SCAN, "autotrade_zones_own": AUTOTRADE_ENABLED_ZONES_OWN,   # v0.99.452
@@ -1519,7 +1521,8 @@ def apply_settings(updates):
         globals()["AUTO_UPDATE"] = bool(updates["auto_update"])
     for _k, _g in (("rbx_enabled", "RBX_ENABLED"), ("autotrade_rbx", "AUTOTRADE_ENABLED_RBX"), ("telegram_alerts_rbx", "TELEGRAM_ALERTS_RBX"), ("rbx_part", "RBX_PART"),
                    ("cas_enabled", "CAS_ENABLED"), ("autotrade_cas", "AUTOTRADE_ENABLED_CAS"), ("telegram_alerts_cas", "TELEGRAM_ALERTS_CAS"),
-                   ("smc_enabled", "SMC_ENABLED"), ("autotrade_smc", "AUTOTRADE_ENABLED_SMC"), ("telegram_alerts_smc", "TELEGRAM_ALERTS_SMC")):   # v0.99.625, v0.99.653, v0.99.678
+                   ("smc_enabled", "SMC_ENABLED"), ("autotrade_smc", "AUTOTRADE_ENABLED_SMC"), ("telegram_alerts_smc", "TELEGRAM_ALERTS_SMC"),
+                   ("dlm_enabled", "DLM_ENABLED"), ("autotrade_dlm", "AUTOTRADE_ENABLED_DLM"), ("telegram_alerts_dlm", "TELEGRAM_ALERTS_DLM")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
         if _k in updates:
             globals()[_g] = bool(updates[_k])
     if "zones_zm_enabled" in updates:   # v0.99.616
@@ -1551,7 +1554,7 @@ def apply_settings(updates):
             globals()[_g] = bool(updates[_k])
     if updates.get("emw_enabled"):
         EMW_BACKTEST_TRIGGER.set()
-    for _mod in ("neuro", "snr", "prv", "zones", "emw", "zm", "rbx", "cas", "smc"):   # v0.99.435 — own risk % per module; empty / 0 = the common one
+    for _mod in ("neuro", "snr", "prv", "zones", "emw", "zm", "rbx", "cas", "smc", "dlm"):   # v0.99.435 — own risk % per module; empty / 0 = the common one
         _key = f"risk_pct_{_mod}"
         if _key in updates and isinstance(updates[_key], bool):
             continue   # v0.99.678 — an old page sent the number field's "checked" (false): never a risk reset
@@ -7540,6 +7543,7 @@ LOOP_MAX_GAP_SEC = {
     "rbx_loop": 3 * 3600,   # v0.99.625 — once a day, beats every minute
     "cas_loop": 60 * 60,   # v0.99.653 — 🌊 EMA cascade
     "smc_loop": 60 * 60,   # v0.99.678 — 🧱 SMC, beats per coin while the hour's levels are counted
+    "dlm_loop": 30 * 60,   # v0.99.679 — ⚡ 15m deep limits, beats every 5 s and per coin while scanning
     "hdg_loop": 10 * 60,   # v0.99.628 — 🪞 hedge mirror, beats every 5 s
     "auto_update_loop": 30 * 60,   # v0.99.637 — beats every 10 min
     "emx_loop": 60 * 60,   # v0.99.618 — «EMA — касания» (the W/M loops no longer run); v0.99.619 — 15 -> 60 min, the hourly levels of 120 coins take longer on the phone (it beats per coin too)
@@ -7556,7 +7560,7 @@ LOOP_MAX_GAP_SEC = {
 LOOP_LABELS = {
     "scan_loop": "Volume скан", "msnr_live_loop": "MSNR живой скан",
     "lsw_live_loop": "Sweep живой скан", "snr_live_loop": "S/R живой скан",
-    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "cas_loop": "🌊 Каскад", "smc_loop": "🧱 SMC", "hdg_loop": "🪞 Хедж", "auto_update_loop": "автообновление", "nx_loop": "Нейро",
+    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "cas_loop": "🌊 Каскад", "smc_loop": "🧱 SMC", "dlm_loop": "⚡ Лимитки 15м", "hdg_loop": "🪞 Хедж", "auto_update_loop": "автообновление", "nx_loop": "Нейро",
     "reconcile_loop": "сверка позиций (автоторговля)",
     "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
     "snr_backtest_loop": "S/R бэктест",
@@ -9177,7 +9181,7 @@ def kelly_risk(pairs):
             "auto_risk_n": n, "auto_risk_avg_r": round(mean, 3), "auto_risk_cautious_r": round(mean - se, 3)}
 
 
-MODULE_RISK_PCT = {"neuro": None, "snr": None, "prv": None, "zones": None, "emw": None, "zm": None, "rbx": None, "cas": None, "smc": None}   # v0.99.435 — own risk % per module (None = the common one)
+MODULE_RISK_PCT = {"neuro": None, "snr": None, "prv": None, "zones": None, "emw": None, "zm": None, "rbx": None, "cas": None, "smc": None, "dlm": None}   # v0.99.435 — own risk % per module (None = the common one)
 RISK_PCT_MAX = 100.0   # v0.99.435 — user: "не ограничивай 50%"
 
 
@@ -26294,7 +26298,7 @@ def _zones_outbox_save():
 
 TELEGRAM_ALERTS_TRADE_RESULTS = os.environ.get("VP_TG_TRADE_RESULTS", "1") == "1"            # v0.99.457
 TELEGRAM_TRADE_RESULTS_REAL_ONLY = os.environ.get("VP_TG_TRADE_RESULTS_REAL", "0") == "1"
-_TRADE_MOD_NAMES = {"rbx": "📈 Пробой", "cas": "🌊 Каскад", "smc": "🧱 SMC", "zones_zm": "🎯 Сильные зоны", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "zones": "Зоны",
+_TRADE_MOD_NAMES = {"rbx": "📈 Пробой", "cas": "🌊 Каскад", "smc": "🧱 SMC", "dlm": "⚡ Лимитки 15м", "zones_zm": "🎯 Сильные зоны", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "zones": "Зоны",
                     "zones_own": "Зоны · 🔎 наш поиск", "zones_appr": "Зоны · движение к зоне", "zones_pb": "Зоны · 🧪 откат"}
 
 
@@ -31739,7 +31743,8 @@ def model_refresh_once():
                                          ("🧠 Нейро", NX_MODEL_FILE, NX_MODEL_URL, NX_MODEL_VER, _nx_lock, _NX),
                                          ("P/R", PRX_MODEL_FILE, PRX_MODEL_URL, PRX_MODEL_VER, _prx_lock, _PRX),
                                          ("🌊 Каскад", CAS_MODEL_FILE, CAS_MODEL_URL, CAS_MODEL_VER, _cas_lock, _CAS),
-                                         ("🧱 SMC", SMC_MODEL_FILE, SMC_MODEL_URL, SMC_MODEL_VER, _smc_lock, _SMC)):
+                                         ("🧱 SMC", SMC_MODEL_FILE, SMC_MODEL_URL, SMC_MODEL_VER, _smc_lock, _SMC),
+                                         ("⚡ Лимитки 15м", DLM_MODEL_FILE, DLM_MODEL_URL, DLM_MODEL_VER, _dlm_lock, _DLM)):
         try:
             local = 0
             if os.path.exists(fn):
@@ -31877,6 +31882,24 @@ def bt_gate_trade(mod, t):
                 return res(tp, k)
         k = min(48, len(bars)) - 1
         return res(bars[k]["close"], k)
+    if mod == "dlm":     # v0.99.679 — ⚡ the limit at lv alive 4 bars of 15m on Gate, take 0.5 / stop 2 ATR (as shares of the entry), 16 bars
+        bars = [c for c in bt_gate_bars(t["s"], "15m", t["t"], t["t"] + 21 * 900) if c["time"] >= t["t"]]
+        if len(bars) < 5 or bars[0]["time"] != t["t"]:
+            return None
+        lv = float(t.get("lv") or e_b)
+        f = next((k for k, c in enumerate(bars[:4]) if ((c["low"] <= lv) if s > 0 else (c["high"] >= lv))), None)
+        if f is None:
+            return 0.0, False
+        e = min(lv, bars[f]["open"]) if s > 0 else max(lv, bars[f]["open"])
+        risk = e * abs(e_b - float(t["sl"])) / e_b; sl = e - s * risk; tp = e + s * e * abs(float(t["tp"]) - e_b) / e_b
+        fq = lambda ex, k, take: (s * (ex - e) - (0.0002 + (0.0002 if take else 0.0005) + 0.0003 * (k + 1) / 96) * e) / risk
+        for k, c in enumerate(bars[f:f + 16]):
+            if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
+                return fq(c["open"] if k and ((c["open"] <= sl) if s > 0 else (c["open"] >= sl)) else sl, k, False), True
+            if k and ((c["high"] >= tp) if s > 0 else (c["low"] <= tp)):
+                return fq(tp, k, True), True
+        k = min(16, len(bars) - f) - 1
+        return fq(bars[f + k]["close"], k, False), True
     if mod in ("prv", "emx", "smc"):   # v0.99.678 — 🧱 SMC: the limit at the level like EMA, no partial take
         hold = 48 if mod == "prv" else 72
         bars = [c for c in bt_gate_bars(t["s"], "1h", t["t"], t["t"] + (hold + 1) * 3600) if c["time"] >= t["t"]]
@@ -31979,7 +32002,7 @@ def bt_gate_check(mod, months=12):
 @app.route("/api/bt/gatecheck", methods=["GET", "POST"])
 def api_bt_gatecheck():
     mod = request.args.get("mod", "prv")
-    if mod not in ("prv", "emx", "rbx", "cas", "smc"):
+    if mod not in ("prv", "emx", "rbx", "cas", "smc", "dlm"):
         return jsonify({"err": "модуль?"})
     with _btg_lock:
         st = dict(_BTG.get(mod) or {})
@@ -32106,8 +32129,7 @@ def api_bt_chart(symbol):
     try:
         ch = request.args.get("c", "1d")
         t = int(float(request.args.get("t") or 0)); x = int(float(request.args.get("x") or 0)) or int(time.time())
-        hrs = {"1h": 1, "4h": 4, "12h": 12, "1d": 24}.get(ch, 24)
-        sec = hrs * 3600
+        sec = {"15m": 900, "1h": 3600, "4h": 14400, "12h": 43200, "1d": 86400}.get(ch, 86400)   # v0.99.679 — ⚡ 15m
         before = int(request.args.get("before") or 6)     # the entry near the left edge: the trade itself gets the room
         after = int(request.args.get("after") or 30)
         start = t - before * sec
@@ -32119,10 +32141,10 @@ def api_bt_chart(symbol):
         if not bars and ch in ("1h", "4h"):   # the user: "может с бинанса тогда подгружать? просто указывать это"
             bars = binance_klines(symbol, ch, start, end)
             src = "binance" if bars else "gate"
-        if not bars and ch in ("1h", "4h"):
+        if not bars and ch in ("15m", "1h", "4h"):
             # v0.99.659 — Gate keeps only the last ~9800 candles of a chart (1h ≈ 13 months): an older trade is drawn on 4h / day
-            for alt in (("4h", "1d") if ch == "1h" else ("1d",)):
-                a_sec = {"4h": 4, "1d": 24}[alt] * 3600
+            for alt in ({"15m": ("1h", "4h"), "1h": ("4h", "1d")}.get(ch) or ("1d",)):
+                a_sec = {"1h": 1, "4h": 4, "1d": 24}[alt] * 3600
                 a_start = t - max(6, before * sec // a_sec) * a_sec
                 a_end = min(int(time.time()), max(max(x, t) + after * a_sec, t + 60 * a_sec))
                 bars = bt_gate_bars(symbol, alt, a_start, a_end)
@@ -33474,6 +33496,615 @@ def api_smc_status():
         return jsonify(smc_stats())
     except Exception as e:
         log_error(f"smc status: {e}")
+        return jsonify({"err": f"статистика не посчиталась: {e}"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v0.99.679 — ⚡ 15m deep limits (the user: "найти индикатор… главная цель только винрейт и количество сделок, пусть
+# это будет хоть минутный тайм фрейм… rr не важен, главное положительный"). The hunt (tools/winrate) on 15m bars of the
+# 127 coins, 2020–26, small takes and wide stops: deep limits into wicks, Bollinger / VWAP bands, EMA pullbacks, 24 h
+# sweeps — all ~0 or below after fees on their own; with a walk-forward model (every 3rd coin never trained on) only
+# the deep limit held: at the close of a 15m bar a limit 2 x ATR(15m) away from the close, alive 4 bars; the model's
+# top 2% — take 0.5 ATR, stop 2 ATR, out after 16 bars (4 h). 2022–26: WR 84%, +0.045R a trade (check coins +0.034R),
+# every year in plus, a trade in 99% of the weeks, ~270 a month on the 127 coins; on Binance 1m bars (the exact order
+# inside a bar) WR 87%, +0.07R; a fill only 0.05% through the limit: +0.05R; all fees taker: +0.02R. Small per trade:
+# the growth at an equal 1-in-10 drawdown x3/yr (x1.4 on the check coins) at ~1% risk. Its edge needs the limit
+# resting on the exchange (a market entry after the touch would eat it): the real mode places GTC limits on Gate, the
+# stop as a trigger and the take as a reduce-only limit (maker) once filled.
+DLM_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_dlm_model.json")
+DLM_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_dlm_model.json"
+DLM_MODEL_VER = 1
+DLM_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_dlm_state.json")
+DLM_ENABLED = os.environ.get("VP_DLM", "1") == "1"
+AUTOTRADE_ENABLED_DLM = os.environ.get("VP_AUTOTRADE_DLM", "0") == "1"
+TELEGRAM_ALERTS_DLM = os.environ.get("VP_TG_ALERTS_DLM", "0") == "1"   # ~10 trades a day: quiet unless asked
+DLM_RISK_DEFAULT = 0.5
+DLM_MAX_LIVE_ORDERS = int(os.environ.get("VP_DLM_MAX_LIVE", "10"))   # real limits on the exchange at once (margin)
+DLM_POLL_SEC = 5
+DLM_FEE_IN, DLM_FEE_TAKE, DLM_FEE_OUT, DLM_FUND = 0.0002, 0.0002, 0.0005, 0.0003
+_DLM = {"model": None, "err": None, "orders": [], "trades": [], "scan": None, "bar_done": None, "loaded": False}
+_dlm_lock = threading.Lock()
+
+
+# The research engine (tools/winrate/s15_engine.py, family deep2) re-done for the LAST closed 15m bar of one coin, in pure
+# Python: the limit level of each side, and the model's 28 features. b15 = the coin's closed 15m bars (>= 2900, oldest
+# first), d1 = its closed daily bars, bb15 = BTC's closed 15m bars.
+DLM_FNAMES = ["fam", "side", "atrp", "datr", "depth", "hour", "dow", "r1h", "r4h", "r24h", "e20", "e50", "e200", "sl50", "rsi", "rsi4",
+              "bbz", "vwz", "pos96", "volr", "b4h", "b24h", "batr", "wick", "rng", "since", "r7d", "dpos30"]
+
+
+def dlm_wilder(H, L, C, n=14):
+    out = [None] * len(C)
+    if len(C) <= n:
+        return out
+    s = 0.0
+    for i in range(n):
+        s += (H[i] - L[i]) if i == 0 else max(H[i] - L[i], abs(H[i] - C[i - 1]), abs(L[i] - C[i - 1]))
+    a = s / n
+    out[n - 1] = a
+    for i in range(n, len(C)):
+        a = (a * (n - 1) + max(H[i] - L[i], abs(H[i] - C[i - 1]), abs(L[i] - C[i - 1]))) / n
+        out[i] = a
+    return out
+
+
+def dlm_ema(x, n):
+    out, k, e = [0.0] * len(x), 2.0 / (n + 1), x[0]
+    for i, v in enumerate(x):
+        e = v if i == 0 else e + k * (v - e)
+        out[i] = e
+    return out
+
+
+def dlm_rsi(C, n):
+    out = [50.0] * len(C)
+    au = ad = 0.0
+    for i in range(1, len(C)):
+        d = C[i] - C[i - 1]
+        u, dn = (d if d > 0 else 0.0), (-d if d < 0 else 0.0)
+        if i <= n:
+            au += u / n; ad += dn / n
+        else:
+            au = (au * (n - 1) + u) / n; ad = (ad * (n - 1) + dn) / n
+        if i >= n:
+            out[i] = 100 - 100 / (1 + au / ad) if ad > 0 else 100.0
+    return out
+
+
+def dlm_since(H, L, C, atr, side, i0, depth=2.0, alive=4, back=1000):
+    """bars from the last FILLED deep limit of this side (the research's event process: one order a bar while none is
+    filled-and-open, alive `alive` bars) to the bar i0; fills known only up to i0. None = an earlier order filled at
+    i0 itself (the research has no order at i0 then)"""
+    last, busy = None, -1
+    for j in range(max(300, i0 - back), i0):
+        if busy > j or atr[j] is None or not atr[j] > 0:
+            continue
+        lv = C[j] - side * depth * atr[j]
+        for b in range(j + 1, min(j + alive, i0) + 1):
+            if (L[b] <= lv) if side > 0 else (H[b] >= lv):
+                last, busy = j, b + 1
+                break
+    if busy > i0:
+        return None
+    return min(999, i0 - last) if last is not None else 999
+
+
+def dlm_candidates(b15, d1, bb15):
+    """-> [{"side", "lv", "atr", "f": [28]}] for the last closed bar (both sides), [] when the data is short"""
+    n = len(b15)
+    if n < 2900 or len(d1) < 20 or len(bb15) < 120:
+        return []
+    T = [c["time"] for c in b15]
+    O = [c["open"] for c in b15]; H = [c["high"] for c in b15]; L = [c["low"] for c in b15]; C = [c["close"] for c in b15]
+    V = [float(c.get("volume") or 0) for c in b15]
+    i = n - 1
+    atr = dlm_wilder(H, L, C)
+    a = atr[i]
+    if not a or a <= 0:
+        return []
+    day_i = T[i] // 86400
+    dd = [c for c in d1 if c["time"] // 86400 < day_i]   # the last closed day before the bar's day
+    if len(dd) < 15:
+        return []
+    dat = dlm_wilder([c["high"] for c in dd], [c["low"] for c in dd], [c["close"] for c in dd])[-1]
+    datr = dat / dd[-1]["close"] * 100 if dat else 0.0
+    px = C[i]
+    e20, e50, e200 = dlm_ema(C, 20), dlm_ema(C, 50), dlm_ema(C, 200)
+    r15, r60 = dlm_rsi(C, 14), dlm_rsi(C, 56)
+    w20 = C[i - 19:i + 1]; bbm = sum(w20) / 20; bbs = math.sqrt(max(sum(v * v for v in w20) / 20 - bbm * bbm, 0.0))
+    vw = [0.0] * n; cv = cpv = 0.0
+    for k in range(n):
+        if k == 0 or T[k] // 86400 != T[k - 1] // 86400:
+            cv = cpv = 0.0
+        cv += V[k]; cpv += (H[k] + L[k] + C[k]) / 3 * V[k]
+        vw[k] = cpv / cv if cv > 0 else C[k]
+    dv = [C[k] - vw[k] for k in range(i - 95, i + 1)]
+    m_ = sum(dv) / 96; vws = math.sqrt(max(sum(v * v for v in dv) / 96 - m_ * m_, 0.0))
+    hi96, lo96 = max(H[i - 96:i]), min(L[i - 96:i])
+    v4 = sum(V[i - 3:i + 1]); v96 = sum(V[i - 95:i + 1])
+    volr = math.log((v4 + 1e-9) / (v96 / 24 + 1e-9))
+    bT = [c["time"] for c in bb15]
+    bj = bisect.bisect_right(bT, T[i]) - 1
+    if bj < 96:
+        return []
+    bC = [c["close"] for c in bb15]
+    batr = dlm_wilder([c["high"] for c in bb15], [c["low"] for c in bb15], bC)[bj]
+    hi30, lo30 = max(H[max(0, i - 2880):i + 1]), min(L[max(0, i - 2880):i + 1])
+    up_w = H[i] - max(O[i], C[i]); dn_w = min(O[i], C[i]) - L[i]
+    out = []
+    for side in (1, -1):
+        since = dlm_since(H, L, C, atr, side, i)
+        if since is None:
+            continue
+        s = float(side)
+        ret = lambda k: s * (px / C[max(i - k, 0)] - 1) * 100
+        rg = hi96 - lo96
+        pos = (px - lo96) / rg if rg > 0 else 0.5
+        p30 = (px - lo30) / (hi30 - lo30) if hi30 > lo30 else 0.5
+        f = [0.0, s, a / px * 100, datr, 2.0, float((T[i] // 3600) % 24), float((day_i + 3) % 7), ret(4), ret(16), ret(96),
+             s * (px - e20[i]) / a, s * (px - e50[i]) / a, s * (px - e200[i]) / a, s * (e50[i] - e50[max(i - 16, 0)]) / a,
+             s * (r15[i] - 50), s * (r60[i] - 50), s * (px - bbm) / bbs if bbs > 0 else 0.0, s * (px - vw[i]) / vws if vws > 0 else 0.0,
+             pos if side > 0 else 1 - pos, volr, s * (bC[bj] / bC[bj - 16] - 1) * 100, s * (bC[bj] / bC[bj - 96] - 1) * 100,
+             (batr / bC[bj] * 100) if batr else 0.0, s * (dn_w - up_w) / a, (H[i] - L[i]) / a, math.log1p(since), ret(672),
+             p30 if side > 0 else 1 - p30]
+        out.append({"side": side, "lv": px - side * 2.0 * a, "atr": a, "f": f})
+    return out
+
+
+def dlm_model():
+    with _dlm_lock:
+        m = _DLM["model"]
+    if m and m.get("ver") == DLM_MODEL_VER:
+        return m
+    m = None
+    try:
+        if os.path.exists(DLM_MODEL_FILE):
+            with open(DLM_MODEL_FILE) as f:
+                m = json.load(f)
+            if m.get("ver") != DLM_MODEL_VER or m.get("feats") != DLM_FNAMES:
+                m = None
+    except Exception as e:
+        log_error(f"dlm model read: {e}")
+        m = None
+    if not m:
+        try:
+            r = requests.get(DLM_MODEL_URL.format(ref="main"), params={"nocache": int(time.time())}, timeout=120)
+            r.raise_for_status()
+            m = r.json()
+            if m.get("ver") != DLM_MODEL_VER or not m.get("models"):
+                raise RuntimeError(f"версия модели {m.get('ver')} вместо {DLM_MODEL_VER}")
+            if m.get("feats") != DLM_FNAMES:
+                raise RuntimeError("признаки модели не совпадают с кодом бота — нужно обновить бота")
+            tmp = DLM_MODEL_FILE + ".new"
+            with open(tmp, "w") as f:
+                json.dump(m, f, separators=(",", ":"))
+            os.replace(tmp, DLM_MODEL_FILE)
+        except Exception as e:
+            with _dlm_lock:
+                _DLM["err"] = f"модель не скачалась: {e}"
+            log_error(f"dlm model download: {e}")
+            return None
+    with _dlm_lock:
+        _DLM.update({"model": m, "err": None})
+    return m
+
+
+def dlm_load():
+    try:
+        if os.path.exists(DLM_STATE_FILE):
+            with open(DLM_STATE_FILE) as f:
+                d = json.load(f)
+            with _dlm_lock:
+                for k in ("orders", "trades", "scan", "bar_done"):
+                    if d.get(k) is not None:
+                        _DLM[k] = d[k]
+    except Exception as e:
+        log_error(f"dlm state load: {e}")
+    _DLM["loaded"] = True
+
+
+def dlm_save():
+    try:
+        with _dlm_lock:
+            data = json.dumps({"orders": _DLM["orders"][-400:], "trades": _DLM["trades"][-3000:], "scan": _DLM["scan"], "bar_done": _DLM.get("bar_done")})
+        tmp = DLM_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(data)
+        os.replace(tmp, DLM_STATE_FILE)
+    except Exception as e:
+        log_error(f"dlm state save: {e}")
+
+
+def _dlm_closed(sym, tf, sec, n, now):
+    cs = get_candles_range(sym, tf, int(now) - (n + 2) * sec, int(now)) or []
+    return [c for c in cs if c["time"] + sec <= now][-n:]
+
+
+def dlm_scan(t_bar):
+    """at the close of the 15m bar that started at t_bar - 900: the tested coins' deep limits scored; the ones above the
+    threshold become orders alive for the next 4 bars (one per coin & side a bar, none while a trade of it is open)"""
+    m = dlm_model()
+    if not m:
+        return
+    rule = m.get("rule") or {}
+    bb15 = _dlm_closed("BTC_USDT", "15m", 900, 400, t_bar)
+    thr = float(m["thr"])
+    with _dlm_lock:
+        busy = {(t["symbol"], t["side"]) for t in _DLM["trades"] if t["status"] == "OPEN"}
+        n_open = {s: sum(1 for t in _DLM["trades"] if t["status"] == "OPEN" and t["side"] == s) for s in (1, -1)}
+    new, coins, cands, best = [], 0, 0, []
+    for sym in _research_syms(RESEARCH_COINS_127):
+        heartbeat("dlm_loop")
+        try:
+            b15 = _dlm_closed(sym, "15m", 900, 3000, t_bar)
+            if not b15 or b15[-1]["time"] != t_bar - 900:
+                continue   # the bar just closed is missing
+            d1 = _dlm_closed(sym, "1d", 86400, 400, t_bar)
+            cs = dlm_candidates(b15, d1, bb15)
+            coins += 1
+            for c in cs:
+                cands += 1
+                sc = sum(zm_tree_pred(t_, c["f"]) for t_ in m["models"]) / len(m["models"])
+                best.append((sc, sym, c["side"]))
+                if sc < thr or (sym, c["side"]) in busy:
+                    continue
+                s, lv, a = c["side"], c["lv"], c["atr"]
+                if _sl_too_tight(lv, float(rule.get("stop_atr", 2.0)) * a):
+                    continue
+                new.append({"id": f"dlm_{sym}_{s}_{t_bar}", "symbol": sym, "side": s, "lv": lv, "atr": a, "score": round(sc, 4),
+                            "t0": t_bar, "until": t_bar + int(rule.get("alive_bars", 4)) * 900, "px": b15[-1]["close"],
+                            "status": "OPEN", "real": None})
+        except Exception as e:
+            log_error(f"dlm scan {sym}: {e}")
+    new.sort(key=lambda o: -o["score"])
+    best.sort(key=lambda x: -x[0])
+    near = [{"symbol": s_, "side": sd, "pct": round(100 * sc / thr) if thr > 0 else None} for sc, s_, sd in best[:8]]
+    with _dlm_lock:
+        _DLM["orders"].extend(new)
+        _DLM["scan"] = {"t": int(time.time()), "bar": t_bar, "coins": coins, "cands": cands, "orders": len(new), "near": near}
+    if AUTOTRADE_ENABLED_DLM:
+        for o in new:
+            if n_open.get(o["side"], 0) >= int(m.get("side_cap") or 12):
+                continue
+            try:
+                dlm_real_place(o)
+            except Exception as e:
+                log_error(f"dlm place {o['symbol']}: {e}")
+    dlm_save()
+
+
+def _dlm_open_trade(o, t_fill_bar, fill, real=None):
+    """an order filled: the trade (stop / take from the fill and the order bar's ATR)"""
+    m = _DLM.get("model") or {}
+    rule = m.get("rule") or {}
+    s = o["side"]; a = o["atr"]
+    risk = float(rule.get("stop_atr", 2.0)) * a
+    tr = {"id": o["id"], "symbol": o["symbol"], "side": s, "direction": "LONG" if s > 0 else "SHORT", "entry": fill, "lv": o["lv"], "atr": a,
+          "sl": fill - s * risk, "tp": fill + s * float(rule.get("take_atr", 0.5)) * a, "score": o["score"], "t0": o["t0"],
+          "fbar": t_fill_bar, "t_in": int(time.time()), "until": t_fill_bar + int(rule.get("hold_bars", 16)) * 900,
+          "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": real, "rv": DLM_MODEL_VER}
+    with _dlm_lock:
+        if any(t["id"] == tr["id"] for t in _DLM["trades"]):
+            return None
+        _DLM["trades"].append(tr)
+        for x in _DLM["orders"]:   # the other orders of this coin & side: the research blocks them while the trade is open
+            if x["symbol"] == o["symbol"] and x["side"] == s and x["status"] == "OPEN" and x is not o:
+                x["status"] = "SKIP"
+        o["status"] = "FILLED"
+    return tr
+
+
+def _dlm_r(t, ex, k, kind):
+    risk = abs(t["entry"] - t["sl"]) or 1e-12
+    fee = (DLM_FEE_IN + (DLM_FEE_TAKE if kind == "WIN" else DLM_FEE_OUT) + DLM_FUND * (k + 1) / 96) * t["entry"]
+    return round((t["side"] * (ex - t["entry"]) - fee) / risk, 4)
+
+
+def dlm_settle(now):
+    """after each 15m bar: the virtual orders filled by it (Gate's candle reached the limit), the expired ones out, and
+    the virtual trades walked on the 15m candles — the stop first, no take in the fill bar, out after 16 bars"""
+    with _dlm_lock:
+        orders = [o for o in _DLM["orders"] if o["status"] == "OPEN" and not (o.get("real") or {}).get("id")]
+    for o in orders:
+        try:
+            cs = [c for c in (get_candles_range(o["symbol"], "15m", o["t0"], min(int(now), o["until"])) or [])
+                  if o["t0"] <= c["time"] < o["until"] and c["time"] + 900 <= now]
+            hit = next((c for c in cs if ((c["low"] <= o["lv"]) if o["side"] > 0 else (c["high"] >= o["lv"]))), None)
+            if hit:
+                with _dlm_lock:
+                    taken = any(t["symbol"] == o["symbol"] and t["side"] == o["side"] and t["status"] == "OPEN" for t in _DLM["trades"])
+                if taken:
+                    o["status"] = "SKIP"
+                else:
+                    fill = min(o["lv"], hit["open"]) if o["side"] > 0 else max(o["lv"], hit["open"])
+                    _dlm_open_trade(o, hit["time"], fill)
+            elif now >= o["until"]:
+                o["status"] = "EXPIRED"
+        except Exception as e:
+            log_error(f"dlm order {o['symbol']}: {e}")
+    with _dlm_lock:
+        opn = [t for t in _DLM["trades"] if t["status"] == "OPEN" and not t.get("real")]
+    for t in opn:
+        try:
+            hold = int(((_DLM.get("model") or {}).get("rule") or {}).get("hold_bars", 16))
+            cs = [c for c in (get_candles_range(t["symbol"], "15m", t["fbar"], int(now)) or []) if c["time"] >= t["fbar"] and c["time"] + 900 <= now]
+            res = None
+            s, sl, tp = t["side"], t["sl"], t["tp"]
+            for k, c in enumerate(cs[:hold]):
+                if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
+                    gap = k > 0 and ((c["open"] <= sl) if s > 0 else (c["open"] >= sl))
+                    res = ("LOSS", c["open"] if gap else sl, k)
+                    break
+                if k > 0 and ((c["high"] >= tp) if s > 0 else (c["low"] <= tp)):
+                    res = ("WIN", tp, k)
+                    break
+            if not res and len(cs) >= hold:
+                res = ("TIME_EXIT", cs[hold - 1]["close"], hold - 1)
+            if res:
+                kind, ex, k = res
+                with _dlm_lock:
+                    t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + 900), "r": _dlm_r(t, ex, k, kind)})
+        except Exception as e:
+            log_error(f"dlm trade {t.get('symbol')}: {e}")
+    with _dlm_lock:   # the order book of the module: only the live ones and a short history
+        _DLM["orders"] = [o for o in _DLM["orders"] if o["status"] == "OPEN" or now - o["t0"] < 6 * 3600]
+    dlm_save()
+
+
+# ---- the exchange side: a real GTC limit, then the stop (trigger) and the take (a reduce-only limit = maker) ----
+def dlm_real_place(o):
+    if AUTOTRADE_DRY_RUN:
+        o["real"] = {"status": "DRY_RUN"}
+        return
+    sym, s = o["symbol"], o["side"]
+    direction = "LONG" if s > 0 else "SHORT"
+    with _dlm_lock:
+        live = [x for x in _DLM["orders"] if (x.get("real") or {}).get("id") and x["status"] == "OPEN"]
+        mine = any(t["symbol"] == sym and t.get("real") and t["status"] == "OPEN" for t in _DLM["trades"])
+    if mine or any(x["symbol"] == sym for x in live) or len(live) >= DLM_MAX_LIVE_ORDERS:
+        return
+    with using_account("dlm"):
+        pos = [p for p in (get_open_positions() or []) if p.get("contract") == sym]
+        if pos:
+            o["real"] = {"status": "SKIPPED", "detail": "по монете уже есть позиция"}
+            return
+        spec = get_contract_spec(sym)
+        cap = spec.get("leverage_max") or 125
+        tick = spec.get("order_price_round")
+        with state_lock:
+            mmr = (STATE.get("scalp_mmr_map") or {}).get(sym, SCALP_DEFAULT_MMR_PCT)
+        tiers = get_risk_limit_tiers_for_symbol(sym)
+        risk = MODULE_RISK_PCT.get("dlm") or DLM_RISK_DEFAULT
+        equity = get_futures_total_equity()
+        rule = ((_DLM.get("model") or {}).get("rule") or {})
+        sl = o["lv"] - s * float(rule.get("stop_atr", 2.0)) * o["atr"]
+        margin, lev, skip = compute_risk_based_position(direction, o["lv"], sl, cap, mmr, equity, risk_pct=risk, symbol=sym,
+                                                        tiers_by_symbol={sym: tiers} if tiers else None)
+        contracts = 0
+        if not skip:
+            contracts, _n, _m, skip = compute_contracts_from_margin(sym, o["lv"], margin, lev)
+        if skip or not contracts:
+            o["real"] = {"status": "SKIPPED", "detail": str(skip or "0 контрактов")[:160]}
+            return
+        set_leverage(sym, lev)
+        px = round_to_tick_directional(o["lv"], tick, round_up=(direction == "SHORT"))
+        body = {"contract": sym, "size": int(contracts) if s > 0 else -int(contracts), "price": format_price_str(px, tick),
+                "tif": "gtc", "text": "t-vpdlm"}
+        r = gate_signed_request("POST", "/futures/usdt/orders", body=body)
+        o["real"] = {"status": "LIMIT", "id": str(r.get("id")), "size": int(contracts), "price": px, "lev": lev, "tick": tick, "risk": risk}
+
+
+def _dlm_cancel_order(oid):
+    try:
+        gate_signed_request("DELETE", f"/futures/usdt/orders/{oid}")
+        return True
+    except Exception as e:
+        msg = str(e)
+        if "ORDER_NOT_FOUND" in msg or "FINISHED" in msg.upper() or "not found" in msg.lower():
+            return True
+        log_error(f"dlm cancel {oid}: {e}")
+        return False
+
+
+def _dlm_place_exits(t):
+    """the stop as a trigger, the take as a reduce-only limit (maker); a take the exchange refuses as a limit -> a trigger"""
+    r = t["real"]; sym, d, s = t["symbol"], t["direction"], t["side"]
+    tick = r.get("tick")
+    if not r.get("sl_id"):
+        o = place_close_trigger_order(sym, d, round_to_tick_directional(t["sl"], tick, round_up=(s < 0)), 2 if s > 0 else 1, tick)
+        r["sl_id"] = str((o or {}).get("id") or "") or None
+    if not r.get("tp_id"):
+        try:
+            o = gate_signed_request("POST", "/futures/usdt/orders", body={
+                "contract": sym, "size": -s * int(r["filled"]), "price": format_price_str(round_to_tick_directional(t["tp"], tick, round_up=(s > 0)), tick),
+                "tif": "gtc", "reduce_only": True, "text": "t-vpdlm-tp"})
+            r["tp_id"], r["tp_kind"] = str(o.get("id")), "limit"
+        except Exception as e:
+            log_error(f"dlm take limit {sym}: {e} — a trigger instead")
+            o = place_close_trigger_order(sym, d, round_to_tick_directional(t["tp"], tick, round_up=(s > 0)), 1 if s > 0 else 2, tick)
+            r["tp_id"], r["tp_kind"] = str((o or {}).get("id") or "") or None, "trigger"
+
+
+def dlm_real_tick():
+    """every DLM_POLL_SEC: the real limits (filled / expired / a foreign position on the coin) and the real trades
+    (the stop / take on the exchange, the time exit, the result)"""
+    now = time.time()
+    with _dlm_lock:
+        orders = [o for o in _DLM["orders"] if (o.get("real") or {}).get("id") and o["status"] == "OPEN"]
+        trades = [t for t in _DLM["trades"] if t.get("real") and t["status"] == "OPEN"]
+    if not orders and not trades:
+        return
+    changed = False
+    with using_account("dlm"):
+        try:
+            pos = {}
+            for p in get_open_positions() or []:
+                pos.setdefault(p.get("contract"), []).append(p)
+            open_ids = {str(x.get("id")): x for x in (gate_signed_request("GET", "/futures/usdt/orders", query_string="status=open") or [])}
+        except Exception as e:
+            log_error(f"dlm exchange read: {e}")
+            return
+        for o in orders:
+            r = o["real"]
+            x = open_ids.get(r["id"])
+            if x is None:
+                try:
+                    x = gate_signed_request("GET", f"/futures/usdt/orders/{r['id']}")
+                except Exception as e:
+                    log_error(f"dlm order status {o['symbol']}: {e}")
+                    continue
+            filled = abs(int(float(x.get("size") or 0))) - abs(int(float(x.get("left") or 0)))
+            done = x.get("status") == "finished"
+            foreign = not filled and pos.get(o["symbol"])
+            if not done and (now >= o["until"] or foreign or filled):
+                if not _dlm_cancel_order(r["id"]):   # the rest of a partly filled limit goes too
+                    continue
+                try:
+                    x = gate_signed_request("GET", f"/futures/usdt/orders/{r['id']}")
+                    filled = abs(int(float(x.get("size") or 0))) - abs(int(float(x.get("left") or 0)))
+                except Exception:
+                    pass
+                done = True
+            if not done:
+                continue
+            changed = True
+            if filled > 0:
+                fill = float(x.get("fill_price") or r["price"])
+                t = _dlm_open_trade(o, int(now // 900 * 900), fill, real={"filled": filled, "tick": r.get("tick"), "order": r["id"], "risk": r.get("risk")})
+                if t:
+                    try:
+                        _dlm_place_exits(t)
+                    except Exception as e:
+                        log_error(f"dlm exits {t['symbol']}: {e}")
+                    if TELEGRAM_ALERTS_DLM:
+                        send_telegram(f"⚡ {t['symbol'].replace('_USDT', '')} {t['direction']} · лимитка 15м исполнилась @ {fill:.6g} ({filled} контр.)\n"
+                                      f"тейк {t['tp']:.6g} · стоп {t['sl']:.6g} · до {time.strftime('%H:%M', time.localtime(t['until']))}", category="dlm")
+            else:
+                o["status"] = "EXPIRED" if now >= o["until"] else "CANCELLED"
+        for t in trades:
+            r = t["real"]; sym, s = t["symbol"], t["side"]
+            p = next((x for x in pos.get(sym) or [] if (float(x.get("size") or 0) > 0) == (s > 0)), None)
+            size = abs(float((p or {}).get("size") or 0))
+            if size > 0:
+                r["seen"] = True
+                if not r.get("sl_id") or not r.get("tp_id"):
+                    try:
+                        _dlm_place_exits(t); changed = True
+                    except Exception as e:
+                        log_error(f"dlm exits {sym}: {e}")
+                if now >= t["until"]:   # the time exit: the take / stop off, the rest at the market
+                    if r.get("tp_kind") == "limit":
+                        _dlm_cancel_order(r["tp_id"])
+                    for oid in (r.get("sl_id"), r.get("tp_id") if r.get("tp_kind") == "trigger" else None):
+                        if oid:
+                            try:
+                                cancel_price_order(oid)
+                            except Exception:
+                                pass
+                    res = close_position_for_mode("dlm", sym, t["direction"])
+                    px = float((p or {}).get("mark_price") or 0) or t["entry"]
+                    with _dlm_lock:
+                        t.update({"status": "CLOSED", "result": "TIME_EXIT", "exit": px, "t_out": int(now), "r": _dlm_r(t, px, 15, "TIME_EXIT")})
+                    r["close"] = str(res)[:120]; changed = True
+                    notify_trade_result("dlm", sym, t["direction"], t["entry"], px, "TIME_EXIT", t["r"], real=True, note="⚡ лимитка 15м")
+                continue
+            # no position: which exit took it (a just-filled position may not show yet — given a minute unless the take filled)
+            win = False
+            if r.get("tp_kind") == "limit" and r.get("tp_id"):
+                try:
+                    x = gate_signed_request("GET", f"/futures/usdt/orders/{r['tp_id']}")
+                    win = abs(int(float(x.get("size") or 0))) - abs(int(float(x.get("left") or 0))) > 0
+                    if not win and not r.get("seen") and now - t["t_in"] < 60:
+                        continue
+                    if x.get("status") != "finished":
+                        _dlm_cancel_order(r["tp_id"])
+                except Exception as e:
+                    log_error(f"dlm take status {sym}: {e}")
+                    continue
+            elif not r.get("seen") and now - t["t_in"] < 60:
+                continue
+            else:
+                trig = None
+                try:
+                    trig = {str(x.get("id")) for x in (get_open_price_orders() or [])}
+                except Exception:
+                    pass
+                win = trig is not None and r.get("tp_id") and str(r["tp_id"]) not in trig and str(r.get("sl_id")) in trig
+            for oid in (r.get("sl_id"), r.get("tp_id") if r.get("tp_kind") == "trigger" else None):
+                if oid:
+                    try:
+                        cancel_price_order(oid)
+                    except Exception:
+                        pass
+            ex = t["tp"] if win else t["sl"]
+            kind = "WIN" if win else "LOSS"
+            with _dlm_lock:
+                t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(now), "r": _dlm_r(t, ex, int((now - t["fbar"]) // 900), kind)})
+            changed = True
+            notify_trade_result("dlm", sym, t["direction"], t["entry"], ex, kind, t["r"], real=True, note="⚡ лимитка 15м")
+    if changed:
+        dlm_save()
+
+
+def dlm_loop():
+    time.sleep(110)
+    dlm_load()
+    try:
+        dlm_model()
+    except Exception as e:
+        log_error(f"dlm_loop model: {e}")
+    while True:
+        heartbeat("dlm_loop")
+        try:
+            if DLM_ENABLED:
+                now = time.time()
+                t_bar = int(now // 900 * 900)
+                if _DLM.get("bar_done") != t_bar and now - t_bar >= 15:   # a 15m bar closed: settle, then scan
+                    dlm_settle(now)
+                    if now - t_bar < 600:   # a scan later than 10 min into the bar is stale (the limit lives from the close)
+                        dlm_scan(t_bar)
+                    with _dlm_lock:
+                        _DLM["bar_done"] = t_bar
+                if AUTOTRADE_ENABLED_DLM:
+                    with live_http():
+                        dlm_real_tick()
+        except Exception as e:
+            log_error(f"dlm_loop: {e}")
+            with _dlm_lock:
+                _DLM["err"] = str(e)[:200]
+        time.sleep(DLM_POLL_SEC)
+
+
+def dlm_stats():
+    m = _DLM.get("model") or {}
+    with _dlm_lock:
+        trades = list(_DLM["trades"])
+        orders = [o for o in _DLM["orders"] if o["status"] == "OPEN"]
+        scan, err = _DLM.get("scan"), _DLM.get("err")
+    fin = [t for t in trades if t["status"] == "CLOSED" and t.get("r") is not None]
+    rs = [t["r"] for t in fin]
+    t0 = min((t["t_in"] for t in trades), default=None)
+    days = max(1.0, (time.time() - t0) / 86400) if t0 else None
+    real = [t for t in fin if t.get("real")]
+    return {"on": DLM_ENABLED, "auto": AUTOTRADE_ENABLED_DLM, "tg": TELEGRAM_ALERTS_DLM, "dry": AUTOTRADE_DRY_RUN,
+            "risk": MODULE_RISK_PCT.get("dlm") or DLM_RISK_DEFAULT,
+            "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap")} if m else None,
+            "err": err, "scan": scan, "orders": orders[:40], "orders_n": len(orders),
+            "open": [t for t in trades if t["status"] == "OPEN"][-40:],
+            "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for t in fin if t["result"] == "WIN") / len(fin), 1) if fin else None,
+            "sum": round(sum(rs), 2) if rs else None, "per_day": round(len(fin) / days, 1) if days else None,
+            "real_n": len(real), "real_sum": round(sum(t["r"] for t in real), 2) if real else None,
+            "live_check": live_vs_bt("dlm", [t["r"] for t in fin if t.get("rv") == DLM_MODEL_VER]),
+            "last": [{k: t.get(k) for k in ("symbol", "side", "t0", "fbar", "t_in", "r", "result", "real", "entry", "lv", "sl", "tp", "exit", "t_out")}
+                     for t in sorted(fin, key=lambda t: -t["t_in"])[:40]]}
+
+
+@app.route("/api/dlm/status")
+def api_dlm_status():
+    try:
+        return jsonify(dlm_stats())
+    except Exception as e:
+        log_error(f"dlm status: {e}")
         return jsonify({"err": f"статистика не посчиталась: {e}"})
 
 
@@ -37462,6 +38093,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="rbx" style="color:#ffb74d;">📈 Пробой</div>
   <div class="tab" data-tab="cas" style="color:#4dd0e1;">🌊 Каскад</div>
   <div class="tab" data-tab="smc" style="color:#a1887f;">🧱 SMC</div>
+  <div class="tab" data-tab="dlm" style="color:#ffd54f;">⚡ Лимитки</div>
   <div class="tab" data-tab="hdg" style="color:#b39ddb;">🪞 Хедж</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
@@ -37485,6 +38117,7 @@ INDEX_HTML = """<!doctype html>
   <div id="rbxPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="casPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="smcPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="dlmPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="hdgPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="snrPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="prvPanel" style="display:block;padding:8px 4px;font-size:var(--fs);"></div>
@@ -37677,6 +38310,23 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">на +1R закрыть четверть позиции и перенести стоп в безубыток, остаток — по тренду. Винрейт 54% вместо 33%, стопов подряд до 14 вместо 26, рост депозита при той же просадке — как без неё. Действует на новые сделки</div>
         </div>
         <label class="switch"><input type="checkbox" id="setRbxPart"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+
+    <details class="settingsGroup" style="--mod-color:#ffd54f;"><summary class="settingsGroupTitle">⚡ Лимитки 15м</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (15м — 127 монет)</div>
+          <div class="sub">на закрытии каждой 15м свечи: модель выбирает лучшие ~2% моментов — лимитка на 2 ATR от цены на час; исполнилась — тейк 0.5 ATR, стоп 2 ATR, через 4 ч выход. Винрейт ~84%, ~9 сделок в день; без реальных сделок — виртуальный учёт</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setDlm"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ ⚡ Лимитки в Telegram</div>
+          <div class="sub">исполнение реальной лимитки (итоги сделок — общим переключателем «Итоги сделок»); по умолчанию выключено — сделок много</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgDlm"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -37939,6 +38589,7 @@ INDEX_HTML = """<!doctype html>
           <input type="number" id="setRiskPctZm" min="0.1" max="100" step="0.1" placeholder="🎯 0.5" title="🎯 Сильные зоны: пусто — 0.5% (не общий %!)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctRbx" min="0.1" max="100" step="0.1" placeholder="📈 0.5" title="📈 Пробой: пусто — 0.5% (не общий %)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctCas" min="0.1" max="100" step="0.1" placeholder="🌊 0.5" title="🌊 Каскад: пусто — 0.5% (не общий %)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctDlm" min="0.1" max="100" step="0.05" placeholder="⚡ 0.5" title="⚡ Лимитки 15м: пусто — 0.5% (не общий %)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSmc" min="0.1" max="100" step="0.05" placeholder="🧱 0.25" title="🧱 SMC: пусто — 0.25% (не общий %); на истории — четверть риска EMA" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
         </div>
       </div>
@@ -38033,6 +38684,13 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeSmc"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ ⚡ Лимитки 15м</div>
+          <div class="sub">настоящие лимитки на Gate (не больше 10 сразу, по монете без чужой позиции); исполнилась — стоп триггером и тейк лимиткой «только закрытие», через 4 ч бот закрывает остаток. Риск — поле «⚡» выше (пусто = 0.5%)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeDlm"><span class="switchSlider"></span></label>
+      </div>
     </div></details>
 
     <div class="dim hint-block" style="font-size:var(--fs);margin-top:16px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
@@ -38116,6 +38774,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('rbxPanel').style.display = activeTab === 'rbx' ? 'block' : 'none';
     document.getElementById('casPanel').style.display = activeTab === 'cas' ? 'block' : 'none';
     document.getElementById('smcPanel').style.display = activeTab === 'smc' ? 'block' : 'none';
+    document.getElementById('dlmPanel').style.display = activeTab === 'dlm' ? 'block' : 'none';
     document.getElementById('hdgPanel').style.display = activeTab === 'hdg' ? 'block' : 'none';
     document.getElementById('snrPanel').style.display = activeTab === 'snr' ? 'block' : 'none';
     document.getElementById('prvPanel').style.display = activeTab === 'prv' ? 'block' : 'none';
@@ -38134,6 +38793,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'rbx') refreshRbx();
     if (activeTab === 'cas') refreshCas();
     if (activeTab === 'smc') refreshSmc();
+    if (activeTab === 'dlm') refreshDlm();
     if (activeTab === 'hdg') refreshHdg();
     if (activeTab === 'snr') refreshSnr();
     if (activeTab === 'prv') refreshPrv();
@@ -41140,7 +41800,7 @@ async function refreshHdg() {   // v0.99.628 — 🪞 hedge mirror
 window._btData = window._btData || {};
 window._btSt = window._btSt || {};
 window._btLive = window._btLive || {};
-const BT_CH = {'1d': 'день', '12h': '12ч', '1h': '1ч', '4h': '4ч'};
+const BT_CH = {'1d': 'день', '12h': '12ч', '1h': '1ч', '4h': '4ч', '15m': '15м'};
 const BT_EMA_TF = {'4h': '4ч', '1d': 'день', '1w': 'неделя', '1M': 'месяц'};
 const BT_SMC = {fvg4_bull: 'FVG 4ч ↑', fvg4_bear: 'FVG 4ч ↓', fvgd_bull: 'FVG дня ↑', fvgd_bear: 'FVG дня ↓', fvgw_bull: 'FVG недели ↑', fvgw_bear: 'FVG недели ↓',
   swd_low: 'свинг-минимум дня', swd_high: 'свинг-максимум дня', sww_low: 'свинг-минимум недели', sww_high: 'свинг-максимум недели',
@@ -41239,18 +41899,21 @@ function btFromCas(t) {   // v0.99.653 — a live 🌊 trade -> the chart's trad
 function btFromSmc(t) {   // v0.99.678 — a live 🧱 trade -> the chart's trade (1h candles)
   return {mod: 'smc', s: t.symbol, d: t.side, c: '1h', lvl: t.fam, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
 }
+function btFromDlm(t) {   // v0.99.679 — a live ⚡ trade -> the chart's trade (15m candles)
+  return {mod: 'dlm', s: t.symbol, d: t.side, c: '15m', t: t.t0, lv: t.lv, e: t.entry, sl: t.sl, tp: t.tp, f: t.fbar, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+}
 function btFromPrx(t) {
   return {mod: 'prv', s: t.symbol, d: t.side, c: (t.tf || 1) + 'h', t: t.hour, e: t.entry != null ? t.entry : t.px, sl: t.sl, tp: t.tp, hs: t.hs, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
 }
 async function btChart(o) {
   const coin = (o.s || '').replace('_USDT', ''), side = o.d > 0 ? 'ЛОНГ' : 'ШОРТ';
-  document.getElementById('vgiModalTitle').textContent = `${coin} | ${o.mod === 'rbx' ? '📈 Пробой' : (o.mod === 'emx' ? '📐' : (o.mod === 'cas' ? '🌊 Каскад' : (o.mod === 'smc' ? '🧱 SMC' : 'P/R')))} ${btLabel(o)} | ${side}${o.live ? '' : ' · бэктест'}`;
+  document.getElementById('vgiModalTitle').textContent = `${coin} | ${o.mod === 'rbx' ? '📈 Пробой' : (o.mod === 'emx' ? '📐' : (o.mod === 'cas' ? '🌊 Каскад' : (o.mod === 'smc' ? '🧱 SMC' : (o.mod === 'dlm' ? '⚡ Лимитка' : 'P/R'))))} ${btLabel(o)} | ${side}${o.live ? '' : ' · бэктест'}`;
   document.getElementById('vgiModalParams').textContent = 'загрузка...';
   vgiModal.classList.add('open');
   window._vgiLast = null;
   window._emwRedraw = null;
   let d;
-  try { d = await (await fetch(`/api/btchart/${o.s}?c=${o.c}&t=${o.t}&x=${o.x || 0}&before=${o.mod === 'rbx' ? (o.n || (o.c === '12h' ? 30 : 20)) + 3 : (o.mod === 'cas' ? 90 : 6)}`)).json(); } catch (e) { document.getElementById('vgiModalParams').textContent = 'нет связи'; return; }
+  try { d = await (await fetch(`/api/btchart/${o.s}?c=${o.c}&t=${o.t}&x=${o.x || 0}&before=${o.mod === 'rbx' ? (o.n || (o.c === '12h' ? 30 : 20)) + 3 : (o.mod === 'cas' ? 90 : (o.mod === 'dlm' ? 16 : 6))}`)).json(); } catch (e) { document.getElementById('vgiModalParams').textContent = 'нет связи'; return; }
   if (d.error) { document.getElementById('vgiModalParams').textContent = d.error; return; }
   const coarse = d.c && d.c !== o.c;   // v0.99.659 — Gate has no 1h candles that old: drawn on 4h / day
   if (coarse) o = Object.assign({}, o, {c: d.c, c0: o.c});
@@ -41474,6 +42137,52 @@ async function refreshSmc() {   // v0.99.678 — 🧱 SMC: the model on the firs
   window._btLive.smc = op.slice(-10).reverse().map(btFromSmc).concat((d.last || []).map(btFromSmc));
   h += btSection('smc', 'Сделки бэктеста — 2022–2026 (каждый год модель не видела)');
   h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как нашёлся</summary><div class="zsub">Задача была — сделки регулярнее, не редкими пачками. Проверены (честно: модель каждого года училась только на прошлых годах, ещё 84 монеты в обучение не входили вовсе): максимумы / минимумы / середины прошлого дня, недели и месяца, открытия недели, месяца и года, SMA и полосы Боллинджера на дне и неделе; сигналы по открытому интересу, фандингу, перекосу лонгов / шортов толпы и тейкеров, отрыву монеты от BTC, объёмным всплескам; 12 классических индикаторов на 4ч и дне (Supertrend, Parabolic SAR, Ichimoku, MACD, дивергенции RSI, Stochastic, ADX, Heikin-Ashi, NR7, CCI, Боллинджер, Келтнер) и уровни SMC. Сами по себе почти все около нуля; после отбора моделью устойчиво держатся только уровни SMC — плюс в каждом году и на чужих монетах. В одиночку они слабее 📐 EMA, но сделки идут почти вдвое чаще и в большем числе недель. Вывод по «пачкам»: сильные сигналы у всех индикаторов бывают в моменты больших движений всего рынка; если брать лучшие сигналы каждого дня, результат падает до +0.1–0.2R. Поэтому SMC — добавка к EMA и P/R с небольшим риском: вместе ~22 сделки в месяц, сделка в ~55% недель, рост при той же просадке не хуже.</div></details>`;
+  setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
+}
+
+async function refreshDlm() {   // v0.99.679 — ⚡ 15m deep limits: many small, high win-rate trades
+  const panel = document.getElementById('dlmPanel');
+  let d;
+  try { d = await (await fetch('/api/dlm/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
+  const card = (title, body) => `<div class="zcard"><div class="zh">${title}</div>${body}</div>`;
+  const tile = (l, v, n) => `<div class="ztile"><div class="zl">${l}</div><div class="zv">${v}</div>${n ? `<div class="zn">${n}</div>` : ''}</div>`;
+  const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  const coin = s => (s || '').replace('_USDT', '');
+  const hm = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
+  const m = d.model, rs = (m && m.research) || {}, rule = (m && m.rule) || {};
+  const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? `<span class="pill pos">${d.dry ? 'торгует (dry-run)' : 'торгует'}</span>` : '<span class="pill">виртуально</span>');
+  let top = `<div class="dim hintx">Каждые 15 минут модель смотрит все ${rs.coins || 127} монет и в лучших ~${m && m.q ? +((1 - m.q) * 100).toFixed(0) : 2}% моментов ставит лимитку на ${rule.depth_atr || 2} ATR(15м) от цены — ловит прострел. Лимитка живёт ${rule.alive_bars || 4} свечи (час). Исполнилась — тейк ${rule.take_atr || 0.5} ATR, стоп ${rule.stop_atr || 2} ATR, через ${(rule.hold_bars || 16) / 4} ч выход. Тейк маленький, поэтому винрейт высокий; плюс на сделку небольшой.</div>`;
+  if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
+  else {
+    const y = rs.years || {}, tr = y.train || {}, ck = y.check || {};
+    const rows = Object.keys(tr).sort().map(k => ({label: k, sub: `~${Math.round(tr[k].pm)}/мес · WR ${tr[k].wr}% · на чужих монетах ${ck[k] ? (ck[k].avg > 0 ? '+' : '') + ck[k].avg + 'R' : '—'}`, v: tr[k].avg, hi: k === '2026'}));
+    top += `<div class="dim" style="font-size:var(--fs-xs);">обучена до ${new Date(m.trained_to * 1000).toLocaleDateString('ru-RU')}</div>
+      <div class="zsub">Проверка на истории — каждый год модель не видела (${rs.train_coins || 85} монет обучения; ещё ${rs.check_coins || 42} монет в обучение не входили):</div>
+      ${zBars(rows, v => sgR(+(+v).toFixed(3)))}
+      <div class="zstrip"><span>WR <b>~84%</b></span><span>в среднем <b>${sgR(0.045)}</b></span><span><b>~9</b> сделок в день</span><span>сделка в <b>99%</b> недель</span></div>
+      <div class="zsub">По минутным свечам Binance (точный порядок стопа и тейка): WR ${(rs.m1 || {}).wr || 85}%, <b>+${(rs.m1 || {}).avg_through || 0.05}R</b>, если лимитка исполняется только при проходе цены сквозь неё; со всеми комиссиями по рынку — +${(rs.m1 || {}).avg_taker || 0.02}R. Плюс на сделку маленький, а стопы при обвалах идут сериями (до ~12 подряд): при той же просадке рост ~x${(rs.money || {}).train_x || 3} в год (x${(rs.money || {}).check_x || 1.4} на чужих монетах) при риске ~1%.</div>
+      ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на Gate — переключатель «↳ ⚡ Лимитки 15м» в автоторговле; риск — поле «⚡» (пусто = ${d.risk}%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
+  }
+  let h = card(`⚡ Лимитки 15м ${pill}`, top);
+  const sc = d.scan, ords = d.orders || [];
+  const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;">
+      <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">${a.lv != null ? fmtNum(a.lv) + (a.px ? ' · ' + ((a.lv - a.px) / a.px * 100).toFixed(1) + '%' : '') : (a.pct != null ? a.pct + '%' : '')}${(a.real || {}).id ? ' · 💰' : ''}</span></span>`;
+  h += card('🔎 Сейчас', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, 'монет · последняя 15м свеча')}${tile('лимиток', d.orders_n || 0, 'ждут прострела')}${tile('сделок', (d.open || []).length, 'открыто')}</div>
+    ${ords.length ? `<div class="zsub" style="margin-top:8px;">лимитки (цена · расстояние):</div><div>${ords.map(chip).join('')}</div>`
+      : ((sc.near || []).length ? `<div class="zsub" style="margin-top:8px;">ближе всех к порогу (100% — лимитка):</div><div>${sc.near.map(chip).join('')}</div>` : '')}
+    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 1900 ? '⏳ скан старше получаса — бот был выключен' : 'пересчёт на закрытии каждой 15м свечи'}</div>`
+    : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — на закрытии ближайшей 15м свечи</div>`);
+  const op = d.open || [];
+  const row = (t, i) => `<div onclick="btLiveOpen('dlm', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim">${t.real ? ' · 💰' : ''}</span></span>
+      <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry)} · тейк ${fmtNum(t.tp)} · до ${hm(t.until)}</span></div>`;
+  h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_day != null ? `~${d.per_day} в день` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.real_n ? `реальных ${d.real_n}: ${sgR(d.real_sum)}` : 'виртуально')}</div>
+    ${op.length ? `<div style="margin-top:8px;">${op.slice(-12).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
+    ${liveCheckHtml(d.live_check)}
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromDlm(t), `btLiveOpen('dlm', ${Math.min(12, op.length) + i})`)).join('')}</details>` : ''}`);
+  window._btLive.dlm = op.slice(-12).reverse().map(btFromDlm).concat((d.last || []).map(btFromDlm));
+  h += btSection('dlm', 'Сделки бэктеста — 2025–2026 (каждый год модель не видела)');
+  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как нашёлся</summary><div class="zsub">Задача — винрейт и много сделок, RR не важен, лишь бы в плюсе после комиссий. Проверены на 15м у 127 монет за 2020–26 (маленький тейк, широкий стоп, комиссии Gate: лимитка и тейк 0.02%, стоп и выход по времени 0.05%): лимитки в прострел на 2 и 3 ATR, касания полос Боллинджера и VWAP дня, откат к EMA20 по тренду, снятие суточного максимума / минимума с возвратом. Сами по себе все с винрейтом 75–84%, но в минусе — тейк маленький, комиссии и редкий большой стоп съедают. Модель (каждый год училась только на прошлых годах и только на 85 монетах) оставила одно: лимитка на 2 ATR — её лучшие 2% моментов в плюсе каждый год и на монетах, которых модель не видела. Тейк 0.3 и 0.2 ATR дают винрейт 84–89%, но уже в минусе. Бот считает то же самое на закрытии каждой 15м свечи (признаки совпадают с исследованием до знака); виртуальные сделки — по свечам 15м Gate, стоп раньше тейка.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
 
@@ -42465,6 +43174,7 @@ async function refreshAll() {
   if (activeTab === 'rbx') await refreshRbx();
   if (activeTab === 'cas') await refreshCas();
   if (activeTab === 'smc') await refreshSmc();
+  if (activeTab === 'dlm') await refreshDlm();
   if (activeTab === 'hdg') await refreshHdg();
   if (activeTab === 'snr') await refreshSnr();
   if (activeTab === 'prv') await refreshPrv();
@@ -42814,6 +43524,9 @@ const setInputs = {
   autotrade_cas: document.getElementById('setAutotradeCas'),
   telegram_alerts_cas: document.getElementById('setTgCas'),
   smc_enabled: document.getElementById('setSmc'),   // v0.99.678
+  dlm_enabled: document.getElementById('setDlm'),   // v0.99.679
+  autotrade_dlm: document.getElementById('setAutotradeDlm'),
+  telegram_alerts_dlm: document.getElementById('setTgDlm'),
   autotrade_smc: document.getElementById('setAutotradeSmc'),
   telegram_alerts_smc: document.getElementById('setTgSmc'),
   autotrade_zones_zm: document.getElementById('setAutotradeZonesZm'),
@@ -42830,6 +43543,7 @@ const setValueInputs = {
   risk_pct_emw: document.getElementById('setRiskPctEmw'),
   risk_pct_rbx: document.getElementById('setRiskPctRbx'),
   risk_pct_cas: document.getElementById('setRiskPctCas'),
+  risk_pct_dlm: document.getElementById('setRiskPctDlm'),
   risk_pct_smc: document.getElementById('setRiskPctSmc'),   // v0.99.678 — these number fields were in the checkbox map: a typed risk was sent as false and reset to the default
   zones_tp_pct: document.getElementById('setZonesTpPct'),
   zones_max_days: document.getElementById('setZonesMaxDays'),
@@ -44317,6 +45031,7 @@ if __name__ == "__main__":
     threading.Thread(target=rbx_loop, daemon=True).start()   # v0.99.625 — 📈 range breakout
     threading.Thread(target=cas_loop, daemon=True).start()   # v0.99.653 — 🌊 EMA cascade
     threading.Thread(target=smc_loop, daemon=True).start()   # v0.99.678 — 🧱 SMC levels
+    threading.Thread(target=dlm_loop, daemon=True).start()   # v0.99.679 — ⚡ 15m deep limits
     threading.Thread(target=hdg_loop, daemon=True).start()   # v0.99.628 — 🪞 hedge mirror
     threading.Thread(target=model_refresh_loop, daemon=True).start()   # v0.99.636 — retrained models from the repo, daily
     threading.Thread(target=auto_update_loop, daemon=True).start()   # v0.99.637 — a new version on GitHub -> /update by itself
