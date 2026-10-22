@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.681"
+APP_VERSION = "0.99.682"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -33634,7 +33634,7 @@ DLM_ENABLED = os.environ.get("VP_DLM", "1") == "1"
 AUTOTRADE_ENABLED_DLM = os.environ.get("VP_AUTOTRADE_DLM", "0") == "1"
 TELEGRAM_ALERTS_DLM = os.environ.get("VP_TG_ALERTS_DLM", "0") == "1"   # ~10 trades a day: quiet unless asked
 DLM_RISK_DEFAULT = 0.5
-DLM_MAX_LIVE_ORDERS = int(os.environ.get("VP_DLM_MAX_LIVE", "10"))   # real limits on the exchange at once (margin)
+DLM_MAX_LIVE_ORDERS = int(os.environ.get("VP_DLM_MAX_LIVE", "10"))   # real limits + open positions at once (v0.99.682: positions too)
 DLM_POLL_SEC = 5
 DLM_FEE_IN, DLM_FEE_TAKE, DLM_FEE_OUT, DLM_FUND = 0.0002, 0.0002, 0.0005, 0.0003
 _DLM = {"model": None, "err": None, "orders": [], "trades": [], "scan": None, "bar_done": None, "loaded": False}
@@ -33981,8 +33981,11 @@ def dlm_real_place(o):
     direction = "LONG" if s > 0 else "SHORT"
     with _dlm_lock:
         live = [x for x in _DLM["orders"] if (x.get("real") or {}).get("id") and x["status"] == "OPEN"]
-        mine = any(t["symbol"] == sym and t.get("real") and t["status"] == "OPEN" for t in _DLM["trades"])
-    if mine or any(x["symbol"] == sym for x in live) or len(live) >= DLM_MAX_LIVE_ORDERS:
+        held = [t for t in _DLM["trades"] if t.get("real") and t["status"] == "OPEN"]
+        mine = any(t["symbol"] == sym for t in held)
+    # v0.99.682 — the cap counts the open positions too (the risk table was made with at most 10 at once; the limits
+    # alone could let ~20 positions pile up in a crash, 3% each)
+    if mine or any(x["symbol"] == sym for x in live) or len(live) + len(held) >= DLM_MAX_LIVE_ORDERS:
         return
     with using_account("dlm"):
         pos = [p for p in (get_open_positions() or []) if p.get("contract") == sym]
@@ -38815,7 +38818,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ ⚡ Лимитки 15м</div>
-          <div class="sub">настоящие лимитки на Gate (не больше 10 сразу, по монете без чужой позиции); исполнилась — стоп триггером и тейк лимиткой «только закрытие», через 4 ч бот закрывает остаток. Риск — поле «⚡» выше (пусто = 0.5%)</div>
+          <div class="sub">настоящие лимитки на Gate (лимиток и открытых позиций вместе — не больше 10, по монете без чужой позиции); исполнилась — стоп триггером и тейк лимиткой «только закрытие», через 4 ч бот закрывает остаток. Риск — поле «⚡» выше (пусто = 0.5%)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeDlm"><span class="switchSlider"></span></label>
       </div>

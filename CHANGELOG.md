@@ -20291,3 +20291,6 @@ v0.99.681 - Signals from Binance's candles, trades on Gate (the user: "можн�
          the level computed from Binance. Settings → "Сигналы по свечам Binance" (on by default). The ⚡ tab shows how
          many coins were scanned on Binance / Gate. The first start loads ~6 minutes of Binance history in the
          background of the modules' first scans. t_bn_source.py.
+v0.99.682 - ⚡ Лимитки 15м: the cap of 10 now counts the open positions too, not only the limits waiting on the
+         exchange — in a crash the fills could pile up to ~20 positions at once (the risk table for the user's $100
+         at 3% was computed with at most 10 at once).
