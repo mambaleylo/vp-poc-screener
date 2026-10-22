@@ -20274,3 +20274,9 @@ v0.99.679 - ⚡ Лимитки 15м — a new module (the user: "главная 
          ("↳ ⚡ Лимитки 15м") places GTC limits on Gate (at most 10 at once, only on coins without a position), then
          the stop as a trigger and the take as a reduce-only limit (maker), closes the rest after 4 h. Risk default
          0.5% (the "⚡" field), Telegram off by default (~10 trades a day). The backtest chart draws 15m candles.
+v0.99.680 - ⚡ Лимитки 15м — the backtest chart (the user's ORDI: "Зелёная точка фиг пойми где, фитиль на входе
+         отсутствует"): the chart took a 15m bar for a day, so the exit dot was looked up a day early and fell to the left
+         edge; and the entry was drawn where the limit was placed, not where it filled (ORDI: placed 20:45, filled on
+         the 21:30 bar with its wick to 4.829, the take on the 22:00 bar). Now the entry dot is on the fill bar, the
+         limit is a yellow line from its placement, the exit on its own bar, the window ~4 h before / 3 h after, and a
+         warning when Gate's candles never reached the limit within its hour.
