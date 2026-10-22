@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.685"
+APP_VERSION = "0.99.686"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1156,7 +1156,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones", "risk_pct_zm", "risk_pct_rbx", "rbx_enabled", "autotrade_rbx", "telegram_alerts_rbx", "rbx_part",
                   "cas_enabled", "autotrade_cas", "telegram_alerts_cas", "risk_pct_cas",   # v0.99.653
                   "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
-                  "dlm_enabled", "autotrade_dlm", "telegram_alerts_dlm", "risk_pct_dlm", "dlm_single", "dlm_binance", "dlm_ladder", "dlm_ladder_mode", "dlm_ladder_base",   # v0.99.679, v0.99.683, v0.99.684, v0.99.685
+                  "dlm_enabled", "autotrade_dlm", "telegram_alerts_dlm", "risk_pct_dlm", "dlm_single", "dlm_binance", "dlm_ladder", "dlm_ladder_mode", "dlm_ladder_base", "dlm_more_coins",   # v0.99.679, v0.99.683, v0.99.684, v0.99.685, v0.99.686
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
@@ -1243,6 +1243,7 @@ def get_settings():
         "dlm_single": DLM_SINGLE,   # v0.99.683
         "dlm_binance": DLM_BINANCE,   # v0.99.684
         "dlm_ladder": DLM_LADDER, "dlm_ladder_mode": DLM_LADDER_MODE, "dlm_ladder_base": DLM_LADDER_BASE,   # v0.99.685
+        "dlm_more_coins": DLM_MORE_COINS,   # v0.99.686
         "autotrade_zones": AUTOTRADE_ENABLED_ZONES,
         "autotrade_zones_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
         "zones_own_scan": ZONES_OWN_SCAN, "autotrade_zones_own": AUTOTRADE_ENABLED_ZONES_OWN,   # v0.99.452
@@ -1530,7 +1531,7 @@ def apply_settings(updates):
                    ("cas_enabled", "CAS_ENABLED"), ("autotrade_cas", "AUTOTRADE_ENABLED_CAS"), ("telegram_alerts_cas", "TELEGRAM_ALERTS_CAS"),
                    ("smc_enabled", "SMC_ENABLED"), ("autotrade_smc", "AUTOTRADE_ENABLED_SMC"), ("telegram_alerts_smc", "TELEGRAM_ALERTS_SMC"),
                    ("dlm_enabled", "DLM_ENABLED"), ("autotrade_dlm", "AUTOTRADE_ENABLED_DLM"), ("telegram_alerts_dlm", "TELEGRAM_ALERTS_DLM"),
-                   ("dlm_single", "DLM_SINGLE"), ("dlm_binance", "DLM_BINANCE"), ("dlm_ladder", "DLM_LADDER")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
+                   ("dlm_single", "DLM_SINGLE"), ("dlm_binance", "DLM_BINANCE"), ("dlm_ladder", "DLM_LADDER"), ("dlm_more_coins", "DLM_MORE_COINS")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
         if _k in updates:
             globals()[_g] = bool(updates[_k])
     if updates.get("dlm_ladder_mode") in ("grow", "safe"):   # v0.99.685
@@ -34002,6 +34003,12 @@ DLM_POLL_SEC = 5
 # while the trade is open; the risk scaled down when the account's free margin cannot carry it.
 DLM_SINGLE = os.environ.get("VP_DLM_SINGLE", "0") == "1"
 DLM_ARM_ATR = 0.5
+# v0.99.686 — 83 more Binance coins (the user: "больше монет… да"): the coins P/R was checked on (RESEARCH_COINS_211: Binance
+# volume >= 150M $ a month, history from 2025-06 or earlier; USDC dropped). The same yearly walk-forward models applied to
+# them unchanged (tools/winrate s15x_eval.py): WR 82%, +0.024R a trade, in plus every year (the 127's check coins: 84%,
+# +0.034R); one trade at a time since 2025-07: 4.8 trades a day instead of 2.6 at +0.047R vs +0.049R; the "grow" ladder a
+# year from $100: backtest +$138k vs +$14k, cautious +$3 400 (12% of years in minus) vs +$1 200 (20%), harsh ~0 both.
+DLM_MORE_COINS = os.environ.get("VP_DLM_MORE_COINS", "1") == "1"
 # v0.99.685 — 🪜 the risk / withdrawal ladder (the user: "лесенку, включать кнопкой в настройках"; tools/winrate dlm_ladder.py:
 # trades drawn independently from the one-at-a-time sequence, 12 months from $100, a wipe -> a new deposit). The risk by
 # the account's size relative to the start deposit B, a withdrawal reminder when the account reached 5 x the money kept
@@ -34230,6 +34237,13 @@ def _dlm_closed_gate(sym, tf, sec, n, now):
     return [c for c in cs if c["time"] + sec <= now][-n:]
 
 
+def dlm_coins():
+    """the coins ⚡ scans: the 127 (+ 83 more with DLM_MORE_COINS); on Binance all of them (its own bars), on Gate the ones
+    Gate trades among its top 300"""
+    coins = tuple(c for c in (RESEARCH_COINS_211 if DLM_MORE_COINS else RESEARCH_COINS_127) if c != "USDC_USDT")
+    return list(coins) if DLM_BINANCE else _research_syms(coins)
+
+
 def dlm_risk(equity):
     """the risk % of a new ⚡ trade: the ladder's step by the account size when it is on, else the module's field"""
     if DLM_LADDER and equity:
@@ -34374,7 +34388,7 @@ def dlm_scan(t_bar):
         n_open = {s: sum(1 for t in _DLM["trades"] if t["status"] == "OPEN" and t["side"] == s) for s in (1, -1)}
         single_busy = DLM_SINGLE and any(t["status"] == "OPEN" for t in _DLM["trades"])
     new, coins, cands, best = [], 0, 0, []
-    for sym in _research_syms(RESEARCH_COINS_127):
+    for sym in dlm_coins():
         heartbeat("dlm_loop")
         try:
             b15 = _dlm_closed(sym, "15m", 900, 3000, t_bar)
@@ -34974,6 +34988,7 @@ def dlm_stats():
     real = [t for t in fin if t.get("real")]
     return {"on": DLM_ENABLED, "auto": AUTOTRADE_ENABLED_DLM, "tg": TELEGRAM_ALERTS_DLM, "dry": AUTOTRADE_DRY_RUN, "single": DLM_SINGLE,
             "binance": DLM_BINANCE, "bn_keys": bool(BINANCE_API_KEY and BINANCE_API_SECRET), "bn_check": _BNF.get("check"),   # v0.99.684
+            "more_coins": DLM_MORE_COINS, "coins_n": 210 if DLM_MORE_COINS else 127,   # v0.99.686
             "ladder": dlm_ladder_plan((_DLM.get("ladder") or {}).get("eq")),   # v0.99.685
             "ladder_cmp": {m: dlm_ladder_replay([t["r"] for t in sorted(real, key=lambda t: t.get("t_out") or 0)], m, DLM_LADDER_BASE or 100.0)
                            for m in ("grow", "safe")} if real else None,
@@ -39239,6 +39254,13 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setDlmLadder"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ ⚡ Ещё 83 монеты Binance (210 всего)</div>
+          <div class="sub">монеты с оборотом от 150 млн $ в месяц сверх 127 исследованных: на них та же модель — WR 82%, +0.024R на сделку (на 127 — 84%, +0.045R); в режиме «одна сделка» сделок ~4.8 в день вместо 2.6. На Gate — только те, что там торгуются</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setDlmMoreCoins"><span class="switchSlider"></span></label>
+      </div>
     </div></details>
 
     <details class="settingsGroup" style="--mod-color:#a1887f;"><summary class="settingsGroupTitle">🧱 SMC</summary><div class="settingsGroupBody">
@@ -43124,7 +43146,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ 15m deep limits: many 
   const m = d.model, rs = (m && m.research) || {}, rule = (m && m.rule) || {};
   const pill = (d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? `<span class="pill pos">${d.dry ? 'торгует (dry-run)' : 'торгует'}</span>` : '<span class="pill">виртуально</span>'))
     + (d.single ? ' <span class="pill">1 сделка за раз</span>' : '');
-  let top = `<div class="dim hintx">Каждые 15 минут модель смотрит все ${rs.coins || 127} монет и в лучших ~${m && m.q ? +((1 - m.q) * 100).toFixed(0) : 2}% моментов ставит лимитку на ${rule.depth_atr || 2} ATR(15м) от цены — ловит прострел. Лимитка живёт ${rule.alive_bars || 4} свечи (час). Исполнилась — тейк ${rule.take_atr || 0.5} ATR, стоп ${rule.stop_atr || 2} ATR, через ${(rule.hold_bars || 16) / 4} ч выход. Тейк маленький, поэтому винрейт высокий; плюс на сделку небольшой.</div>`;
+  let top = `<div class="dim hintx">Каждые 15 минут модель смотрит все ${d.coins_n || rs.coins || 127} монет и в лучших ~${m && m.q ? +((1 - m.q) * 100).toFixed(0) : 2}% моментов ставит лимитку на ${rule.depth_atr || 2} ATR(15м) от цены — ловит прострел. Лимитка живёт ${rule.alive_bars || 4} свечи (час). Исполнилась — тейк ${rule.take_atr || 0.5} ATR, стоп ${rule.stop_atr || 2} ATR, через ${(rule.hold_bars || 16) / 4} ч выход. Тейк маленький, поэтому винрейт высокий; плюс на сделку небольшой.</div>`;
   if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
   else {
     const y = rs.years || {}, tr = y.train || {}, ck = y.check || {};
@@ -44554,6 +44576,7 @@ const setInputs = {
   dlm_single: document.getElementById('setDlmSingle'),   // v0.99.683
   dlm_binance: document.getElementById('setDlmBinance'),   // v0.99.684
   dlm_ladder: document.getElementById('setDlmLadder'),   // v0.99.685
+  dlm_more_coins: document.getElementById('setDlmMoreCoins'),   // v0.99.686
   autotrade_smc: document.getElementById('setAutotradeSmc'),
   telegram_alerts_smc: document.getElementById('setTgSmc'),
   autotrade_zones_zm: document.getElementById('setAutotradeZonesZm'),

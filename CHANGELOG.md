@@ -20323,3 +20323,15 @@ v0.99.685 - ⚡ 🪜 the risk / withdrawal ladder (the user: "лесенку, в
          Research (tools/winrate, trades drawn independently, 12 months from $100): "больше" backtest +$12 950 /
          cautious +$1 500 (16% of years in minus) / harsh +$200; "надёжнее" +$1 940 / +$890 (8%) / +$400; the flat
          50% with all above $100 at $500 +$1 920 / +$860 (12%) / +$360. tools/winrate/t_dlm_ladder.py.
+v0.99.686 - ⚡ Лимитки 15м on 210 coins (the user: "больше монет… да"): + the 83 Binance coins P/R was checked on
+         (volume >= 150M $ a month, history from 2025-06 or earlier; USDC dropped), a settings switch (on). The same
+         yearly walk-forward models applied unchanged to their 15m Binance history (tools/winrate s15x_eval.py): WR 82%,
+         +0.024R a trade, in plus every year (the 127's check coins 84% / +0.034R); one trade at a time since 2025-07:
+         4.8 trades a day instead of 2.6 at +0.047R vs +0.049R; the "grow" ladder, a year from $100: backtest +$138k vs
+         +$14k, cautious +$3 400 (12% of years in minus) vs +$1 200 (20%), harsh ~0 both. On Binance all 210 are
+         scanned (its own bars, 1000-coins by their 1000 symbol), on Gate only the ones Gate trades among its top 300.
+         Also tried (none kept): 10 other limit anchors (the previous day's low / high, the day's open +- daily ATR,
+         VWAP +- 3 sigma, 2 x ATR(1h), the 4 h / 24 h low sweep, before the funding, the big bar's middle, EMA200 with
+         the trend, the alt's limit after a BTC dump) — WR ~80% but ~0 or below after the model; take ladders (on 1m
+         bars +0.051R vs +0.052..+0.056R); a second P(take) model (fewer trades, less money one at a time); a pause
+         after a stop; a causal market-breadth filter. tools/winrate/t_dlm_coins.py.
