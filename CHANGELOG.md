@@ -20335,3 +20335,29 @@ v0.99.686 - ⚡ Лимитки 15м on 210 coins (the user: "больше мон
          the trend, the alt's limit after a BTC dump) — WR ~80% but ~0 or below after the model; take ladders (on 1m
          bars +0.051R vs +0.052..+0.056R); a second P(take) model (fewer trades, less money one at a time); a pause
          after a stop; a causal market-breadth filter. tools/winrate/t_dlm_coins.py.
+v0.99.687 - ⚡ v2: the 4h "wick" limits replace the 15m deep limits (the user: "мне нужен самый быстроразгоняемый
+         вариант… замена текущей", "лучше выше винрейт", "перед пушем постараемся улучшить индикатор ещё на 4ч").
+         The 15m backtest was inflated: the research placed an order every bar and kept only the bars whose earlier
+         orders had not filled, so an event's existence depended on later fills; re-done honestly (every order on its
+         own, the "since" feature as the bot sees it) the 15m stream is ~0R a trade at WR 81%. The honest hunt
+         (tools/winrate s15u / s18u / s19h / s20h4 / s21h2 / s22m30 / s23 engines, the yearly walk-forward model on 85
+         coins, checked on the 42 coins it never saw and on the 83 extra Binance coins, 1m Binance bars with a fill
+         only 0.05% through the limit): 30m / 1h / 2h / 4h all in plus over 2022–26 (the pool of them made the huge
+         2023–24 numbers) but since 2025 only the 4h holds; 6h / 8h / 12h weaker; limits 0.5–1.5 ATR, training on more
+         coins: no better. The rule: at the close of a 4h bar a limit 1 ATR(4h) beyond its low (long) / high (short),
+         alive 4 bars; the model's top 1%; take 1 ATR, stop 2 ATR, out after 32 bars (stops 1–3 / takes 0.5–2 ATR,
+         partial takes, break-even swept: a higher win rate costs 2–5x the money). The model: 20 LightGBM, their mean —
+         10 seeds on the 28 engine features, 10 with 5 daily ones more (the coin's close vs its daily EMA20 / EMA50 in
+         daily ATRs, its daily RSI14, its place in the 20-day range, BTC's daily close vs its daily EMA50); one model
+         alone WR 78%, +0.16R. On the 125 unseen coins: WR 82%, +0.235R a trade, the last 12 months WR 82%, +0.24R; on
+         1m bars WR 86%, +0.31R; ~60 trades a month on the 210 coins. Money (up to 20 positions, 3% each, every trade
+         0.025R worse than the backtest, 12-month windows started weekly over 2024–26 from $100): the median $1 146,
+         the worst 10% $406, never below $100 after 6 months; 1–3 months below $100 in 10–16% of the starts. The bot:
+         the 4h scan at 00 / 04 / … UTC (the features in pure Python equal the research's to 1e-5, tools/winrate
+         t_dlm_parity.py), virtual trades on 4h bars, real limits on Binance / Gate with the stop trigger and the
+         reduce-only take, at most 20 positions (DLM_MAX_POS) and 20 a side; the risk field 3% by default, never above
+         10%. New settings keys for its autotrade / risk (autotrade_dlm2, risk_pct_dlm2): it starts virtual at 3% —
+         the 15m module's real trading and up-to-50% risk are not carried over. Dropped: the "1 trade at a time" mode
+         and the risk / withdrawal ladder (one big trade at a time loses in ~45% of the years). The 15m module's open
+         virtual / real trades finish on their own 15m rule and are shown apart. The backtest list: 829 trades
+         2025–26 (WR 82%, +0.24R). tools/winrate: dlm4_export2.py, t_dlm_bot.py / t_dlm_binance.py / t_dlm_ui.py.

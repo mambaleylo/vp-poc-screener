@@ -28,3 +28,25 @@ Money: x2.97/yr (train coins, risk 1.25%), x1.38/yr (check, 1%) at an equal 1-in
 Deployed: ⚡ Лимитки 15м (`dlm_export.py`: the 2026 walk-forward model, the threshold from its 2025 out-of-sample
 scores; the bot's pure-Python features equal the engine's; `t_dlm_bot.py`: the bot re-makes the backtest trades and
 the real path on a fake exchange: a GTC limit, the stop trigger + a reduce-only take limit, the time exit).
+
+## ⚡ v2 — the honest 4h wick limits (v0.99.687)
+
+The 15m numbers above were inflated by a future-fill selection bias (an order every bar, kept only where the earlier
+ones had not filled). Re-done honestly (`s15u_engine.py`: every order on its own; `bot_since` = the crowding feature as
+the bot sees it) deep2 15m is ~0R a trade.
+
+Honest engines on other bars (`s20h4_engine.py` 4h; `s23_engine.py` 4h / 6h / 8h / 12h with wick limits 0.5–1.5 ATR),
+the yearly walk-forward (`s20h4_wf.py`, `s23_wf.py`), the 83 extra coins (`extra_run.py`, `extra_eval.py`), 1m Binance
+bars (`tf_real.py`), the exits (`h4exit.py`, `h4exit2.py`, `h4part.py`), money with up to N positions (`pool*.py`),
+daily features (`s24_feat.py`, `s24_wf.py`) and seed ensembles (`s25_ens.py`):
+
+| 125 unseen coins, top 1%, take 1 / stop 2 ATR / 32 bars | WR | R a trade | last 12 months |
+|---|---|---|---|
+| 30m / 1h / 2h streams (best) | 70–75% | +0.06 … +0.07 | ~0 … +0.05 |
+| 4h wick 1 ATR, one model | 78% | +0.164 | +0.134 |
+| 4h, 10-seed ensemble + 5 daily features | 80% | +0.204 | +0.224 |
+| **4h, both ensembles averaged (deployed, 20 models)** | **82%** | **+0.235** | **+0.243** |
+| the same on 1m bars (fill 0.05% through) | 86% | +0.31 | |
+
+Money (20 positions at 3%, cautious −0.025R a trade, from $100, 2024–26 starts): 6 months median $335, 12 months
+median $1 146 (worst 10% $406). Deployed by `dlm4_export2.py`; the bot's features: `t_dlm_parity.py`.

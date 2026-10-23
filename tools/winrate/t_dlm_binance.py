@@ -2,7 +2,7 @@
 limit (isolated, leverage from the brackets, the price and the size snapped, a 1000-coin scaled), the fill -> the
 STOP_MARKET (Algo API) + the reduce-only take limit, the take -> WIN, the stop -> LOSS, the time exit at the market, an
 unfilled limit expired, the free margin scaling the risk, the minimum notional, the old order endpoint when the Algo API
-is missing, a hedge-mode account, the single mode on Binance prices, the settings and the keys file"""
+is missing, a hedge-mode account, the position cap (v0.99.687), the settings and the keys file"""
 import sys, os, time, json, hmac, hashlib, tempfile
 from urllib.parse import urlsplit, parse_qsl
 from common import V
@@ -124,7 +124,7 @@ V.log_error = lambda m: print("   log:", m) if "binance algo" not in m and "bina
 V._BNC[("AAA_USDT", "15m")] = {"bsym": "AAAUSDT", "scl": 1.0, "cols": [[]] * 6}
 V._BNC[("PEPE_USDT", "15m")] = {"bsym": "1000PEPEUSDT", "scl": 1000.0, "cols": [[]] * 6}
 V._BNC[("BBB_USDT", "15m")] = {"bsym": "BBBUSDT", "scl": 1.0, "cols": [[]] * 6}
-V._DLM["model"] = {"rule": {"stop_atr": 2.0, "take_atr": 0.5, "hold_bars": 16, "alive_bars": 4}}
+V._DLM["model"] = {"rule": {"stop_atr": 2.0, "take_atr": 1.0, "hold_bars": 32, "alive_bars": 4, "bar_sec": 14400}}   # v0.99.687 — the 4h rule
 res = {}
 
 # (1) the keys: saved chmod 600, the check shows the balance and the rights
@@ -137,11 +137,11 @@ c2 = V.binance_check(); V.BINANCE_API_SECRET = bad; V.binance_check()
 res["wrong secret -> told"] = (not c2["ok"]) and "ключ не принят" in c2.get("err", "")
 
 # (2) the limit: isolated, the leverage, the price / size snapped, the loss at the stop = the risk
-V.apply_settings({"dlm_binance": True, "autotrade_dlm": True, "risk_pct_dlm": 10}); V.AUTOTRADE_DRY_RUN = False
-res["settings"] = V.DLM_BINANCE and V.get_settings()["dlm_binance"] is True
-now = time.time(); tb = int(now // 900 * 900)
-mk = lambda sym, side, lv, atr: {"id": f"dlm_{sym}_{side}_{tb}_{lv}", "symbol": sym, "side": side, "lv": lv, "atr": atr, "score": 0.1, "t0": tb,
-                                 "until": tb + 3600, "px": lv + side * 2 * atr, "status": "OPEN", "real": None}
+V.apply_settings({"dlm_binance": True, "autotrade_dlm2": True, "risk_pct_dlm2": 10}); V.AUTOTRADE_DRY_RUN = False
+res["settings"] = V.DLM_BINANCE and V.AUTOTRADE_ENABLED_DLM and V.get_settings()["dlm_binance"] is True and V.dlm_risk() == 10
+now = time.time(); tb = int(now // 14400 * 14400)
+mk = lambda sym, side, lv, atr: {"id": f"dlm_{sym}_{side}_{tb}_{lv}", "symbol": sym, "side": side, "lv": lv, "atr": atr, "score": 0.1, "t0": tb, "bs": 14400,
+                                 "until": tb + 4 * 14400, "px": lv + side * 2 * atr, "status": "OPEN", "real": None}
 V._DLM.update({"orders": [], "trades": []})
 a = mk("AAA_USDT", 1, 10.0, 0.1); V._DLM["orders"].append(a)
 V.dlm_real_place(a)
@@ -157,7 +157,8 @@ t = next(t for t in V._DLM["trades"] if t["symbol"] == "AAA_USDT"); rt = t["real
 sl = X["algos"].get(int(rt.get("sl_id") or 0)) or {}; tp = X["orders"].get(int(rt.get("tp_id") or 0)) or {}
 res["fill -> stop + take"] = (t["status"] == "OPEN" and abs(t["entry"] - 9.99) < 1e-9 and sl.get("type") == "STOP_MARKET" and sl.get("closePosition") == "true"
                               and sl.get("side") == "SELL" and abs(float(sl["triggerPrice"]) - 9.79) < 1e-9 and tp.get("type") == "LIMIT"
-                              and tp.get("reduceOnly") == "true" and abs(float(tp["price"]) - 10.04) < 1e-9 and tp["quantity"] == o["quantity"])
+                              and tp.get("reduceOnly") == "true" and abs(float(tp["price"]) - 10.09) < 1e-9 and tp["quantity"] == o["quantity"]
+                              and t["bs"] == 14400 and t["hold"] == 32 and t["fbar"] % 14400 == 0)
 # (4) the take fills -> WIN, the stop cancelled
 tp.update(status="FILLED", executedQty=tp["quantity"]); X["pos"]["AAAUSDT"] = 0.0
 V.dlm_real_tick()
@@ -171,7 +172,7 @@ ob.update(status="FILLED", executedQty=ob["quantity"], avgPrice="0.01"); X["pos"
 V.dlm_real_tick()
 tb2 = next(t for t in V._DLM["trades"] if t["symbol"] == "PEPE_USDT"); r2 = tb2["real"]
 s2 = X["algos"][int(r2["sl_id"])]; t2 = X["orders"][int(r2["tp_id"])]
-okp = s2["side"] == "BUY" and abs(float(s2["triggerPrice"]) - 0.0104) < 1e-9 and abs(float(t2["price"]) - 0.0099) < 1e-9
+okp = s2["side"] == "BUY" and abs(float(s2["triggerPrice"]) - 0.0104) < 1e-9 and abs(float(t2["price"]) - 0.0098) < 1e-9
 V.dlm_real_tick()   # the position seen once (a stop within the first minute of an unseen position waits that minute)
 s2["algoStatus"] = "FINISHED"; X["pos"]["1000PEPEUSDT"] = 0.0
 V.dlm_real_tick()
@@ -193,10 +194,10 @@ V.dlm_real_place(d); d["until"] = time.time() - 1
 V.dlm_real_tick()
 res["expired"] = d["status"] == "EXPIRED" and X["orders"][int(d["real"]["id"])]["status"] == "CANCELED"
 # (8) the free margin: the risk scaled down; (9) below the minimum notional -> skipped
-V.apply_settings({"risk_pct_dlm": 50}); X["free"] = 100.0
+V.apply_settings({"risk_pct_dlm2": 50}); X["free"] = 5.0
 e = mk("AAA_USDT", 1, 10.0, 0.1); e["id"] += "e"; V._DLM["orders"].append(e)
 V.dlm_real_place(e)
-res["free margin -> risk scaled"] = e["real"]["status"] == "LIMIT" and e["real"]["risk"] < 50
+res["risk capped 10%, free margin -> risk scaled"] = V.dlm_risk() == 10 and e["real"]["status"] == "LIMIT" and e["real"]["risk"] < 10
 X["orders"][int(e["real"]["id"])]["status"] = "CANCELED"; e["status"] = "CANCELLED"
 X.update(wallet=1.0, free=1.0)
 f = mk("BBB_USDT", 1, 5.0, 0.05); f["id"] += "f"; V._DLM["orders"].append(f)
@@ -216,13 +217,14 @@ res["old endpoint + hedge mode"] = (og.get("positionSide") == "SHORT" and "reduc
                                     and st.get("positionSide") == "SHORT" and tk.get("positionSide") == "SHORT" and "reduceOnly" not in tk)
 X["pos"]["BBBUSDT"] = 0.0; tk.update(status="FILLED", executedQty=tk["quantity"]); V.dlm_real_tick()
 X.update(algo_api=True, dual=False, dual_lock=False); V._BNF["dual"] = None
-# (12) the single mode on Binance's prices
-V.DLM_SINGLE = True; V.apply_settings({"risk_pct_dlm": 10})
+# (12) at most DLM_MAX_POS positions (v0.99.687): one open real trade and a cap of 1 -> a new limit is not placed
 V._DLM["orders"] = []; V._DLM["trades"] = [t for t in V._DLM["trades"] if t["status"] != "OPEN"]
+V._DLM["trades"].append({"id": "held", "symbol": "ZZZ_USDT", "side": 1, "status": "OPEN", "real": {"ex": "binance", "bsym": "ZZZUSDT"}})
+cap0 = V.DLM_MAX_POS; V.DLM_MAX_POS = 1
 h = mk("AAA_USDT", 1, 10.0, 0.1); h["id"] += "h"; V._DLM["orders"].append(h)
-X["px"] = {"AAAUSDT": 10.2}; V.dlm_single_arm(); far = not h.get("real")
-X["px"] = {"AAAUSDT": 10.03}; V.dlm_single_arm()
-res["single on Binance prices"] = far and (h.get("real") or {}).get("ex") == "binance"
+V.dlm_real_place(h)
+res["position cap"] = not h.get("real")
+V.DLM_MAX_POS = cap0; V._DLM["trades"] = [t for t in V._DLM["trades"] if t["id"] != "held"]
 # (13) the UI
 html = V.app.test_client().get("/").get_data(as_text=True)
 st = V.app.test_client().get("/api/dlm/status").get_json()
