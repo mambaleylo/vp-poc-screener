@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.687"
+APP_VERSION = "0.99.688"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1156,7 +1156,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones", "risk_pct_zm", "risk_pct_rbx", "rbx_enabled", "autotrade_rbx", "telegram_alerts_rbx", "rbx_part",
                   "cas_enabled", "autotrade_cas", "telegram_alerts_cas", "risk_pct_cas",   # v0.99.653
                   "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
-                  "dlm_enabled", "autotrade_dlm2", "telegram_alerts_dlm", "risk_pct_dlm2", "dlm_binance", "dlm_more_coins",   # v0.99.679, v0.99.684, v0.99.686 (v0.99.687: the single mode and the ladder dropped; the 4h module's own autotrade / risk keys: it starts virtual at 3%, the 15m one held up to 50%)
+                  "dlm_enabled", "autotrade_dlm2", "telegram_alerts_dlm", "risk_pct_dlm2", "dlm_binance", "dlm_more_coins",   # v0.99.679, v0.99.684, v0.99.686 (v0.99.687: the single mode and the ladder dropped; the 4h module's own autotrade / risk keys: it starts virtual at 4% (v0.99.688), the 15m one held up to 50%)
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
@@ -33991,7 +33991,11 @@ DLM_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_dl
 DLM_ENABLED = os.environ.get("VP_DLM", "1") == "1"
 AUTOTRADE_ENABLED_DLM = os.environ.get("VP_AUTOTRADE_DLM2", "0") == "1"
 TELEGRAM_ALERTS_DLM = os.environ.get("VP_TG_ALERTS_DLM", "0") == "1"   # ~2 trades a day: quiet unless asked
-DLM_RISK_DEFAULT = 3.0   # v0.99.687 — % of the account a trade, up to DLM_MAX_POS at once
+DLM_RISK_DEFAULT = 4.0   # v0.99.687 — % of the account a trade, up to DLM_MAX_POS at once; v0.99.688: 4 (was 3) — tools/winrate
+# best_money.py (336 variants of the threshold / a side's cap / positions / risk): 4% at 20 a side takes nearly all the
+# money (a year from $100 cautious: the median $1 880 vs $1 150 at 3%, the worst 10% $560 vs $410); above it the free
+# margin binds (6%: +7% more for a deeper worst drawdown). The drawdown from the peak is ~50% in a crash: 24–25 May 2025
+# stopped 19 trades in two days (−19R).
 DLM_MAX_POS = int(os.environ.get("VP_DLM_MAX_POS", "20"))   # v0.99.687 — real open positions at once
 DLM_MAX_LIVE_ORDERS = int(os.environ.get("VP_DLM_MAX_LIVE", "26"))   # real limits + open positions at once
 DLM_POLL_SEC = 5
@@ -34326,7 +34330,7 @@ def dlm_coins():
 
 
 def dlm_risk(equity=None):
-    """the risk % of a new ⚡ trade: the module's field (empty = 3%), at most 10% (v0.99.687: up to 20 positions at once)"""
+    """the risk % of a new ⚡ trade: the module's field (empty = 4%), at most 10% (v0.99.687: up to 20 positions at once)"""
     return min(MODULE_RISK_PCT.get("dlm") or DLM_RISK_DEFAULT, 10.0)
 
 
@@ -34480,7 +34484,7 @@ def dlm_real_place(o):
         held = [t for t in _DLM["trades"] if t.get("real") and t["status"] == "OPEN"]
         mine = any(t["symbol"] == sym for t in held)
     # v0.99.682 — the cap counts the open positions too; v0.99.687: at most DLM_MAX_POS positions (the research's 20 at
-    # 3%), limits + positions at most DLM_MAX_LIVE_ORDERS (a limit holds its margin on the exchange)
+    # 3–4%), limits + positions at most DLM_MAX_LIVE_ORDERS (a limit holds its margin on the exchange)
     if mine or any(x["symbol"] == sym for x in live) or len(held) >= DLM_MAX_POS or len(live) + len(held) >= DLM_MAX_LIVE_ORDERS:
         return
     if DLM_BINANCE:   # v0.99.684
@@ -39425,7 +39429,7 @@ INDEX_HTML = """<!doctype html>
           <input type="number" id="setRiskPctZm" min="0.1" max="100" step="0.1" placeholder="🎯 0.5" title="🎯 Сильные зоны: пусто — 0.5% (не общий %!)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctRbx" min="0.1" max="100" step="0.1" placeholder="📈 0.5" title="📈 Пробой: пусто — 0.5% (не общий %)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctCas" min="0.1" max="100" step="0.1" placeholder="🌊 0.5" title="🌊 Каскад: пусто — 0.5% (не общий %)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctDlm" min="0.1" max="100" step="0.05" placeholder="⚡ 3" title="⚡ Лимитки 4ч: пусто — 3% на сделку, до 20 сделок сразу; больше 10% не берётся" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctDlm" min="0.1" max="100" step="0.05" placeholder="⚡ 4" title="⚡ Лимитки 4ч: пусто — 4% на сделку, до 20 сделок сразу; больше 10% не берётся" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSmc" min="0.1" max="100" step="0.05" placeholder="🧱 0.25" title="🧱 SMC: пусто — 0.25% (не общий %); на истории — четверть риска EMA" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
         </div>
       </div>
@@ -39523,7 +39527,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ ⚡ Лимитки 4ч</div>
-          <div class="sub">настоящие лимитки на бирже из вкладки ⚡ (до 20 позиций, с лимитками — до 26, по монете без чужой позиции); исполнилась — стоп триггером и тейк лимиткой «только закрытие», через 5 дней 8 ч бот закрывает остаток. Риск — поле «⚡» выше (пусто = 3%, больше 10% не берётся); не хватает свободной маржи — риск сделки уменьшается</div>
+          <div class="sub">настоящие лимитки на бирже из вкладки ⚡ (до 20 позиций, с лимитками — до 26, по монете без чужой позиции); исполнилась — стоп триггером и тейк лимиткой «только закрытие», через 5 дней 8 ч бот закрывает остаток. Риск — поле «⚡» выше (пусто = 4%, больше 10% не берётся); не хватает свободной маржи — риск сделки уменьшается</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeDlm"><span class="switchSlider"></span></label>
       </div>
@@ -43012,7 +43016,7 @@ async function bnCheck() {
   refreshDlm(true);
 }
 
-async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687 — the 4h "wick" limits, up to 20 trades at 3%
+async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687 — the 4h "wick" limits, up to 20 trades at 4% (v0.99.688)
   const panel = document.getElementById('dlmPanel');
   const kIn = document.getElementById('bnKey'), sIn = document.getElementById('bnSecret');   // v0.99.684 — keys being typed: no redraw
   if (!force && kIn && (kIn.value || (sIn && sIn.value) || document.activeElement === kIn || document.activeElement === sIn)) return;
@@ -43042,9 +43046,10 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
       <div class="zsub">Проверка на монетах, которых модель не видела (${(rs.check_coins || 42) + (rs.new_coins || 83)}), каждый год — моделью, обученной только на прошлых годах:</div>
       ${zBars(rows, v => sgR(+(+v).toFixed(3)))}
       <div class="zstrip"><span>WR <b>~${un.wr || 82}%</b></span><span>в среднем <b>${sgR(un.avg || 0.235)}</b></span><span>последние 12 мес <b>${sgR(un.last12_avg || 0.24)}</b></span><span><b>~60</b> сделок в месяц</span></div>
-      <div class="zsub">По минутным свечам Binance (точный порядок стопа и тейка, лимитка исполняется только при проходе цены сквозь неё на 0.05%): WR ${m1.wr || 86}%, <b>+${m1.avg_through || 0.31}R</b>. Деньги, до ${mo.pos || 20} сделок по ${mo.risk || 3}%, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 1146)}</b>, худшие 10% ~${usd(mo.year_p10 || 406)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26, через 1–3 месяца — 10–16%, за месяц бывает −10%. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
-      ${d.risk_set && d.risk_set > 5 ? `<div class="zbanner warn">Риск ${d.risk}% на сделку при до ${d.max_pos || 20} сделок сразу — это до ${Math.round(d.risk * (d.max_pos || 20))}% счёта под стопами одновременно. Исследование считало 3%.</div>` : ''}
-      ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} — переключатель «↳ ⚡ Лимитки 4ч» в автоторговле; риск — поле «⚡» (пусто = 3%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
+      <div class="zsub">По минутным свечам Binance (точный порядок стопа и тейка, лимитка исполняется только при проходе цены сквозь неё на 0.05%): WR ${m1.wr || 86}%, <b>+${m1.avg_through || 0.31}R</b>. Деньги, до ${mo.pos || 20} сделок по ${mo.risk || 4}%, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 1878)}</b>, худшие 10% ~${usd(mo.year_p10 || 558)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 1512)}); через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26, через 1–3 месяца — 10–18%. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
+      <div class="zbanner warn">Просадка: при обвале рынка счёт может временно упасть примерно вдвое от пика — 24–25 мая 2025 за два дня стопы закрыли 19 сделок (−19R, при 4% на сделку это около −50%). Потом счёт восстанавливался, но к такому надо быть готовым и не повышать риск после серии стопов.</div>
+      ${d.risk_set && d.risk_set > 6 ? `<div class="zbanner warn">Риск ${d.risk}% на сделку при до ${d.max_pos || 20} сделок сразу — это до ${Math.round(d.risk * (d.max_pos || 20))}% счёта под стопами одновременно. Лучше всего по деньгам — 4–6%: выше денег не прибавляется (не хватает маржи), а просадки глубже.</div>` : ''}
+      ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} — переключатель «↳ ⚡ Лимитки 4ч» в автоторговле; риск — поле «⚡» (пусто = 4%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
   }
   let h = card(`⚡ Лимитки 4ч ${pill}`, top);
   {   // v0.99.684 — the exchange: Gate or Binance (the keys, the balance)
@@ -44442,7 +44447,7 @@ const setInputs = {
   telegram_alerts_cas: document.getElementById('setTgCas'),
   smc_enabled: document.getElementById('setSmc'),   // v0.99.678
   dlm_enabled: document.getElementById('setDlm'),   // v0.99.679
-  autotrade_dlm2: document.getElementById('setAutotradeDlm'),   // v0.99.687 — the 4h module's own keys (starts virtual, 3%)
+  autotrade_dlm2: document.getElementById('setAutotradeDlm'),   // v0.99.687 — the 4h module's own keys (starts virtual, 4% since v0.99.688)
   telegram_alerts_dlm: document.getElementById('setTgDlm'),
   dlm_binance: document.getElementById('setDlmBinance'),   // v0.99.684
   dlm_more_coins: document.getElementById('setDlmMoreCoins'),   // v0.99.686

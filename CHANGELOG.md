@@ -20361,3 +20361,11 @@ v0.99.687 - ⚡ v2: the 4h "wick" limits replace the 15m deep limits (the user: 
          and the risk / withdrawal ladder (one big trade at a time loses in ~45% of the years). The 15m module's open
          virtual / real trades finish on their own 15m rule and are shown apart. The backtest list: 829 trades
          2025–26 (WR 82%, +0.24R). tools/winrate: dlm4_export2.py, t_dlm_bot.py / t_dlm_binance.py / t_dlm_ui.py.
+v0.99.688 - ⚡ the risk 4% by default (was 3%) (the user: "посчитай ещё лучший вариант по деньгам… допушь"): tools/winrate
+         best_money.py / best_money2.py — 336 variants of the threshold (top 0.5–2%), a side's cap (4–40), the
+         positions at once (10–30) and the risk (2–10%), 12-month windows started weekly over 2024–26 from $100. At the
+         top 1% / 20 a side / 20 positions: 3% — the median $1 146, the worst 10% $406; 4% — $1 878 / $558 (every trade
+         0.04R worse: $1 512); 6% — $2 013 / $737 with a deeper worst drawdown (above ~4% the free margin binds). No
+         variant short of the most aggressive ended a year below $100. The ⚡ tab now warns of the drawdown honestly: in
+         a crash the account can fall about half from its peak — 24–25 May 2025 stopped 19 trades in two days (−19R,
+         ~−50% at 4%); a side's cap of 12 softens it to ~−45% at less money. The risk warning shows above 6%.

@@ -111,7 +111,7 @@ mk = lambda sym, side, lv: {"id": f"dlm_{sym}_{side}_{tb}", "symbol": sym, "side
 a, b_, c = mk("AAA_USDT", 1, 1.0), mk("BBB_USDT", -1, 2.0), mk("CCC_USDT", 1, 3.0)
 V._DLM["orders"] += [a, b_, c]
 for o in (a, b_, c): V.dlm_real_place(o)
-placed = all((o.get("real") or {}).get("id") for o in (a, b_, c)) and risks and all(r == 3.0 for r in risks)
+placed = all((o.get("real") or {}).get("id") for o in (a, b_, c)) and risks and all(r == 4.0 for r in risks)
 X_.fill(a["real"]["id"]); X_.fill(b_["real"]["id"])
 V.dlm_real_tick()
 ta = next(t for t in V._DLM["trades"] if t["symbol"] == "AAA_USDT"); tb_ = next(t for t in V._DLM["trades"] if t["symbol"] == "BBB_USDT")
@@ -131,6 +131,6 @@ left = [k for k, v in X_.trig.items()]
 cap0 = V.DLM_MAX_POS; V.DLM_MAX_POS = 0
 d_ = mk("DDD_USDT", 1, 4.0); V._DLM["orders"].append(d_); V.dlm_real_place(d_)
 capped = not d_.get("real"); V.DLM_MAX_POS = cap0
-print(f"(4) placed at 3% {placed} · exits {exits_ok} · take = reduce-only limit {bool(tp_ok)} · WIN {win} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped}")
+print(f"(4) placed at 4% {placed} · exits {exits_ok} · take = reduce-only limit {bool(tp_ok)} · WIN {win} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped}")
 ok &= placed and exits_ok and bool(tp_ok) and win and tx and cx and not left and capped
 print("ALL OK" if ok else "FAILED"); sys.exit(0 if ok else 1)
