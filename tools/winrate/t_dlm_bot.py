@@ -94,7 +94,10 @@ class X:
         s.pos[o["contract"]] = s.pos.get(o["contract"], 0) + int(o["size"])
 X_ = X()
 V.gate_signed_request = X_.req
-V.get_open_positions = lambda: [{"contract": c, "size": v, "mark_price": "1"} for c, v in X_.pos.items() if v]
+MARK = {"AAA_USDT": 1.0, "BBB_USDT": 2.0, "CCC_USDT": 3.0}
+V.get_open_positions = lambda: [{"contract": c, "size": v, "mark_price": str(MARK.get(c, 1))} for c, v in X_.pos.items() if v]
+KL = {}   # v0.99.690 — the 1m candles the take watcher reads
+V.binance_klines = lambda sym, iv, a, b: [c for c in KL.get(sym, []) if a <= c["time"] <= b]
 def trig(sym, d, px, rule, tick=None, price_type=0):
     X_.n += 1; X_.trig[str(X_.n)] = (sym, px); return {"id": X_.n}
 V.place_close_trigger_order = trig
@@ -125,8 +128,21 @@ X_.fill(a["real"]["id"]); X_.fill(b_["real"]["id"])
 V.dlm_real_tick()
 ta = next(t for t in V._DLM["trades"] if t["symbol"] == "AAA_USDT"); tb_ = next(t for t in V._DLM["trades"] if t["symbol"] == "BBB_USDT")
 exits_ok = bool(ta["real"].get("sl_id") and ta["real"].get("tp_id") and ta["real"].get("tp_kind") == "limit") and ta["hold"] == 32 and ta["until"] - ta["fbar"] == 32 * 14400
-tp_order = X_.orders[ta["real"]["tp_id"]]
-tp_ok = tp_order.get("reduce_only") and tp_order["size"] == -37 and abs(float(tp_order["price"]) - (ta["entry"] + 0.01)) < 1e-6
+tp_order = X_.orders[ta["real"]["tp_id"]]   # v0.99.690 — the take starts at 2 ATR
+tp_ok = tp_order.get("reduce_only") and tp_order["size"] == -37 and abs(float(tp_order["price"]) - (ta["entry"] + 0.02)) < 1e-6 and ta["take"] == "far"
+# the short goes 0.5 ATR against before +1 ATR: its take comes back to 1 ATR (the old order cancelled, a new one)
+m_ = int(time.time()) // 60 * 60
+KL["BBB_USDT"] = [{"time": m_ - 60, "open": 2.0, "high": 2.0, "low": 1.97, "close": 2.0},   # before the fill's minute: ignored
+                  {"time": m_, "open": 2.0, "high": 2.005, "low": 1.999, "close": 2.003}]
+old_tp = tb_["real"]["tp_id"]; tb_["t_in"] = m_ - 30; tb_["mw"] = 0
+V.dlm_real_tick()
+pull_ok = (tb_["take"] == "near" and X_.orders[old_tp]["status"] == "finished" and tb_["real"]["tp_id"] != old_tp
+           and abs(float(X_.orders[tb_["real"]["tp_id"]]["price"]) - (tb_["entry"] - 0.01)) < 1e-6 and abs(tb_["tp"] - (tb_["entry"] - 0.01)) < 1e-9)
+# the long reaches +1 ATR with no dip: the take stays at 2 ATR for good
+KL["AAA_USDT"] = [{"time": m_ + 60, "open": 1.0, "high": 1.011, "low": 0.999, "close": 1.01}]
+ta["t_in"] = m_ - 30; ta["mw"] = 0; MARK["AAA_USDT"] = 1.01
+V.dlm_real_tick()
+lock_ok = ta["take"] == "locked" and abs(float(X_.orders[ta["real"]["tp_id"]]["price"]) - (ta["entry"] + 0.02)) < 1e-6
 X_.fill(ta["real"]["tp_id"])           # the take fills: the position goes
 V.dlm_real_tick(); V.dlm_real_tick()
 win = ta["status"] == "CLOSED" and ta["result"] == "WIN" and ta["r"] > 0
@@ -140,6 +156,6 @@ left = [k for k, v in X_.trig.items()]
 cap0 = V.DLM_MAX_POS; V.DLM_MAX_POS = 0
 d_ = mk("DDD_USDT", 1, 4.0); V._DLM["orders"].append(d_); V.dlm_real_place(d_)
 capped = not d_.get("real"); V.DLM_MAX_POS = cap0
-print(f"(4) placed at 4% {placed} · exits {exits_ok} · take = reduce-only limit {bool(tp_ok)} · WIN {win} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped}")
-ok &= placed and exits_ok and bool(tp_ok) and win and tx and cx and not left and capped
+print(f"(4) placed at 4% {placed} · exits {exits_ok} · take = reduce-only limit at 2 ATR {bool(tp_ok)} · back to 1 ATR after a dip {pull_ok} · stays after +1 ATR {lock_ok} · WIN {win} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped}")
+ok &= placed and exits_ok and bool(tp_ok) and pull_ok and lock_ok and win and tx and cx and not left and capped
 print("ALL OK" if ok else "FAILED"); sys.exit(0 if ok else 1)

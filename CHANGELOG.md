@@ -20384,3 +20384,20 @@ v0.99.689 - ⚡ a second limit stream on 2h (the user: "Лучше же по д�
          case: if both limits of a coin & side fill inside one 5 s poll, both become trades (one position twice the
          size). Tests: t_dlm_parity (both streams, 320 events exact), t_dlm_bot (10/10 backtest trades re-made by the
          bot, 5 per stream), t_dlm_binance, t_dlm_coins, t_dlm_ui — all OK.
+v0.99.690 - ⚡ the take (the user: "если цена не прошла в сторону стопа n, а сразу пошла к тейку — увеличить тейк на n"):
+         the take starts at 2 ATR; if the price goes 0.4 ATR against the trade before it has reached +1 ATR, the take
+         comes back to 1 ATR; the stop 2 ATR and the 32 bars as before. Research (tools/winrate tkext.py, the pool as the
+         bot trades it, the worst order inside a bar): +0.24R a trade (was +0.18R), WR 70% (79%); a year from $100 at 4%,
+         every trade 0.025R worse: the median $18 247 (was $5 163), the worst 10% $3 633 ($1 799), harsh $11 967 ($3 107),
+         better from every start in 2024–25 and in every year 2023–26, the drawdown the same ~67%. On Binance 1m bars
+         (tkext_1m.py, 1 159 trades, 40 coins, 2024-10 on) +0.26R vs +0.20R. A take of 2 ATR for every trade makes LESS
+         money than 1 ATR ($2 600) — the condition does the work; n 0.4–0.6 all close (no lone peak); moving the stop to
+         the entry / +0.5 ATR after the touch: much worse. A third stream (2h wick 1 ATR, 1h close 2 ATR28) and a BTC panic
+         filter / a lower risk in a drawdown were tested too (pool3s.py, pool4.py, btcf.py, ddrisk.py, tkext3.py): no
+         gain with this take — not deployed. The bot: virtual trades walk the same rule on their bars (the touch bar's dip
+         counts); real ones (Binance and Gate) are watched on Binance 1m candles every ~20 s and the mark price — the take
+         order is moved to 1 ATR once the dip comes first, kept at 2 ATR once +1 ATR comes first. The model file gets
+         far_take_atr / pull_atr in each stream (an older bot ignores them: the 1 ATR take), the backtest list
+         (dlm4_export5.py, 1 639 trades 2025–26) the new exits. Tests: t_dlm_bot (10/10 backtest trades re-made, the take
+         moved / kept on a fake Gate), t_dlm_binance (the take order moved on a fake Binance), t_dlm_parity, t_dlm_coins,
+         t_dlm_ui — all OK.

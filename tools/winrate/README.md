@@ -84,3 +84,15 @@ median $1 146 (worst 10% $406). Deployed by `dlm4_export2.py`; the bot's feature
   after a ⚡ stop, the old take, a short stop — not better than ~0R after fees.
 - **Elliott wave 5 + RSI divergence, the entry on the Fibo bounce, target 0.702** (`ew5.py`, `ew5_rep.py`, the
   user's post): causal zigzag pivots; on 1m bars negative, on 15m ~0, on 4h n=211 — too few to trust (likely fit).
+
+## v0.99.690 — ⚡ the take 2 ATR unless the price dips 0.4 ATR first (deployed)
+
+- **The user's idea** (`tkext.py`, `tkext_ctl.py`, `tkext_1m.py`, `tkext3.py`): the take 1 ATR becomes 2 ATR for the
+  trades that reach +1 ATR without going 0.4 ATR against first. The pool: +0.24R (was +0.18R), WR 70%; a year from
+  $100 at 4%, cautious: the median $18 247 (was $5 163), the worst 10% $3 633; better from every 2024–25 start. On 1m
+  bars +0.26R vs +0.20R. Always 2 ATR: less money than 1 ATR; the stop moved after the touch: much worse.
+  Deployed by `dlm4_export5.py` (the same models, the new exits and numbers).
+- **A third stream** (`pool3s.py`, `pool4.py`): 2h wick 1 ATR helps the old take (median $8 100) but not the new one;
+  1h close 2 ATR28: the drawdown 89–94% from 2024 starts. **A BTC panic filter** (`btcf.py`): the cancelled orders
+  were profitable — no gain. **Risk by the drawdown / positions** (`ddrisk.py`): the drawdown comes in a day or two,
+  cutting the risk after it only loses money; more than 15 positions changes nothing (the margin binds).

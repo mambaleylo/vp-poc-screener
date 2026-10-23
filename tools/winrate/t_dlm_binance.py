@@ -193,6 +193,28 @@ d = mk("AAA_USDT", -1, 11.0, 0.1); d["until"] = time.time() + 600; V._DLM["order
 V.dlm_real_place(d); d["until"] = time.time() - 1
 V.dlm_real_tick()
 res["expired"] = d["status"] == "EXPIRED" and X["orders"][int(d["real"]["id"])]["status"] == "CANCELED"
+# (7b) v0.99.690 — the take at 2 ATR; the price goes 0.4 ATR against before +1 ATR -> the take order moved to 1 ATR
+m0 = V._DLM["model"]
+V._DLM["model"] = {"rule": m0["rule"], "streams": [{"name": "wick4h", "tf": "4h", "bar_sec": 14400, "take_atr": 1.0, "far_take_atr": 2.0, "pull_atr": 0.4,
+                                                    "stop_atr": 2.0, "hold_bars": 32, "alive_bars": 4}]}
+f = mk("AAA_USDT", 1, 10.0, 0.1); f["id"] += "f"; f["st"] = "wick4h"; V._DLM["orders"].append(f)
+V.dlm_real_place(f); of = X["orders"][int(f["real"]["id"])]
+of.update(status="FILLED", executedQty=of["quantity"], avgPrice="10"); X["pos"]["AAAUSDT"] = float(of["quantity"]); X["mark"] = {"AAAUSDT": 10.0}
+KL = []
+V.binance_klines = lambda sym, iv, a_, b_: [c for c in KL if a_ <= c["time"] <= b_] if sym == "AAA_USDT" and iv == "1m" else []
+V.dlm_real_tick()
+tf_ = next(t for t in V._DLM["trades"] if t["id"] == f["id"]); tp_a = X["orders"][int(tf_["real"]["tp_id"])]
+far_ok = abs(float(tp_a["price"]) - 10.2) < 1e-9 and tf_["take"] == "far"
+m_ = int(time.time()) // 60 * 60; tf_["t_in"] = m_ - 30; tf_["mw"] = 0
+KL += [{"time": m_, "open": 10.0, "high": 10.01, "low": 9.95, "close": 9.97}]   # 0.5 ATR against, +1 ATR not reached
+V.dlm_real_tick()
+tp_b = X["orders"][int(tf_["real"]["tp_id"])]
+res["take 2 ATR -> 1 ATR after a dip"] = (far_ok and tf_["take"] == "near" and tp_a["status"] == "CANCELED" and abs(float(tp_b["price"]) - 10.1) < 1e-9
+                                          and tp_b["reduceOnly"] == "true" and tp_b["status"] == "NEW" and abs(tf_["tp"] - 10.1) < 1e-9)
+tp_b.update(status="FILLED", executedQty=tp_b["quantity"]); X["pos"]["AAAUSDT"] = 0.0
+V.dlm_real_tick()
+res["take 2 ATR -> 1 ATR after a dip"] &= tf_["result"] == "WIN" and abs(tf_["exit"] - 10.1) < 1e-9
+V._DLM["model"] = m0
 # (8) the free margin: the risk scaled down; (9) below the minimum notional -> skipped
 V.apply_settings({"risk_pct_dlm2": 50}); X["free"] = 5.0
 e = mk("AAA_USDT", 1, 10.0, 0.1); e["id"] += "e"; V._DLM["orders"].append(e)
