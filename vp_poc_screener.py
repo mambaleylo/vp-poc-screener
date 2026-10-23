@@ -35022,7 +35022,8 @@ def dlm_loop():
                 if _DLM.get("bar_done") != t_bar and now - t_bar >= 15:   # every 15 min: settle; a stream's bar closed: its scan
                     dlm_settle(now)
                     for st in _dlm_streams(dlm_model()):   # v0.99.689 — 4h and 2h
-                        if t_bar % int(st["bar_sec"]) == 0 and time.time() - t_bar < 600:   # a scan later than 10 min into the bar is stale
+                        if t_bar % int(st["bar_sec"]) == 0 and now - t_bar < 600:   # a scan later than 10 min into the bar is stale
+                            # (v0.99.691: from this pass's start — a slow 4h scan, e.g. the first candles after a restart, no longer drops the 2h one)
                             dlm_scan(t_bar, st)
                     with _dlm_lock:
                         _DLM["bar_done"] = t_bar
