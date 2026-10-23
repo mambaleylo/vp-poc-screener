@@ -156,6 +156,15 @@ left = [k for k, v in X_.trig.items()]
 cap0 = V.DLM_MAX_POS; V.DLM_MAX_POS = 0
 d_ = mk("DDD_USDT", 1, 4.0); V._DLM["orders"].append(d_); V.dlm_real_place(d_)
 capped = not d_.get("real"); V.DLM_MAX_POS = cap0
-print(f"(4) placed at 4% {placed} · exits {exits_ok} · take = reduce-only limit at 2 ATR {bool(tp_ok)} · back to 1 ATR after a dip {pull_ok} · stays after +1 ATR {lock_ok} · WIN {win} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped}")
-ok &= placed and exits_ok and bool(tp_ok) and pull_ok and lock_ok and win and tx and cx and not left and capped
+# v0.99.691 — an order blocked at its scan is placed later (the tick) if the price has not reached it; reached -> no trade
+V._DLM["orders"] = [x for x in V._DLM["orders"] if x is not d_]
+m1 = int(time.time()) // 60 * 60
+e_ = mk("EEE_USDT", 1, 5.0); e_["t0"] = m1 - 600; f_ = mk("FFF_USDT", 1, 6.0); f_["t0"] = m1 - 600
+KL["EEE_USDT"] = [{"time": m1 - 300, "open": 5.2, "high": 5.3, "low": 5.1, "close": 5.2}]   # above the long's level: not reached
+KL["FFF_USDT"] = [{"time": m1 - 300, "open": 6.1, "high": 6.2, "low": 5.95, "close": 6.1}]   # went through 6.0: reached
+V._DLM["orders"] += [e_, f_]
+V.dlm_real_tick()
+late_ok = bool((e_.get("real") or {}).get("id")) and (f_.get("real") or {}).get("status") == "SKIPPED" and not (f_.get("real") or {}).get("id")
+print(f"(4) placed at 4% {placed} · exits {exits_ok} · take = reduce-only limit at 2 ATR {bool(tp_ok)} · back to 1 ATR after a dip {pull_ok} · stays after +1 ATR {lock_ok} · WIN {win} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped} · placed later if not reached {late_ok}")
+ok &= placed and exits_ok and bool(tp_ok) and pull_ok and lock_ok and win and tx and cx and not left and capped and late_ok
 print("ALL OK" if ok else "FAILED"); sys.exit(0 if ok else 1)

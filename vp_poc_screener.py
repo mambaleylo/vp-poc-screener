@@ -34369,8 +34369,10 @@ def dlm_risk(equity=None):
 def dlm_scan(t_bar, st):
     """at the close of a bar of the stream's chart (4h / 2h) that started at t_bar - its bar: the coins' limits of the
     stream scored by its models; the ones above its threshold become orders alive for its next 4 bars — one per coin &
-    side a bar, none while a trade of the coin & side is open; another stream's order of the coin & side may stand too
-    (the first to fill is the trade, the other one goes — dlm4_export4.py's pool)"""
+    side a bar; another stream's order of the coin & side may stand too (the first to fill is the trade, the other one
+    goes — dlm4_export4.py's pool). v0.99.691: an order is made even while a trade of the coin & side is open — as in
+    the research, the coin being busy counts when the price reaches the order (an order of a trade that closed by then
+    trades; the audit's replay of this code over 2026 found 5% of the backtest's trades missing for that)"""
     m = dlm_model()
     if not m:
         return
@@ -34380,9 +34382,6 @@ def dlm_scan(t_bar, st):
     bb = _dlm_closed("BTC_USDT", tf, bs, nb, t_bar)
     thr = float(st["thr"])
     src = {"binance": 0, "gate": 0}
-    with _dlm_lock:
-        busy = {(t["symbol"], t["side"]) for t in _DLM["trades"] if t["status"] == "OPEN"}
-        n_open = {s: sum(1 for t in _DLM["trades"] if t["status"] == "OPEN" and t["side"] == s) for s in (1, -1)}
     new, coins, cands, best = [], 0, 0, []
     for sym in dlm_coins():
         heartbeat("dlm_loop")
@@ -34398,7 +34397,7 @@ def dlm_scan(t_bar, st):
                 cands += 1
                 sc = sum(zm_tree_pred(t_, c["f"]) for t_ in st["models"]) / len(st["models"])
                 best.append((sc / thr if thr > 0 else 0, sym, c["side"]))
-                if sc < thr or (sym, c["side"]) in busy:
+                if sc < thr:
                     continue
                 s, lv, a = c["side"], c["lv"], c["atr"]
                 if _sl_too_tight(lv, float(st.get("stop_atr", 2.0)) * a):
@@ -34422,8 +34421,6 @@ def dlm_scan(t_bar, st):
         send_telegram(f"⚡ лимитки {tf}: " + ", ".join(f"{o['symbol'].replace('_USDT', '')} {'↑' if o['side'] > 0 else '↓'} {o['lv']:.6g}" for o in new[:10]), category="dlm")
     if AUTOTRADE_ENABLED_DLM:
         for o in new:
-            if n_open.get(o["side"], 0) >= int(m.get("side_cap") or 12):
-                continue
             try:
                 dlm_real_place(o)
             except Exception as e:
@@ -34481,6 +34478,9 @@ def dlm_settle(now):
             if hit:
                 with _dlm_lock:
                     taken = any(t["status"] == "OPEN" and t["symbol"] == o["symbol"] and t["side"] == o["side"] for t in _DLM["trades"])
+                    # v0.99.691 — at most side_cap (20) open a side, as the research pool (the replay: without it the
+                    # virtual trades were twice the backtest's in mid-2026, 451 of the extra ones beyond 20 a side)
+                    taken = taken or sum(1 for t in _DLM["trades"] if t["status"] == "OPEN" and t["side"] == o["side"]) >= int((_DLM.get("model") or {}).get("side_cap") or 20)
                 if taken:
                     o["status"] = "SKIP"
                 else:
@@ -34575,7 +34575,18 @@ def _dlm_take_watch(t, mark=None, now=None):
 
 
 # ---- the exchange side: a real GTC limit, then the stop (trigger) and the take (a reduce-only limit = maker) ----
-def dlm_real_place(o):
+def _dlm_touched(o, now=None):
+    """v0.99.691 — has the price reached the order's level since its bar closed (Binance 1m candles)? None = unknown"""
+    cs = binance_klines(o["symbol"], "1m", int(o["t0"]), int(now or time.time()))
+    if not cs:
+        return None
+    return any((c["low"] <= o["lv"]) if o["side"] > 0 else (c["high"] >= o["lv"]) for c in cs)
+
+
+def dlm_real_place(o, late=False):
+    """the real limit of a ⚡ order, or nothing yet (the order stays virtual, tried again every tick while it is alive —
+    v0.99.691: a coin busy at the scan, the 20 positions, the 26 limits free up later; `late` = such a retry: placed
+    only if the price has not reached the level yet — reached while blocked = no trade, as in the research)"""
     if AUTOTRADE_DRY_RUN:
         o["real"] = {"status": "DRY_RUN"}
         return
@@ -34587,9 +34598,18 @@ def dlm_real_place(o):
         mine = any(t["symbol"] == sym for t in held)
     # v0.99.682 — the cap counts the open positions too; v0.99.687: at most DLM_MAX_POS positions (the research's 20 at
     # 3–4%), limits + positions at most DLM_MAX_LIVE_ORDERS (a limit holds its margin on the exchange)
-    if (mine or any(x["symbol"] == sym and (x["side"] != s or x.get("st") == o.get("st")) for x in live)   # v0.99.689 — the other
-            or len(held) >= DLM_MAX_POS or len(live) + len(held) >= DLM_MAX_LIVE_ORDERS):   # stream's limit of the coin & side may stand too
+    side_cap = int((_DLM.get("model") or {}).get("side_cap") or 20)   # v0.99.691 — the side's cap here (was at the scan only)
+    if (mine or any(x["symbol"] == sym and x["side"] != s for x in live)   # v0.99.691 — limits of the coin & side may stand
+            or len(held) >= DLM_MAX_POS or len(live) + len(held) >= DLM_MAX_LIVE_ORDERS   # together (the first to fill is the trade,
+            or sum(1 for t in held if t["side"] == s) >= side_cap):   # the tick cancels the rest), not the other side's (one position a coin)
         return
+    if late:
+        hit = _dlm_touched(o)
+        if hit is None:
+            return   # Binance did not answer: again next tick
+        if hit:
+            o["real"] = {"status": "SKIPPED", "detail": "цена дошла до лимитки, пока по монете не было места"}
+            return
     if DLM_BINANCE:   # v0.99.684
         return dlm_bn_place(o)
     with using_account("dlm"):
@@ -34860,6 +34880,15 @@ def dlm_real_tick():
     """every DLM_POLL_SEC: the real limits (filled / expired / a foreign position on the coin) and the real trades
     (the stop / take on the exchange, the time exit, the result)"""
     now = time.time()
+    with _dlm_lock:   # v0.99.691 — the orders not placed yet (blocked at their scan), while alive: again
+        wait = sorted((o for o in _DLM["orders"] if o["status"] == "OPEN" and o.get("real") is None and int(o.get("bs") or 900) != 900
+                       and now < o["until"]), key=lambda o: -o.get("score", 0))
+    for o in wait:
+        try:
+            dlm_real_place(o, late=True)
+        except Exception as e:
+            log_error(f"dlm place {o['symbol']}: {e}")
+            o["real"] = {"status": "SKIPPED", "detail": str(e)[:160]}
     with _dlm_lock:
         orders = [o for o in _DLM["orders"] if (o.get("real") or {}).get("id") and o["status"] == "OPEN"]
         trades = [t for t in _DLM["trades"] if t.get("real") and t["status"] == "OPEN"]
