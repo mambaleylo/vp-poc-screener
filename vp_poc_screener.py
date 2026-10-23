@@ -34350,22 +34350,28 @@ def _dlm_bars(sym, start, now, bs=900):
     return [c for c in (get_candles_range(sym, tf, start, int(now)) or []) if c["time"] >= start and c["time"] + bs <= now]
 
 
-def _dlm_touch_time(o, hit, now):
-    """v0.99.691 — when the price reached a virtual order: the first 1h bar inside its fill bar that reached the level (the
-    order's chart says only "within this 4h / 2h bar"); the first to fill of a coin & side and the side's 20 go by it —
-    ordered by the bar's open, a 4h order won over a 2h one that the price reached hours earlier (the audit, pool1h.py)"""
+def _dlm_hit(o, now):
+    """v0.99.691 — the touch of a virtual order, found on the 1h candles (not waiting for its 4h / 2h bar to close):
+    (the touch's 1h bar, the price's way to the level from that bar's open in ATR, the fill bar = the order chart's bar
+    holding the touch, the fill price = the level or that bar's open if it opened through it) or None. The first of a
+    coin & side to fill, and the side's 20, go by the touch and, in the same hour, the nearer level (the research's
+    order, dlm4_export7.py). The replay found: by the 4h / 2h bar's open a 4h order won over a 2h one the price had
+    reached hours earlier; waiting for the bars to close, a 2h order won over a 4h one reached in the same hour."""
     bs = int(o.get("bs") or 900)
-    if bs <= 3600:
-        return hit["time"]
-    try:
-        b = (bn_closed(o["symbol"], "1h", 3600, 200, now) if DLM_BINANCE else None) or \
-            [c for c in (get_candles_range(o["symbol"], "1h", hit["time"], int(now)) or []) if c["time"] + 3600 <= now]
-        for c in b:
-            if hit["time"] <= c["time"] < hit["time"] + bs and ((c["low"] <= o["lv"]) if o["side"] > 0 else (c["high"] >= o["lv"])):
-                return c["time"]
-    except Exception as e:
-        log_error(f"dlm touch 1h {o['symbol']}: {e}")
-    return hit["time"]
+    if DLM_BINANCE:
+        b = bn_closed(o["symbol"], "1h", 3600, 200, now) or []
+    else:
+        b = [c for c in (get_candles_range(o["symbol"], "1h", int(o["t0"]), int(now)) or []) if c["time"] + 3600 <= now]
+    b = [c for c in b if o["t0"] <= c["time"] < o["until"]]
+    if not b:
+        return None
+    s_, lv = o["side"], o["lv"]
+    for c in b:
+        if (c["low"] <= lv) if s_ > 0 else (c["high"] >= lv):
+            fb = c["time"] // bs * bs
+            fo = next((x["open"] for x in b if x["time"] == fb), c["open"])
+            return c["time"], s_ * (c["open"] - lv) / (o["atr"] or 1e-12), fb, (min(lv, fo) if s_ > 0 else max(lv, fo))
+    return False
 
 
 def _dlm_streams(m=None):
@@ -34490,13 +34496,19 @@ def dlm_settle(now):
     hits = []
     for o in orders:
         try:
+            if int(o.get("bs") or 900) > 3600:
+                h = _dlm_hit(o, now)   # v0.99.691 — on the 1h candles
+                if h is not None:   # None: no 1h candles — the chart's bars below
+                    hits.append((h[0], h[1], -o.get("score", 0), o, {"time": h[2], "fill": h[3]}) if h else (float("inf"), 0.0, -o.get("score", 0), o, None))
+                    continue
             cs = [c for c in _dlm_bars(o["symbol"], o["t0"], now, int(o.get("bs") or 900)) if c["time"] < o["until"]]
             hit = next((c for c in cs if ((c["low"] <= o["lv"]) if o["side"] > 0 else (c["high"] >= o["lv"]))), None)
-            hits.append((_dlm_touch_time(o, hit, now) if hit else float("inf"), -o.get("score", 0), o, hit))
+            hits.append((hit["time"] if hit else float("inf"), 0.0, -o.get("score", 0), o,
+                         hit and {"time": hit["time"], "fill": min(o["lv"], hit["open"]) if o["side"] > 0 else max(o["lv"], hit["open"])}))
         except Exception as e:
             log_error(f"dlm order {o['symbol']}: {e}")
-    hits.sort(key=lambda x: (x[0], x[1]))   # v0.99.689 — the first of a coin & side to fill is the trade (2h and 4h orders; v0.99.691: by the 1h bar)
-    for _, _, o, hit in hits:
+    hits.sort(key=lambda x: (x[0], x[1], x[2]))   # the first of a coin & side to fill is the trade (v0.99.691: the touch's 1h bar, then the nearer level)
+    for _, _, _, o, hit in hits:
         try:
             if hit:
                 with _dlm_lock:
@@ -34507,8 +34519,7 @@ def dlm_settle(now):
                 if taken:
                     o["status"] = "SKIP"
                 else:
-                    fill = min(o["lv"], hit["open"]) if o["side"] > 0 else max(o["lv"], hit["open"])
-                    _dlm_open_trade(o, hit["time"], fill)
+                    _dlm_open_trade(o, hit["time"], hit["fill"])
             elif now >= o["until"]:
                 o["status"] = "EXPIRED"
         except Exception as e:
