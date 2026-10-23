@@ -50,3 +50,23 @@ daily features (`s24_feat.py`, `s24_wf.py`) and seed ensembles (`s25_ens.py`):
 
 Money (20 positions at 3%, cautious −0.025R a trade, from $100, 2024–26 starts): 6 months median $335, 12 months
 median $1 146 (worst 10% $406). Deployed by `dlm4_export2.py`; the bot's features: `t_dlm_parity.py`.
+
+## Lab round after v0.99.688 (nothing deployed)
+
+- **Crash protection** (`crash.py`, `crash2.py`): at most 2–5 new orders a side per 4h bar cuts the usual drawdown 53% ->
+  16–21% but halves the money; at an equal worst drawdown the deployed rule makes more. A pause of a side after k stops
+  in 24 h: no effect (the stops come at once — 24–25 May 2025, 19 stops, −19R).
+- **The "stop-hunt then take" pattern** (`stopcheck.py`, `reentry.py`): 43% of the stops reach the take later inside
+  the 32 bars, 57% do not. A stop on the 4h close with a hard stop further: WR up to 88% but 2–4x less money (the
+  position is sized by the hard stop); a re-entry after the stop: ~0R.
+- **A second 4h stream** (`s24_featall.py`, `s26_mix.py`, `pool4h.py`, `dlm4_export3.py`): a limit 1.5 ATR from the close,
+  the same recipe — alone WR 80%, +0.21R on unseen coins, on 1m bars WR 84%, +0.26R. But the pool with the wick stream
+  is NOT better when simulated as a bot must trade it (both orders stand, the first to fill is the trade): the median
+  year $1 534 at 4% vs $1 878 for the wick stream alone. The research's pool kept, at a bar where both kinds were
+  signalled, the one that later filled — a look-ahead. To pick between the streams honestly the engines would have to
+  keep the unfilled orders too (their features and scores).
+- **A look-ahead in the money sims** found and fixed: sorting one bar's trades by their exit time (`rows.sort()` on
+  (time, exit time, …)) gave the quick ones the free slots — +10% for one stream, +80% for a pool. The honest order:
+  the signal's time, then its score (`deposits2.py`; `best_money*.py`, `s25_money*.py` were already in that order).
+- Monthly top-ups (`deposits2.py`, the deployed ⚡ at 4%, a year, cautious): $100 alone -> median $1 878; + $50 a month
+  ($650 in) -> $4 258 (the worst 10% $2 270); $700 at once -> $13 146.
