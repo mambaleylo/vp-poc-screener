@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.690"
+APP_VERSION = "0.99.691"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -33832,8 +33832,9 @@ def bn_fmt(x, step, up=False):
 
 def bn_map(sym):
     """a Gate contract -> (Binance symbol, price scale) as the candle cache found it, or None"""
-    with _bnc_lock:
-        c = _BNC.get((sym, "15m")) or _BNC.get((sym, "1d"))
+    with _bnc_lock:   # v0.99.691 — any interval cached: ⚡ (4h / 2h since v0.99.687) loads no 15m / 1d, its coins could get
+        c = _BNC.get((sym, "15m")) or _BNC.get((sym, "1d")) or next(   # "монеты нет на Binance" unless another module had
+            (v for k, v in _BNC.items() if k[0] == sym and v.get("bsym")), None)   # loaded the coin (the audit)
     if c and c.get("bsym"):
         return c["bsym"], float(c.get("scl") or 1.0)
     return None
@@ -34000,6 +34001,16 @@ def api_binance_check():
 # $100 at 4% (cautious) the median ~$18 200, the worst 10% ~$3 600 (was $5 200 / $1 800), better from every start in
 # 2024–25, the drawdown the same ~67%; on 1m bars +0.26R vs +0.20R. A take of 2 ATR for every trade makes LESS money
 # than 1 ATR — only the trades that go our way at once deserve it. Real trades: watched on Binance 1m candles.
+# v0.99.691 — the audit (the user: "все ещё раз проверь, по шагам, в режиме отладки"): this code replayed over Jun–Oct
+# 2026 on the local candles (tools/winrate replay69*.py) vs the backtest list, trade by trade, and the real-mode rules
+# simulated on every order (realrules691.py). Found and fixed: (1) the research pool ordered the fills by the fill
+# bar's open — a 4h order won over a 2h one the price reached hours earlier: by the touch's 1h bar the money is about
+# half (the median year ~$9 500, the worst 10% ~$2 200, was shown $18 200 / $3 600; v0.99.690 still the best variant);
+# (2) no order while a trade of the coin & side was open (5% of the trades missing); (3) the virtual trades had no 20 a
+# side (twice the backtest's); (4) the real limits stood from the scan with at most 26 limits + positions — the real
+# account would have taken 188 of 406 trades: now they wait in the bot and go on the exchange as the price comes;
+# (5) bn_map knew only the 15m / 1d candle caches — a ⚡ coin no other module had loaded: "монеты нет на Binance";
+# (6) a slow 4h scan could drop the 2h one of the same bar close.
 DLM_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_dlm_model.json")
 DLM_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_dlm_model.json"
 DLM_MODEL_VER = 3   # v0.99.687 — the 4h model (ver 1 = the 15m one: not read any more); v0.99.689: 3 = the streams (4h + 2h)
@@ -34339,6 +34350,24 @@ def _dlm_bars(sym, start, now, bs=900):
     return [c for c in (get_candles_range(sym, tf, start, int(now)) or []) if c["time"] >= start and c["time"] + bs <= now]
 
 
+def _dlm_touch_time(o, hit, now):
+    """v0.99.691 — when the price reached a virtual order: the first 1h bar inside its fill bar that reached the level (the
+    order's chart says only "within this 4h / 2h bar"); the first to fill of a coin & side and the side's 20 go by it —
+    ordered by the bar's open, a 4h order won over a 2h one that the price reached hours earlier (the audit, pool1h.py)"""
+    bs = int(o.get("bs") or 900)
+    if bs <= 3600:
+        return hit["time"]
+    try:
+        b = (bn_closed(o["symbol"], "1h", 3600, 200, now) if DLM_BINANCE else None) or \
+            [c for c in (get_candles_range(o["symbol"], "1h", hit["time"], int(now)) or []) if c["time"] + 3600 <= now]
+        for c in b:
+            if hit["time"] <= c["time"] < hit["time"] + bs and ((c["low"] <= o["lv"]) if o["side"] > 0 else (c["high"] >= o["lv"])):
+                return c["time"]
+    except Exception as e:
+        log_error(f"dlm touch 1h {o['symbol']}: {e}")
+    return hit["time"]
+
+
 def _dlm_streams(m=None):
     """v0.99.689 — the model's limit streams: {"name", "tf", "bar_sec", "anchor", "depth_atr", "fam", "alive_bars",
     "take_atr", "stop_atr", "hold_bars", "models", "thr"}"""
@@ -34419,13 +34448,7 @@ def dlm_scan(t_bar, st):
         _DLM["scan"] = sc_all
     if new and TELEGRAM_ALERTS_DLM:
         send_telegram(f"⚡ лимитки {tf}: " + ", ".join(f"{o['symbol'].replace('_USDT', '')} {'↑' if o['side'] > 0 else '↓'} {o['lv']:.6g}" for o in new[:10]), category="dlm")
-    if AUTOTRADE_ENABLED_DLM:
-        for o in new:
-            try:
-                dlm_real_place(o)
-            except Exception as e:
-                log_error(f"dlm place {o['symbol']}: {e}")
-    dlm_save()
+    dlm_save()   # v0.99.691 — the real limits: _dlm_arm (dlm_real_tick) places them as the price comes
 
 
 def _dlm_open_trade(o, t_fill_bar, fill, real=None):
@@ -34469,10 +34492,10 @@ def dlm_settle(now):
         try:
             cs = [c for c in _dlm_bars(o["symbol"], o["t0"], now, int(o.get("bs") or 900)) if c["time"] < o["until"]]
             hit = next((c for c in cs if ((c["low"] <= o["lv"]) if o["side"] > 0 else (c["high"] >= o["lv"]))), None)
-            hits.append((hit["time"] if hit else float("inf"), -o.get("score", 0), o, hit))
+            hits.append((_dlm_touch_time(o, hit, now) if hit else float("inf"), -o.get("score", 0), o, hit))
         except Exception as e:
             log_error(f"dlm order {o['symbol']}: {e}")
-    hits.sort(key=lambda x: (x[0], x[1]))   # v0.99.689 — the first of a coin & side to fill is the trade (2h and 4h orders)
+    hits.sort(key=lambda x: (x[0], x[1]))   # v0.99.689 — the first of a coin & side to fill is the trade (2h and 4h orders; v0.99.691: by the 1h bar)
     for _, _, o, hit in hits:
         try:
             if hit:
@@ -34575,18 +34598,89 @@ def _dlm_take_watch(t, mark=None, now=None):
 
 
 # ---- the exchange side: a real GTC limit, then the stop (trigger) and the take (a reduce-only limit = maker) ----
-def _dlm_touched(o, now=None):
-    """v0.99.691 — has the price reached the order's level since its bar closed (Binance 1m candles)? None = unknown"""
-    cs = binance_klines(o["symbol"], "1m", int(o["t0"]), int(now or time.time()))
-    if not cs:
-        return None
-    return any((c["low"] <= o["lv"]) if o["side"] > 0 else (c["high"] >= o["lv"]) for c in cs)
+DLM_ARM_ATR = float(os.environ.get("VP_DLM_ARM_ATR", "0.3"))   # v0.99.691 — a real limit goes on the exchange when the price is this close
+DLM_DISARM_ATR = 1.0   # ... and comes off again (back to waiting) when the price goes this far from it
 
 
-def dlm_real_place(o, late=False):
-    """the real limit of a ⚡ order, or nothing yet (the order stays virtual, tried again every tick while it is alive —
-    v0.99.691: a coin busy at the scan, the 20 positions, the 26 limits free up later; `late` = such a retry: placed
-    only if the price has not reached the level yet — reached while blocked = no trade, as in the research)"""
+def _dlm_prices(syms):
+    """{gate symbol: last price} of these coins — one request (Binance's tickers when trading there, else Gate's)"""
+    out = {}
+    if DLM_BINANCE:
+        p = bnf_prices() or {}
+        for sym in syms:
+            mp = bn_map(sym)
+            if mp and p.get(mp[0]):
+                out[sym] = p[mp[0]] / mp[1]
+        return out
+    for x in get_tickers() or []:
+        if x.get("contract") in syms and x.get("last"):
+            out[x["contract"]] = float(x["last"])
+    return out
+
+
+def _dlm_cancel_back(o):
+    """an armed real limit off the exchange, the order back to waiting -> True; filled meanwhile -> False (the tick takes it)"""
+    r = o["real"]
+    if r.get("ex") == "binance":
+        if not bnf_cancel(r["bsym"], "order", r["id"]):
+            return False
+        try:
+            if float(bnf_order(r["bsym"], r["id"]).get("executedQty") or 0) > 0:
+                return False
+        except BinanceError:
+            return False
+    else:
+        if not _dlm_cancel_order(r["id"]):
+            return False
+        try:
+            x = gate_signed_request("GET", f"/futures/usdt/orders/{r['id']}")
+            if abs(int(float(x.get("size") or 0))) - abs(int(float(x.get("left") or 0))) > 0:
+                return False
+        except Exception:
+            return False
+    o["real"] = None
+    return True
+
+
+def _dlm_arm(now):
+    """v0.99.691 — the real limits follow the price instead of standing from the scan (the audit: with the limit of 26
+    limits + positions the real account took 188 of the backtest's 406 trades in Jun–Oct 2026; deciding when the price
+    comes — 403): a waiting order goes on the exchange once the price is within DLM_ARM_ATR of it and there is room
+    (dlm_real_place: no position / other limit of the coin, positions + armed limits < 20, < 20 a side); an armed one far
+    away again comes off; the price through a waiting order's level: placed now if there is room (it fills at once, at
+    the price or better), else no trade — the coin was busy / the side full when the price came, as in the research."""
+    with _dlm_lock:
+        wait = [o for o in _DLM["orders"] if o["status"] == "OPEN" and o.get("real") is None and int(o.get("bs") or 900) != 900 and now < o["until"]]
+        armed = [o for o in _DLM["orders"] if o["status"] == "OPEN" and (o.get("real") or {}).get("id") and int(o.get("bs") or 900) != 900]
+    if not wait and not armed:
+        return
+    px = _dlm_prices({o["symbol"] for o in wait + armed})
+    dist = lambda o: o["side"] * (px[o["symbol"]] - o["lv"]) / (o["atr"] or 1e-12)   # > 0: not reached yet
+    for o in armed:
+        if o["symbol"] in px and dist(o) > DLM_DISARM_ATR and now < o["until"]:
+            try:
+                _dlm_cancel_back(o)
+            except Exception as e:
+                log_error(f"dlm disarm {o['symbol']}: {e}")
+    for o in sorted((o for o in wait if o["symbol"] in px), key=dist):
+        d = dist(o)
+        if d > DLM_ARM_ATR:
+            break
+        if d < -DLM_ARM_ATR:   # far through the level (the bot was down / no prices): a fill now would be another trade
+            o["real"] = {"status": "SKIPPED", "detail": "цена ушла за лимитку без бота (нет цен / бот не работал)"}
+            continue
+        try:
+            dlm_real_place(o)
+        except Exception as e:
+            log_error(f"dlm place {o['symbol']}: {e}")
+            o["real"] = {"status": "SKIPPED", "detail": str(e)[:160]}
+            continue
+        if o.get("real") is None and d <= 0:
+            o["real"] = {"status": "SKIPPED", "detail": "цена дошла до лимитки, когда места не было (монета занята / 20 сделок)"}
+
+
+def dlm_real_place(o):
+    """the real limit of a ⚡ order, or nothing (no room: the order keeps waiting — _dlm_arm tries again)"""
     if AUTOTRADE_DRY_RUN:
         o["real"] = {"status": "DRY_RUN"}
         return
@@ -34598,18 +34692,11 @@ def dlm_real_place(o, late=False):
         mine = any(t["symbol"] == sym for t in held)
     # v0.99.682 — the cap counts the open positions too; v0.99.687: at most DLM_MAX_POS positions (the research's 20 at
     # 3–4%), limits + positions at most DLM_MAX_LIVE_ORDERS (a limit holds its margin on the exchange)
-    side_cap = int((_DLM.get("model") or {}).get("side_cap") or 20)   # v0.99.691 — the side's cap here (was at the scan only)
-    if (mine or any(x["symbol"] == sym and x["side"] != s for x in live)   # v0.99.691 — limits of the coin & side may stand
-            or len(held) >= DLM_MAX_POS or len(live) + len(held) >= DLM_MAX_LIVE_ORDERS   # together (the first to fill is the trade,
-            or sum(1 for t in held if t["side"] == s) >= side_cap):   # the tick cancels the rest), not the other side's (one position a coin)
+    side_cap = int((_DLM.get("model") or {}).get("side_cap") or 20)   # v0.99.691 — the room counts the armed limits as positions:
+    if (mine or any(x["symbol"] == sym for x in live)   # one position or limit a coin (Binance one-way), positions + limits
+            or len(held) + len(live) >= DLM_MAX_POS or len(live) + len(held) >= DLM_MAX_LIVE_ORDERS   # < 20, < 20 a side
+            or sum(1 for t in held if t["side"] == s) + sum(1 for x in live if x["side"] == s) >= side_cap):
         return
-    if late:
-        hit = _dlm_touched(o)
-        if hit is None:
-            return   # Binance did not answer: again next tick
-        if hit:
-            o["real"] = {"status": "SKIPPED", "detail": "цена дошла до лимитки, пока по монете не было места"}
-            return
     if DLM_BINANCE:   # v0.99.684
         return dlm_bn_place(o)
     with using_account("dlm"):
@@ -34880,15 +34967,10 @@ def dlm_real_tick():
     """every DLM_POLL_SEC: the real limits (filled / expired / a foreign position on the coin) and the real trades
     (the stop / take on the exchange, the time exit, the result)"""
     now = time.time()
-    with _dlm_lock:   # v0.99.691 — the orders not placed yet (blocked at their scan), while alive: again
-        wait = sorted((o for o in _DLM["orders"] if o["status"] == "OPEN" and o.get("real") is None and int(o.get("bs") or 900) != 900
-                       and now < o["until"]), key=lambda o: -o.get("score", 0))
-    for o in wait:
-        try:
-            dlm_real_place(o, late=True)
-        except Exception as e:
-            log_error(f"dlm place {o['symbol']}: {e}")
-            o["real"] = {"status": "SKIPPED", "detail": str(e)[:160]}
+    try:
+        _dlm_arm(now)   # v0.99.691 — the waiting orders go on the exchange as the price comes
+    except Exception as e:
+        log_error(f"dlm arm: {e}")
     with _dlm_lock:
         orders = [o for o in _DLM["orders"] if (o.get("real") or {}).get("id") and o["status"] == "OPEN"]
         trades = [t for t in _DLM["trades"] if t.get("real") and t["status"] == "OPEN"]
@@ -43230,10 +43312,10 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
       ${zBars(rows, v => sgR(+(+v).toFixed(3)))}
       <div class="zstrip"><span>WR <b>~${un.wr || 70}%</b></span><span>в среднем <b>${sgR(un.avg || 0.235)}</b></span><span>последние 12 мес <b>${sgR(un.last12_avg || 0.24)}</b></span><span><b>~65</b> сделок в месяц</span></div>
       ${d.streams && (d.streams.wick4h.n || d.streams.close2h.n) ? `<div class="dim" style="font-size:var(--fs-xs);">живые: 4ч ${d.streams.wick4h.n} (${d.streams.wick4h.n ? sgR(d.streams.wick4h.avg) + ', WR ' + d.streams.wick4h.wr + '%' : '—'}) · 2ч ${d.streams.close2h.n} (${d.streams.close2h.n ? sgR(d.streams.close2h.avg) + ', WR ' + d.streams.close2h.wr + '%' : '—'})</div>` : ''}
-      <div class="zsub">По минутным свечам Binance (точный порядок стопа и тейка, лимитка исполняется только при проходе цены сквозь неё на 0.05%): WR ${m1.wr || 74}%, <b>+${m1.avg_through || 0.26}R</b>${rs.exit && rs.exit.m1 ? ` (с тейком 1 ATR было +${rs.exit.m1.base}R)` : ''}. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%, без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 18248)}</b>, худшие 10% ~${usd(mo.year_p10 || 3633)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 11968)}); через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная. Тейк 2 ATR только у сделок, которые сразу пошли в плюс (идея из чата): если всегда ставить 2 ATR, денег меньше, чем с 1 ATR.</div>
+      <div class="zsub">По минутным свечам Binance (точный порядок стопа и тейка, лимитка исполняется только при проходе цены сквозь неё на 0.05%): WR ${m1.wr || 74}%, <b>+${m1.avg_through || 0.26}R</b>${rs.exit && rs.exit.m1 ? ` (с тейком 1 ATR было +${rs.exit.m1.base}R)` : ''}. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%, без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 9477)}</b>, худшие 10% ~${usd(mo.year_p10 || 2168)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 6383)}); через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная. Тейк 2 ATR только у сделок, которые сразу пошли в плюс (идея из чата): если всегда ставить 2 ATR, денег меньше, чем с 1 ATR.</div>
       <div class="zbanner warn">Просадка: при обвале рынка счёт может временно упасть на 55–70% от пика — 24–25 мая 2025 за два дня стопы закрыли 19 сделок 4ч (−19R, при 4% на сделку это около −50%), с 2ч сделками просадки ещё глубже. Потом счёт восстанавливался, но к такому надо быть готовым и не повышать риск после серии стопов.</div>
       ${d.risk_set && d.risk_set > 6 ? `<div class="zbanner warn">Риск ${d.risk}% на сделку при до ${d.max_pos || 20} сделок сразу — это до ${Math.round(d.risk * (d.max_pos || 20))}% счёта под стопами одновременно. Лучше всего по деньгам — 4–6%: выше денег не прибавляется (не хватает маржи), а просадки глубже.</div>` : ''}
-      ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} — переключатель «↳ ⚡ Лимитки 4ч+2ч» в автоторговле; риск — поле «⚡» (пусто = 4%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
+      ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} (бот держит их у себя и выставляет на бирже, когда цена подошла на 0.3 ATR — так места и маржа не заняты далёкими лимитками) — переключатель «↳ ⚡ Лимитки 4ч+2ч» в автоторговле; риск — поле «⚡» (пусто = 4%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
   }
   let h = card(`⚡ Лимитки 4ч+2ч ${pill}`, top);
   {   // v0.99.684 — the exchange: Gate or Binance (the keys, the balance)

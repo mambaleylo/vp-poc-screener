@@ -111,6 +111,7 @@ risks = []
 V.compute_risk_based_position = lambda *a, **k: (risks.append(k.get("risk_pct")), (50.0, 10, None))[1]
 V.compute_contracts_from_margin = lambda *a, **k: (37, 1, 50.0, None)
 V.set_leverage = lambda *a, **k: None
+V.get_tickers = lambda: []
 closed = []
 V.close_position_for_mode = lambda mode, sym, d: (closed.append(sym), X_.pos.__setitem__(sym, 0), {"ok": True})[2]
 V.notify_trade_result = lambda *a, **k: None
@@ -156,15 +157,21 @@ left = [k for k, v in X_.trig.items()]
 cap0 = V.DLM_MAX_POS; V.DLM_MAX_POS = 0
 d_ = mk("DDD_USDT", 1, 4.0); V._DLM["orders"].append(d_); V.dlm_real_place(d_)
 capped = not d_.get("real"); V.DLM_MAX_POS = cap0
-# v0.99.691 — an order blocked at its scan is placed later (the tick) if the price has not reached it; reached -> no trade
+# v0.99.691 — the waiting orders go on the exchange as the price comes (_dlm_arm): near -> placed; far -> waits;
+# through the level with no room -> no trade
 V._DLM["orders"] = [x for x in V._DLM["orders"] if x is not d_]
-m1 = int(time.time()) // 60 * 60
-e_ = mk("EEE_USDT", 1, 5.0); e_["t0"] = m1 - 600; f_ = mk("FFF_USDT", 1, 6.0); f_["t0"] = m1 - 600
-KL["EEE_USDT"] = [{"time": m1 - 300, "open": 5.2, "high": 5.3, "low": 5.1, "close": 5.2}]   # above the long's level: not reached
-KL["FFF_USDT"] = [{"time": m1 - 300, "open": 6.1, "high": 6.2, "low": 5.95, "close": 6.1}]   # went through 6.0: reached
-V._DLM["orders"] += [e_, f_]
+e_, f_, g_ = mk("EEE_USDT", 1, 5.0), mk("FFF_USDT", 1, 6.0), mk("GGG_USDT", 1, 7.0)
+PX = {"EEE_USDT": 5.002, "FFF_USDT": 5.999, "GGG_USDT": 7.05}   # 0.2 ATR above / 0.1 through / 5 ATR above
+V.get_tickers = lambda: [{"contract": k, "last": str(v)} for k, v in PX.items()]
+V._DLM["orders"] += [e_, g_]
 V.dlm_real_tick()
-late_ok = bool((e_.get("real") or {}).get("id")) and (f_.get("real") or {}).get("status") == "SKIPPED" and not (f_.get("real") or {}).get("id")
-print(f"(4) placed at 4% {placed} · exits {exits_ok} · take = reduce-only limit at 2 ATR {bool(tp_ok)} · back to 1 ATR after a dip {pull_ok} · stays after +1 ATR {lock_ok} · WIN {win} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped} · placed later if not reached {late_ok}")
+arm_ok = bool((e_.get("real") or {}).get("id")) and g_.get("real") is None
+cap0 = V.DLM_MAX_POS; V.DLM_MAX_POS = 0; V._DLM["orders"].append(f_)
+V.dlm_real_tick(); V.DLM_MAX_POS = cap0
+arm_ok = arm_ok and (f_.get("real") or {}).get("status") == "SKIPPED" and not (f_.get("real") or {}).get("id")
+PX["EEE_USDT"] = 5.02   # 2 ATR away: the armed limit comes off, the order waits again
+V.dlm_real_tick()
+late_ok = arm_ok and e_.get("real") is None and e_["status"] == "OPEN"
+print(f"(4) placed at 4% {placed} · exits {exits_ok} · take = reduce-only limit at 2 ATR {bool(tp_ok)} · back to 1 ATR after a dip {pull_ok} · stays after +1 ATR {lock_ok} · WIN {win} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped} · armed near the price / waits far / no room at the touch -> none / off when far {late_ok}")
 ok &= placed and exits_ok and bool(tp_ok) and pull_ok and lock_ok and win and tx and cx and not left and capped and late_ok
 print("ALL OK" if ok else "FAILED"); sys.exit(0 if ok else 1)

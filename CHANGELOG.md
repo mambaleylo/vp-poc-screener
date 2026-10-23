@@ -20401,3 +20401,30 @@ v0.99.690 - ⚡ the take (the user: "если цена не прошла в ст
          (dlm4_export5.py, 1 639 trades 2025–26) the new exits. Tests: t_dlm_bot (10/10 backtest trades re-made, the take
          moved / kept on a fake Gate), t_dlm_binance (the take order moved on a fake Binance), t_dlm_parity, t_dlm_coins,
          t_dlm_ui — all OK.
+v0.99.691 - ⚡ the audit (the user: "все ещё раз проверь, по шагам, в режиме отладки, чтобы не было такого больше"): the
+         bot's own dlm_scan / dlm_settle replayed over Jun–Oct 2026 on the local Binance candles with a mocked clock
+         (tools/winrate replay691.py / replay692.py, 210 coins, the models' trees compiled — identical to the bit),
+         trade by trade vs the backtest list (compare69*.py); the real-mode rules simulated on every order the scans
+         made, filled or not (realrules691.py). Found and fixed:
+         (1) the research pool ordered the fills by the fill bar's open: a 4h order "filled" at its 4h bar's open, on
+         average 1.6 h before the touch, and won the coin / the side's 20 over 2h orders the price reached earlier —
+         a look-ahead. By the touch's 1h bar (pool1h.py, honest1h.py, dlm4_export6.py) the pool makes +0.222R (was shown
+         +0.238R), a year from $100 at 4%: the median $9 477 (was shown $18 248), the worst 10% $2 168 ($3 633), harsh
+         $6 383 ($11 967). The decisions stand: 4h + 2h with the new take is still the best (4h alone $1 611, the take
+         1 ATR $2 671); the side's cap 20 too (30 / 40 / none: $7 700–8 500). The bot's virtual fills now go by the
+         touch's 1h bar as well (_dlm_touch_time).
+         (2) no order while a trade of the coin & side was open — the research decides when the price comes: 5% of the
+         backtest's trades were missing; now an order is made regardless.
+         (3) the virtual trades had no 20-a-side cap: twice the backtest's trades in mid-2026; capped as the research.
+         (4) the real limits stood on the exchange from the scan, at most 26 limits + positions: the real account would
+         have taken 188 of the backtest's 406 trades (Jun–Oct 2026). Now the orders wait in the bot and go on the
+         exchange when the price comes within 0.3 ATR (_dlm_arm, every 5 s on the tickers), the room checked then
+         (no position / limit of the coin, positions + armed limits < 20, < 20 a side); off again if the price goes
+         1 ATR away; through the level with no room = no trade (as the research). Deciding at the touch: 403 of 406.
+         (5) bn_map looked only in the 15m / 1d candle caches: a ⚡ coin no other module had loaded could not be placed
+         on Binance ("монеты нет на Binance") — the test had put a 15m cache in by hand; now any interval.
+         (6) a slow 4h scan (the first candles after a restart) could make the 2h scan of the same bar close "stale".
+         After the fixes the replay matches the backtest list (see the commit). Also checked: the features (parity), the
+         exits (every matched trade's R within 0.0005), the new labels (newlabel.py reproduces the old ones exactly,
+         4 of 1.46M differ on one coin's changed candles). Tests: t_dlm_bot (the arming), t_dlm_binance (armed by the
+         tickers on a fake Binance, a 4h-only cache), t_dlm_parity, t_dlm_coins, t_dlm_ui.

@@ -121,9 +121,9 @@ V.dlm_save = lambda: None
 V.notify_trade_result = lambda *a, **k: None
 V.send_telegram = lambda *a, **k: None
 V.log_error = lambda m: print("   log:", m) if "binance algo" not in m and "binance one-way" not in m else None
-V._BNC[("AAA_USDT", "15m")] = {"bsym": "AAAUSDT", "scl": 1.0, "cols": [[]] * 6}
-V._BNC[("PEPE_USDT", "15m")] = {"bsym": "1000PEPEUSDT", "scl": 1000.0, "cols": [[]] * 6}
-V._BNC[("BBB_USDT", "15m")] = {"bsym": "BBBUSDT", "scl": 1.0, "cols": [[]] * 6}
+V._BNC[("AAA_USDT", "4h")] = {"bsym": "AAAUSDT", "scl": 1.0, "cols": [[]] * 6}
+V._BNC[("PEPE_USDT", "2h")] = {"bsym": "1000PEPEUSDT", "scl": 1000.0, "cols": [[]] * 6}
+V._BNC[("BBB_USDT", "4h")] = {"bsym": "BBBUSDT", "scl": 1.0, "cols": [[]] * 6}
 V._DLM["model"] = {"rule": {"stop_atr": 2.0, "take_atr": 1.0, "hold_bars": 32, "alive_bars": 4, "bar_sec": 14400}}   # v0.99.687 — the 4h rule
 res = {}
 
@@ -215,6 +215,16 @@ tp_b.update(status="FILLED", executedQty=tp_b["quantity"]); X["pos"]["AAAUSDT"] 
 V.dlm_real_tick()
 res["take 2 ATR -> 1 ATR after a dip"] &= tf_["result"] == "WIN" and abs(tf_["exit"] - 10.1) < 1e-9
 V._DLM["model"] = m0
+# (7c) v0.99.691 — a waiting order goes on Binance when the price comes within 0.3 ATR (the tickers), not at the scan
+g = mk("BBB_USDT", 1, 5.0, 0.05); g["id"] += "g"; V._DLM["orders"].append(g)
+X["px"] = {"BBBUSDT": 5.5}   # 10 ATR away: waits
+V.dlm_real_tick(); far_wait = g.get("real") is None
+X["px"] = {"BBBUSDT": 5.01}   # 0.2 ATR: armed
+V.dlm_real_tick(); og = X["orders"].get(int((g.get("real") or {}).get("id") or 0)) or {}
+res["armed on Binance as the price comes"] = far_wait and og.get("type") == "LIMIT" and og.get("price") == "5" and g["real"].get("ex") == "binance"
+X["px"] = {"BBBUSDT": 5.2}   # 4 ATR away again: off, waiting
+V.dlm_real_tick()
+res["armed on Binance as the price comes"] &= og.get("status") == "CANCELED" and g.get("real") is None and g["status"] == "OPEN"
 # (8) the free margin: the risk scaled down; (9) below the minimum notional -> skipped
 V.apply_settings({"risk_pct_dlm2": 50}); X["free"] = 5.0
 e = mk("AAA_USDT", 1, 10.0, 0.1); e["id"] += "e"; V._DLM["orders"].append(e)
