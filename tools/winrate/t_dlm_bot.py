@@ -1,4 +1,4 @@
-"""v0.99.687 — ⚡ 4h wick limits in the bot: (1) features == the research (bot functions); (2) the model file; (3) the
+"""v0.99.687 — ⚡ 4h wick limits in the bot (v0.99.689: + the 2h close-2ATR stream): (1) features == the research (bot functions); (2) the model file; (3) the
 virtual path re-makes backtest trades (scan at the 4h close -> the order at the same level, settle -> the fill and the
 same R); (4) the real path on a fake exchange: a GTC limit placed, filled -> the stop trigger + the reduce-only take
 limit, the take filled -> WIN; a second trade -> the time exit at the market; an order not filled -> cancelled; at most
@@ -7,15 +7,19 @@ import sys, json, time, bisect, numpy as np
 from common import V
 import os; os.environ["TFH"] = "4"
 import s23_engine as E
+import s21h2_engine as E2
+from common import load as load1h
 ok = True
-def bars(sym):
-    T, O, H, L, C, Vv = E.load15(sym)
+def bars(sym, tf="4h"):
+    if tf == "1h":
+        return [dict(c, volume=c.get("volume", 0)) for c in load1h(sym)]
+    T, O, H, L, C, Vv = (E2 if tf == "2h" else E).load15(sym)
     return [{"time": int(t), "open": o, "high": h, "low": l, "close": c, "volume": v} for t, o, h, l, c, v in zip(T, O, H, L, C, Vv)]
 CACHE = {}
-def series(sym):
-    if sym not in CACHE:
-        b = bars(sym); CACHE[sym] = (b, [c["time"] for c in b])
-    return CACHE[sym]
+def series(sym, tf="4h"):
+    if (sym, tf) not in CACHE:
+        b = bars(sym, tf); CACHE[(sym, tf)] = (b, [c["time"] for c in b])
+    return CACHE[(sym, tf)]
 # (1) parity through the bot
 B, BT = series("BTCUSDT")
 rng = np.random.default_rng(5); tot = miss = 0; worst = np.zeros(33)
@@ -32,12 +36,14 @@ for sym in ("SOLUSDT", "DOGEUSDT"):
 print(f"(1) parity {tot} events, missed {miss}, max |diff| {worst.max():.2e}")
 ok &= miss == 0 and worst.max() < 1e-3   # the research stores the features as float32
 # (2) the model
-m = V.dlm_model(); ok &= bool(m) and m["feats"] == V.DLM_FNAMES4 and m["ver"] == 2 and m["rule"]["bar_sec"] == 14400 and len(m["models"]) == 20 and m["side_cap"] == 20
-print("(2) model", bool(m), m and m["thr"], m and m["rule"])
+m = V.dlm_model(); ok &= (bool(m) and m["feats"] == V.DLM_FNAMES4 and m["ver"] == 3 and m["side_cap"] == 20
+                          and [(x["name"], x["tf"], x["bar_sec"]) for x in m["streams"]] == [("wick4h", "4h", 14400), ("close2h", "2h", 7200)]
+                          and all(len(x["models"]) == 20 for x in m["streams"]))
+print("(2) model", bool(m), m and [(x["name"], x["anchor"], x["depth_atr"], x["thr"]) for x in m["streams"]])
 # (3) the virtual path on backtest trades (mocked candles from Binance 4h)
 BL = json.load(open(sys.argv[1] if len(sys.argv) > 1 else "/home/user/vp-poc-screener/vp_bt_trades.json"))["dlm"]
 pool_ = [t for t in BL if t["t"] >= 1767225600 and not t.get("chk")]
-picks = [t for t in pool_ if t["k"] == "take"][:4] + [t for t in pool_ if t["k"] == "stop"][:3] + [t for t in pool_ if t["k"] == "time"][:2]
+picks = [t for st in ("wick4h", "close2h") for k, n in (("take", 2), ("stop", 2), ("time", 1)) for t in [x for x in pool_ if x["k"] == k and x["st"] == st][:n]]
 def bname(gs):
     b = gs.replace("_USDT", "")
     for c in (b + "USDT", "1000" + b + "USDT"):
@@ -46,22 +52,25 @@ def bname(gs):
 def scaled(lst, scl): return [dict(c, open=c["open"] / scl, high=c["high"] / scl, low=c["low"] / scl, close=c["close"] / scl) for c in lst]
 def fake_closed(sym, tf, sec, n, now):
     src, scl = ("BTCUSDT", 1.0) if sym == "BTC_USDT" else bname(sym)
-    return scaled([c for c in series(src)[0] if c["time"] + sec <= now][-n:], scl)
-def fake_range(sym, tf, a, z_):
+    return scaled([c for c in series(src, tf)[0] if c["time"] + sec <= now][-n:], scl)
+def fake_range(sym, tf, a, z_):   # Gate: 4h, or 1h (the bot builds 2h from it — Gate has no 2h)
     src, scl = bname(sym)
-    return scaled([c for c in series(src)[0] if a <= c["time"] <= z_], scl)
-V._dlm_closed = fake_closed; V.get_candles_range = fake_range
+    return scaled([c for c in series(src, tf)[0] if a <= c["time"] <= z_], scl)
+V._dlm_closed = fake_closed; V.get_candles_range = fake_range; V.bn_closed = lambda *a, **k: None
 V.dlm_save = lambda: None; V.heartbeat = lambda *a, **k: None; V.AUTOTRADE_ENABLED_DLM = False; V.DLM_BINANCE = False
 hits = 0
 for t in picks:
     V.RESEARCH_COINS_211 = V.RESEARCH_COINS_127 = (t["s"],); V._research_syms = lambda coins, n=300: list(coins)
     V._DLM.update({"orders": [], "trades": []})
-    V.dlm_scan(t["t"])
+    V.dlm_scan(t["t"], V._dlm_stream(t["st"]))
     o = [x for x in V._DLM["orders"] if x["side"] == t["d"]]
-    lv_ok = bool(o) and abs(o[0]["lv"] / t["lv"] - 1) < 1e-4   # the list keeps 10 decimals (SHIB ~1e-5) and o[0]["bs"] == 14400 and o[0]["until"] == t["t"] + 4 * 14400
-    V.dlm_settle(t["t"] + 5 * 14400 + 30)
-    V.dlm_settle(t["x"] + 14400)
-    tr = [x for x in V._DLM["trades"] if x["side"] == t["d"]]
+    bs = 7200 if t["st"] == "close2h" else 14400
+    o = [x for x in o if x.get("st") == t["st"]]
+    lv_ok = (bool(o) and abs(o[0]["lv"] / t["lv"] - 1) < 1e-4   # the list keeps 10 decimals (SHIB ~1e-5)
+             and o[0]["bs"] == bs and o[0]["until"] == t["t"] + 4 * bs)
+    V.dlm_settle(t["t"] + 5 * bs + 30)
+    V.dlm_settle(t["x"] + bs)
+    tr = [x for x in V._DLM["trades"] if x["side"] == t["d"] and x.get("st") == t["st"]]
     r = tr[0]["r"] if tr else None
     same = r is not None and abs(r - t["r"]) < 0.01 and tr[0]["rv"] == V.DLM_MODEL_VER
     hits += lv_ok and same

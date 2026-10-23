@@ -20369,3 +20369,18 @@ v0.99.688 - ⚡ the risk 4% by default (was 3%) (the user: "посчитай е�
          variant short of the most aggressive ended a year below $100. The ⚡ tab now warns of the drawdown honestly: in
          a crash the account can fall about half from its peak — 24–25 May 2025 stopped 19 trades in two days (−19R,
          ~−50% at 4%); a side's cap of 12 softens it to ~−45% at less money. The risk warning shows above 6%.
+v0.99.689 - ⚡ a second limit stream on 2h (the user: "Лучше же по деньгам? Делай конечно"): next to the 4h limit 1 ATR
+         beyond the bar's wick, a 2h limit 2 ATR from the bar's close; each stream has its own 20-model ensemble (10
+         seeds on the 28 engine features + 10 with the 5 daily ones), its own threshold (q 0.99 of the 2025
+         out-of-sample scores) and the same exits (alive 4 bars, take 1 / stop 2 ATR, out after 32 bars). Both orders of
+         a coin & side may stand, the first to fill is the trade, the other is cancelled (a position on the coin);
+         the pool was simulated exactly so (tools/winrate pool2h.py, pool2h_chk.py — no "the one that filled later"
+         pick). On the 124 coins the models never saw: WR ~79%, +0.18R; 20 positions at 4%, a year from $100, every
+         trade 0.025R worse: the median $5 163 (the wick stream alone $1 878), the worst 10% $1 799, harsh (−0.04R)
+         $3 107; better from every 2024–25 start; the worst drawdown 65–68% (was ~55%) — the tab says so. The model
+         file is ver 3 ("streams"); the bot scans each stream at its own bar close (2h from Binance klines, from Gate 1h
+         candles when Binance is off — Gate has no 2h); orders / trades carry "st" and "bs"; Telegram and the tab name
+         the chart (4ч / 2ч); the backtest list (1 725 trades 2025–26) has both, its charts open on 2h too. Known rare
+         case: if both limits of a coin & side fill inside one 5 s poll, both become trades (one position twice the
+         size). Tests: t_dlm_parity (both streams, 320 events exact), t_dlm_bot (10/10 backtest trades re-made by the
+         bot, 5 per stream), t_dlm_binance, t_dlm_coins, t_dlm_ui — all OK.

@@ -11,8 +11,12 @@ V._DLM["trades"] = [{"id": "t1", "symbol": "DOGE_USDT", "side": -1, "direction":
 V.dlm_save = lambda: None
 _BTD = json.load(open("/home/user/vp-poc-screener/vp_bt_trades.json")); V.bt_trades = lambda: _BTD
 import s20h4_engine as E
+import os; os.environ["TFH"] = "2"
+import s21h2_engine as E2   # v0.99.689 — the 2h stream's charts
+seen_ch = []
 def fake_bars(symbol, ch, start, end):
-    T, O, H, L, C, Vv = E.load15(symbol.replace("_USDT", "") + "USDT")
+    seen_ch.append(ch)
+    T, O, H, L, C, Vv = (E2 if ch == "2h" else E).load15(symbol.replace("_USDT", "") + "USDT")
     return [{"time": int(t), "open": o, "high": h, "low": l, "close": c} for t, o, h, l, c in zip(T, O, H, L, C) if start <= t <= end]
 V.bt_gate_bars = fake_bars
 threading.Thread(target=lambda: V.app.run(port=5103, use_reloader=False), daemon=True).start(); time.sleep(2)
@@ -30,7 +34,11 @@ with sync_playwright() as p:
     pg.locator("#btBox_dlm div[onclick^='btOpen']").first.click(); pg.wait_for_timeout(3000)
     pg.screenshot(path="ui_dlm_chart.png")
     print("chart:", pg.locator("#vgiModalTitle").inner_text())
+    pg.keyboard.press("Escape"); pg.wait_for_timeout(500)
+    pg.locator("#btBox_dlm div[onclick^='btOpen']", has_text="2ч").first.evaluate("e => e.click()"); pg.wait_for_timeout(3000)
+    pg.screenshot(path="ui_dlm_chart2h.png")
+    t2 = pg.locator("#vgiModalTitle").inner_text(); print("chart 2h:", t2, "· bars asked", sorted(set(seen_ch)))
     pg.keyboard.press("Escape")
     gone = "setDlmSingle" not in html and "setDlmLadder" not in html and "Лесенка" not in txt
-    print("errors", errs, "· single/ladder gone", gone, "· 4h text", "4ч" in txt and "старый модуль 15м" in txt)
+    print("errors", errs, "· single/ladder gone", gone, "· 4h text", "4ч" in txt and "старый модуль 15м" in txt, "· 2h chart", "2ч" in t2)
     b.close()

@@ -70,3 +70,17 @@ median $1 146 (worst 10% $406). Deployed by `dlm4_export2.py`; the bot's feature
   the signal's time, then its score (`deposits2.py`; `best_money*.py`, `s25_money*.py` were already in that order).
 - Monthly top-ups (`deposits2.py`, the deployed ⚡ at 4%, a year, cautious): $100 alone -> median $1 878; + $50 a month
   ($650 in) -> $4 258 (the worst 10% $2 270); $700 at once -> $13 146.
+
+## v0.99.689 — ⚡ 4h wick + 2h close-2ATR (deployed)
+
+- **The 2h stream revived** (`s24_featall.py`, `s26_mix.py` on `s21h2`): a limit 2 ATR from the 2h close, the same
+  recipe (20 models, daily features, q 0.99). Pooled with the 4h wick stream as the bot trades them (`pool2h.py`,
+  `pool2h_chk.py`: every order stands, the first of a coin & side to fill is the trade): on unseen coins WR ~79%,
+  +0.18R; 20 positions at 4%, a year from $100, cautious: the median $5 163 (wick alone $1 878), the worst 10%
+  $1 799, harsh $3 107; better from every 2024–25 start; the worst drawdown 65–68%. 1h streams: ~0.
+- Deployed by `dlm4_export4.py` (model ver 3 with "streams", the backtest list); the bot's features for both
+  streams: `t_dlm_parity.py`, the bot re-makes backtest trades of both: `t_dlm_bot.py`.
+- **Re-entry on the reclaim of the stop** (`reclaim.py`, the user's idea): a stop order at the old stop's price
+  after a ⚡ stop, the old take, a short stop — not better than ~0R after fees.
+- **Elliott wave 5 + RSI divergence, the entry on the Fibo bounce, target 0.702** (`ew5.py`, `ew5_rep.py`, the
+  user's post): causal zigzag pivots; on 1m bars negative, on 15m ~0, on 4h n=211 — too few to trust (likely fit).
