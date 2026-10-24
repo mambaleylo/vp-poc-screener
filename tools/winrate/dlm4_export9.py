@@ -26,7 +26,7 @@ def walk5(T, O, H, L, C, i1, end_t, s, fill, a, tk, soft, hard, kh, size_by):
     b = min(b, len(C)) - 1
     return (s * (C[b] - fill) - (0.0007 + 0.0003 * (b - i1 + 1) / 24) * fill) / risk, 3, T[b] + 3600
 import sys
-TK, SOFT, HARD = 1.1, 2.0, float(sys.argv[1]) if len(sys.argv) > 1 else 3.0
+TK, SOFT, HARD = 1.1, 2.0, float(os.environ.get("HARD_ATR", "3.0"))
 def unseen_set(dr):
     syms = [os.path.basename(f)[:-4] for f in sorted(glob.glob(f"{dr}/*.npz"))]
     return set(syms[2::3]) | {os.path.basename(f)[:-4] for f in glob.glob(f"{dr}x/*.npz")}
@@ -49,7 +49,7 @@ for st_name, args in (("wick4h", ("s23_4h", 2, "s26_s23_4h_w1_0.npz", "s23_engin
         ROWS.append(dict(e, st=st_name, tfh=args[4], R=float(R), kind=kind, te=int(te), xp=xp, un=e["sym"] in UN[st_name],
                          stp=float(np.clip(SOFT * a / f, 0.002, 0.5))))
 # v0.99.694 — the money with the bot's leverage: the liquidation BUF x the emergency stop's distance (sim2, closetf4.py)
-BUF = float(sys.argv[2]) if len(sys.argv) > 2 else 1.5
+BUF = float(os.environ.get("LIQ_BUF", "1.5"))
 @njit
 def sim2(BUF_, t0, t1, R, ST, STH, i0, tend, maxpos, rk, shift):
     eq = 1.0; peak = 1.0; mdd = 0.0; deps = 1.0

@@ -20484,3 +20484,10 @@ v0.99.694 - ⚡ the stop on the close of the chart's own candle (the 4h trades: 
          chart, the texts. Tests: t_dlm_bot ((3) 10/10 backtest trades re-made with the new rule; (4) a wick and a 1h
          close beyond -> nothing, the 4h close -> out; (5) the leverage by the model's buffer), t_dlm_binance (the same
          on a fake Binance), t_dlm_ui, t_dlm_coins, t_dlm_parity — OK.
+v0.99.695 - ⚡ the leverage for more money (the user: "меня интересует больше денег, если да то все внедряем"): the
+         liquidation 1.25x beyond the emergency stop (was 1.5x — the model's "liq_buf"; isolated margin on Binance).
+         With the v0.99.694 stop (closetf7.py, dlm4_export9.py LIQ_BUF=1.25): a year from $100 at 4% the median
+         $4 841 (1.5x: $3 222), the worst 10% $1 779, harsh $3 198, the last 12 months $6 051, the drawdown 66%
+         (60%). The emergency stop is a STOP_MARKET at 3 ATR; the liquidation now 3.75 ATR from the entry (was 4.5):
+         the price must jump 0.75 ATR past the triggered stop before it fills. Tests: t_dlm_bot (5) the placement
+         passes the model's 1.25, t_dlm_binance, t_dlm_ui, t_dlm_coins, t_dlm_parity — OK.
