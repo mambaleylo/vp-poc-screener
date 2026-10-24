@@ -138,15 +138,15 @@ res["setting on"] = V.BN_OTHERS is True and V.get_settings().get("bn_others") is
 gate = []
 V._execute_autotrade_impl = lambda *a, **k: (gate.append(a[0]), {"status": "OPENED", "detail": "gate"})[1]
 
-# (1) SMC long AAA: entry 10, stop 9.5 (5%), take 11.5 -> SMC's default 1% of $1000 = $10 at the stop -> $200, 20 coins (v0.99.699)
+# (1) SMC long AAA: entry 10, stop 9.5 (5%), take 11.5 -> SMC's default 1.5% of $1000 = $15 at the stop -> $300, 30 coins (v0.99.706; was 1%)
 X["calls"].clear()
 r1 = V.execute_autotrade("smc", "AAA_USDT", "LONG", 10.0, 9.5, 11.5, risk_pct_override=0.25)
 mk = [c for c in X["calls"] if c[1] == "/fapi/v1/order" and c[2].get("type") == "MARKET"]
 algos = [a for a in X["algos"].values() if a["symbol"] == "AAAUSDT"]
 st = next((a for a in algos if a["type"] == "STOP_MARKET"), {}); tk = next((a for a in algos if a["type"] == "TAKE_PROFIT_MARKET"), {})
 q = float(mk[0][2]["quantity"]) if mk else 0
-res["smc opened on Binance, its 1% at the stop"] = (r1["status"] == "OPENED" and not gate and len(mk) == 1 and mk[0][2]["side"] == "BUY"
-                                               and 0.9 * 10 <= q * 0.5 <= 1.001 * 10 and X["mtype"].get("AAAUSDT") == "ISOLATED" and X["lev"].get("AAAUSDT", 0) >= 1)
+res["smc opened on Binance, its 1.5% at the stop"] = (r1["status"] == "OPENED" and not gate and len(mk) == 1 and mk[0][2]["side"] == "BUY"
+                                               and 0.9 * 15 <= q * 0.5 <= 1.001 * 15 and X["mtype"].get("AAAUSDT") == "ISOLATED" and X["lev"].get("AAAUSDT", 0) >= 1)
 res["stop + take on the exchange"] = (st.get("triggerPrice") == "9.5" and st.get("closePosition") == "true" and st.get("side") == "SELL"
                                      and tk.get("triggerPrice") == "11.5" and tk.get("closePosition") == "true")
 X["pos"]["AAAUSDT"] = q

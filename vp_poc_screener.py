@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.705"
+APP_VERSION = "0.99.706"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28093,9 +28093,9 @@ _PROC_START = time.time()
 # v0.99.700 — the user: "ожидания по доходу добавь тоже куда нибудь тонкой строкой, может под шапку, типа связка индикаторов
 # худшее ожидание и лучшее": a year from $100 on the history (the 12-month windows from each week of 2023-02..2025-10, one
 # account, the bot's leverage, the honest pools; tools/winrate port_expect.py): the worst 10% / the median / the best 10% of
-# the years, the median drawdown. "bundle" = ⚡ 4% + P/R 2% + SMC 1% + EMA 0.5% (on Binance together), "dlm" = ⚡ alone
+# the years, the median drawdown. "bundle" = ⚡ 4% + P/R 2% + SMC 1.5% + EMA 0.5% (on Binance together), "dlm" = ⚡ alone
 EXPECT_YEAR = {"dlm": {"p10": 1036, "p50": 6355, "p90": 15913, "dd": 59, "last12": 11663},   # v0.99.704: x the daily WaveTrend (port_osc3.py)
-               "bundle": {"p10": 1364, "p50": 12580, "p90": 37335, "dd": 57, "last12": 19209}}
+               "bundle": {"p10": 1482, "p50": 16848, "p90": 44963, "dd": 62, "last12": 32937}}   # v0.99.706: SMC q 0.993 at 1.5%, only the touches in its reach (port_smcr.py)
 
 
 @app.route("/api/boot")
@@ -33061,7 +33061,7 @@ def api_cas_status():
 # stop 1 daily ATR past it, take 3R, out after 72 h.
 SMC_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_smc_model.json")
 SMC_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_smc_model.json"
-SMC_MODEL_VER = 2   # v0.99.700 — 2: the stop at a 4h close (1 dATR), the emergency one 2 dATR, the honest touch order
+SMC_MODEL_VER = 3   # v0.99.706 — 3: the threshold q 0.99 -> 0.993 (fewer, better trades). 2 (v0.99.700): the stop at a 4h close (1 dATR), the emergency one 2 dATR, the honest touch order
 SMC_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_smc_state.json")
 SMC_ENABLED = os.environ.get("VP_SMC", "1") == "1"
 AUTOTRADE_ENABLED_SMC = os.environ.get("VP_AUTOTRADE_SMC", "0") == "1"
@@ -35037,10 +35037,10 @@ def _dlm_place_exits(t):
 # the stop and the take on the exchange (closePosition triggers), isolated margin, the leverage by the stop (the bot's
 # 1.5x buffer); one position a coin on the whole account (a position or an armed ⚡ limit on the coin -> no trade); the
 # time exit / P/R's close stop at the market; EMA's partial take reduce-only + the stop to the entry. The risk: the
-# module's own field, empty -> BN_OTHERS_RISK (v0.99.699: P/R 2%, SMC 1%, EMA 0.5% — port699b.py on the honest lists)
+# module's own field, empty -> BN_OTHERS_RISK (v0.99.706: P/R 2%, SMC 1.5%, EMA 0.5%; v0.99.699 — port699b.py on the honest lists)
 BN_OTHERS = os.environ.get("VP_BN_OTHERS", "0") == "1"
 BN_OTHERS_MODES = ("prv", "smc", "emw")
-BN_OTHERS_RISK = {"prv": 2.0, "smc": 1.0, "emw": 0.5}   # v0.99.699 — the honest lists (port699b.py): ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
+BN_OTHERS_RISK = {"prv": 2.0, "smc": 1.5, "emw": 0.5}   # v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
 BNO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_bn_others.json")
 _BNO = {"pos": {}}   # Gate contract -> the Binance position this bot opened for P/R / SMC / EMA
 _bno_lock = threading.Lock()
@@ -39898,7 +39898,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow subRow">
         <div>
           <div class="label">↳ 🔄 P/R, 🧱 SMC, 📐 EMA — тоже на Binance</div>
-          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, изолированная маржа; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто: P/R 2%, SMC 1%, EMA 0.5%. На истории (честный отбор сделок) ⚡ 4% вместе с ними — медиана за год примерно вдвое больше, чем один ⚡, при той же просадке; без ⚡ эти три слабые. Включается вместе с автоторговлей самих модулей</div>
+          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, изолированная маржа; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто: P/R 2%, SMC 1.5%, EMA 0.5%. На истории (честный отбор сделок) ⚡ 4% вместе с ними — медиана за год примерно вдвое больше, чем один ⚡, при той же просадке; без ⚡ эти три слабые. Включается вместе с автоторговлей самих модулей</div>
         </div>
         <label class="switch"><input type="checkbox" id="setBnOthers"><span class="switchSlider"></span></label>
       </div>

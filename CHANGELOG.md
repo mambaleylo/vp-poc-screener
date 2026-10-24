@@ -20613,3 +20613,17 @@ v0.99.705 - ⚡ Telegram only for a filled limit (the user: "шьются пос
          stop with their %, the time exit's date and hour, the model's score and the risk with its multipliers (the load —
          now kept with the order as "load" — and the daily WaveTrend). The trade's result message as before. Tests:
          t_dlm_bot (7) (dlm_scan sends nothing, the fill's message), t_dlm_binance (the fill told), t_dlm_ui, t_bn_others — OK.
+v0.99.706 - 🧱 SMC: the model's threshold q 0.99 -> 0.993 and the risk on Binance 1% -> 1.5% (the user: "внедряй smc"); the
+         backtest list only the touches the bot can take. The lab (smc_q.py, smc_q2.py, port_smcq.py, port_smcq2.py): a
+         stricter threshold — fewer, better trades (q 0.993: +0.53 -> +0.76R, WR 61 -> 67%, every year 2023-26 better).
+         Found on the way: 11-14% of the SMC list were spikes reaching a level 1.5+ daily ATR from the price at the hour's
+         start — the bot never arms those (its reach filter), the list had them (they were weak at q 0.99, +0.12R, and
+         took the slots). The list now with the bot's filter (smc_reach2.py): 330 trades +0.79R, WR 68%. The bundle a
+         year from $100 (port_smcr.py, only the reachable touches, ⚡ 4% + P/R 2% + SMC 1.5% + EMA 0.5%): the worst 10%
+         ~$1.5k, the median ~$16.8k, the best 10% ~$45k, the last 12 months ~$32.9k, drawdowns ~62% (q 0.99 at 1.5% on
+         the same reachable trades: $1.6k / $16.5k / $49k / $22.1k / 56% — the user chose the stricter one). SMC model
+         ver 3 (SMC_MODEL_VER), thr 0.709599 (q 0.993 of the 2025 out-of-sample scores). The header's expectation updated.
+         Also rejected this round: the crowd (long/short accounts) risk, ⚡ breakeven / half off, the drawdown-dependent
+         risk (+ a stress test: the money falls fast when the trades are 0.10-0.15R worse than the backtest), the free
+         margin share, stricter EMA thresholds, the GitHub indicators' own family models. Tests: t_smc_bot (the bot
+         re-makes the list's 2026 trades), t_bn_others (SMC 1.5%), t_cstop_others, t_dlm_ui — OK.
