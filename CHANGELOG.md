@@ -20669,3 +20669,10 @@ v0.99.710 - ⚡ a bot started mid-bar makes its orders at once; the take-over fr
          keys / dry-run / ⚡ autotrade off — dlm_adopt_off); the button "🔁 подхватить с Binance сейчас" (/api/dlm/adopt).
          Tests: t_dlm_bot (3b: the catch-up re-makes a closed bar's order, no copies on a second run), t_dlm_binance,
          t_dlm_ui — OK.
+v0.99.711 - ⚡ the start visible; the long texts under the 💡. The user: "лимиток не вижу, ждёт видимо закрытия 2ч, но при первом
+         запуске можно же и не ждать": the catch-up scans (v0.99.710) run at the start, but on a new phone the first one
+         downloads the candles of 210 coins (minutes) and the tab said "первый пересчёт — на закрытии 2ч" meanwhile — now
+         "⏳ после запуска пересчитываю пропущенные свечи: k из 8"; the exchange tick (the take-over, the trades' exits) runs
+         before the catch-up; a take-over that failed shows its error (it read "всё уже в записях"). The user ("весь этот
+         длинный текст должен скрываться лампочкой"): the ⚡ tab's money paragraph, the drawdown banner and the models line
+         under the 💡 button (hintx). Tests: t_dlm_bot, t_dlm_binance, t_dlm_ui — OK.

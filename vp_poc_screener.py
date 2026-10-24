@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.710"
+APP_VERSION = "0.99.711"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -35658,6 +35658,7 @@ def dlm_real_tick():
     if DLM_BINANCE and BINANCE_API_KEY and not AUTOTRADE_DRY_RUN and now - _ADOPT["t"] > DLM_ADOPT_SEC:   # v0.99.708
         _ADOPT["t"] = now
         try:
+            _ADOPT["err"] = None
             got = dlm_bn_adopt(now)
             _ADOPT["n"] = len(got)
             if got:
@@ -35665,6 +35666,7 @@ def dlm_real_tick():
                 send_telegram("🔁 Подхватил с Binance то, чего нет в записях бота (другой телефон / потерянный файл):\n" + "\n".join(got[:15]), category="dlm")
         except Exception as e:
             log_error(f"dlm binance adopt: {e}")
+            _ADOPT["err"] = str(e)[:200]
     try:
         _dlm_arm(now)   # v0.99.691 — the waiting orders go on the exchange as the price comes
     except Exception as e:
@@ -35825,14 +35827,16 @@ def dlm_catch_up(now=None):
     first; the same closed bars -> the same orders as the old run; ids already there are skipped); a waiting order the
     price went far through meanwhile is skipped by _dlm_arm as before"""
     now = now or time.time()
-    for st in _dlm_streams(dlm_model()):
-        bs = int(st["bar_sec"]); last = int(now // bs * bs)
-        for k in range(int(st.get("alive_bars", 4)), 0, -1):
-            t_close = last - (k - 1) * bs
-            try:
-                dlm_scan(t_close, st)
-            except Exception as e:
-                log_error(f"dlm catch-up {st.get('name')} {t_close}: {e}")
+    jobs = [(st, int(now // int(st["bar_sec"]) * int(st["bar_sec"])) - (k - 1) * int(st["bar_sec"]))
+            for st in _dlm_streams(dlm_model()) for k in range(int(st.get("alive_bars", 4)), 0, -1)]
+    _DLM["catchup"] = {"run": True, "done": 0, "of": len(jobs), "t": int(now)}
+    for st, t_close in jobs:
+        try:
+            dlm_scan(t_close, st)
+        except Exception as e:
+            log_error(f"dlm catch-up {st.get('name')} {t_close}: {e}")
+        _DLM["catchup"]["done"] += 1
+    _DLM["catchup"]["run"] = False
     dlm_save()
 
 
@@ -35844,6 +35848,12 @@ def dlm_loop():
     except Exception as e:
         log_error(f"dlm_loop model: {e}")
     if DLM_ENABLED:
+        if AUTOTRADE_ENABLED_DLM:   # v0.99.711 — the exchange first (the take-over, the trades' exits), then the long catch-up
+            try:
+                with live_http():
+                    dlm_real_tick()
+            except Exception as e:
+                log_error(f"dlm first tick: {e}")
         try:
             dlm_catch_up()   # v0.99.710
         except Exception as e:
@@ -35889,7 +35899,8 @@ def dlm_stats():
     real = [t for t in fin if t.get("real")]
     return {"on": DLM_ENABLED, "auto": AUTOTRADE_ENABLED_DLM, "tg": TELEGRAM_ALERTS_DLM, "dry": AUTOTRADE_DRY_RUN,
             "binance": DLM_BINANCE, "bn_keys": bool(BINANCE_API_KEY and BINANCE_API_SECRET), "bn_check": _BNF.get("check"),   # v0.99.684
-            "adopt": {"t": int(_ADOPT["t"]) or None, "n": _ADOPT["n"], "last": _ADOPT["last"][-10:], "off": dlm_adopt_off()},   # v0.99.710
+            "adopt": {"t": int(_ADOPT["t"]) or None, "n": _ADOPT["n"], "last": _ADOPT["last"][-10:], "off": dlm_adopt_off(), "err": _ADOPT.get("err")},   # v0.99.710
+            "catchup": _DLM.get("catchup"),   # v0.99.711 — the start's scans of the missed bars
             "more_coins": DLM_MORE_COINS, "coins_n": 210 if DLM_MORE_COINS else 127,   # v0.99.686
             "risk": dlm_risk(), "risk_set": MODULE_RISK_PCT.get("dlm"), "max_pos": DLM_MAX_POS,   # v0.99.687
             "model": dict({k: m.get(k) for k in ("ver", "q", "trained_to", "rule", "research", "side_cap", "liq_buf", "load_risk", "osc_risk")},
@@ -44113,13 +44124,13 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
       return {label: k, sub: `~${Math.round(pm)}/мес на ${d.coins_n || 210} монетах · WR ${wr != null ? Math.round(wr) : '—'}%`, v: avg, hi: k === '2026'};
     });
     const un = rs.unseen || {}, mo = rs.money || {}, m1 = rs.m1 || {};
-    top += `<div class="dim" style="font-size:var(--fs-xs);">ансамбль из ${rs.models_n || 20} моделей (их среднее) обучен до ${new Date(m.trained_to * 1000).toLocaleDateString('ru-RU')} на ${rs.train_coins || 85} монетах</div>
+    top += `<div class="dim hintx" style="font-size:var(--fs-xs);">ансамбль из ${rs.models_n || 20} моделей (их среднее) обучен до ${new Date(m.trained_to * 1000).toLocaleDateString('ru-RU')} на ${rs.train_coins || 85} монетах</div>
       <div class="zsub">Проверка на монетах, которых модель не видела (${(rs.check_coins || 42) + (rs.new_coins || 83)}), каждый год — моделью, обученной только на прошлых годах:</div>
       ${zBars(rows, v => sgR(+(+v).toFixed(3)))}
       <div class="zstrip"><span>WR <b>~${un.wr || 70}%</b></span><span>в среднем <b>${sgR(un.avg || 0.235)}</b></span><span>последние 12 мес <b>${sgR(un.last12_avg || 0.24)}</b></span><span><b>~65</b> сделок в месяц</span></div>
       ${d.streams && (d.streams.wick4h.n || d.streams.close2h.n) ? `<div class="dim" style="font-size:var(--fs-xs);">живые: 4ч ${d.streams.wick4h.n} (${d.streams.wick4h.n ? sgR(d.streams.wick4h.avg) + ', WR ' + d.streams.wick4h.wr + '%' : '—'}) · 2ч ${d.streams.close2h.n} (${d.streams.close2h.n ? sgR(d.streams.close2h.avg) + ', WR ' + d.streams.close2h.wr + '%' : '—'})</div>` : ''}
-      <div class="zsub">Сделки посчитаны по часовым свечам Binance: стоп — только если свеча своего графика (4ч у 4ч-сделок, 2ч у 2ч) закрылась за ним; фитили и часовые закрытия за стопом не выбивают, от обвала — аварийный стоп 3 ATR на бирже. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%${(m && m.load_risk) ? ` (риск по загрузке: пока открыто меньше ${m.load_risk.n} сделок ⚡ — ×${m.load_risk.lo}, дальше ×${m.load_risk.hi}: сделки общего прострела рынка на истории вдвое лучше одиночных)` : ''}${(m && m.osc_risk) ? ` и по дневному WaveTrend (осциллятор LazyBear с TradingView): монета на дневке перепродана против сделки — ×${m.osc_risk.up}, перекуплена в её сторону — ×${m.osc_risk.dn}` : ''} с плечом, как у бота (ликвидация в ${mo.liq_buf || 1.25}× дальше аварийного стопа — маржа ограничивает число сделок), без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 7189)}</b>, худшие 10% ~${usd(mo.year_p10 || 2783)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 4926)}), последние 12 месяцев ~${usd(mo.last12 || 11387)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
-      <div class="zbanner warn">Просадка: при обвале рынка счёт может временно упасть на 60–70% от пика — 24–25 мая 2025 за два дня стопы закрыли 19 сделок 4ч (−19R, при 4% на сделку это около −50%), с 2ч сделками просадки ещё глубже. Потом счёт восстанавливался, но к такому надо быть готовым и не повышать риск после серии стопов.</div>
+      <div class="zsub hintx">Сделки посчитаны по часовым свечам Binance: стоп — только если свеча своего графика (4ч у 4ч-сделок, 2ч у 2ч) закрылась за ним; фитили и часовые закрытия за стопом не выбивают, от обвала — аварийный стоп 3 ATR на бирже. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%${(m && m.load_risk) ? ` (риск по загрузке: пока открыто меньше ${m.load_risk.n} сделок ⚡ — ×${m.load_risk.lo}, дальше ×${m.load_risk.hi}: сделки общего прострела рынка на истории вдвое лучше одиночных)` : ''}${(m && m.osc_risk) ? ` и по дневному WaveTrend (осциллятор LazyBear с TradingView): монета на дневке перепродана против сделки — ×${m.osc_risk.up}, перекуплена в её сторону — ×${m.osc_risk.dn}` : ''} с плечом, как у бота (ликвидация в ${mo.liq_buf || 1.25}× дальше аварийного стопа — маржа ограничивает число сделок), без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 7189)}</b>, худшие 10% ~${usd(mo.year_p10 || 2783)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 4926)}), последние 12 месяцев ~${usd(mo.last12 || 11387)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
+      <div class="zbanner warn hintx">Просадка: при обвале рынка счёт может временно упасть на 60–70% от пика — 24–25 мая 2025 за два дня стопы закрыли 19 сделок 4ч (−19R, при 4% на сделку это около −50%), с 2ч сделками просадки ещё глубже. Потом счёт восстанавливался, но к такому надо быть готовым и не повышать риск после серии стопов.</div>
       ${d.risk_set && d.risk_set > 6 ? `<div class="zbanner warn">Риск ${d.risk}% на сделку при до ${d.max_pos || 20} сделок сразу — это до ${Math.round(d.risk * (d.max_pos || 20))}% счёта под стопами одновременно. Лучше всего по деньгам — 3–4%: выше денег даже меньше (маржи хватает на меньшее число сделок), а просадки глубже.</div>` : ''}
       ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} (бот держит их у себя и выставляет на бирже, когда цена подошла на 1 ATR — так места и маржа не заняты далёкими лимитками) — переключатель «↳ ⚡ Лимитки 4ч+2ч» в автоторговле; риск — поле «⚡» (пусто = 4%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
   }
@@ -44154,7 +44165,8 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
       if (d.binance && !d.bn_keys) b += `<div class="zbanner warn" style="margin-top:8px;">Выбран Binance, но ключей нет — реальные сделки не откроются</div>`;
       const ad = d.adopt || {};   // v0.99.710 — the take-over from Binance (another phone / a lost file)
       b += `<div class="zsub" style="margin-top:8px;">🔁 Подхват с Binance (лимитки и позиции, которых нет в записях бота): ${ad.off ? `<span class="loss">не работает — ${ad.off}</span>`
-        : (ad.t ? `проверено в ${new Date(ad.t * 1000).toLocaleTimeString().slice(0, 5)} — ${ad.n ? 'подхвачено ' + ad.n : 'всё уже в записях'}` : 'первая проверка через ~2 мин после запуска')}</div>`
+        : (ad.err ? `<span class="loss">ошибка: ${String(ad.err).replace(/</g, '&lt;')}</span>`
+        : (ad.t ? `проверено в ${new Date(ad.t * 1000).toLocaleTimeString().slice(0, 5)} — ${ad.n ? 'подхвачено ' + ad.n : 'всё уже в записях'}` : 'первая проверка через ~2 мин после запуска'))}</div>`
         + ((ad.last || []).length ? `<div class="dim" style="font-size:var(--fs-xs);">${ad.last.map(x => String(x).replace(/&/g, '&amp;').replace(/</g, '&lt;')).join('<br>')}</div>` : '')
         + (d.binance && d.bn_keys ? `<button class="zbtn" id="adoptBtn" onclick="dlmAdopt()">🔁 подхватить с Binance сейчас</button>` : '');
     }
@@ -44168,7 +44180,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
     ${ords.length ? `<div class="zsub" style="margin-top:8px;">лимитки (цена · расстояние):</div><div>${ords.map(chip).join('')}</div>`
       : ((sc.near || []).length ? `<div class="zsub" style="margin-top:8px;">ближе всех к порогу (100% — лимитка):</div><div>${sc.near.map(chip).join('')}</div>` : '')}
     <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 9000 ? '⏳ скан старше 2.5 ч — бот был выключен' : 'пересчёт на закрытии каждой 2ч и 4ч свечи (UTC)'}</div>`
-    : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — на закрытии ближайшей 2ч свечи (00, 02, 04 … UTC)</div>`);
+    : `<div class="dim" style="font-size:var(--fs-sm);">${(d.catchup || {}).run ? `⏳ после запуска пересчитываю пропущенные свечи: ${d.catchup.done} из ${d.catchup.of} (первый раз качаются свечи 210 монет — на телефоне до 5–15 мин)` : 'первый пересчёт — на закрытии ближайшей 2ч свечи (00, 02, 04 … UTC)'}</div>`);
   const op = d.open || [];
   const row = (t, i) => `<div onclick="btLiveOpen('dlm', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
       <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim">${t.bs ? (t.bs === 7200 ? ' · 2ч' : (t.bs === 900 ? ' · 15м' : ' · 4ч')) : ''}${t.real ? ' · 💰 на бирже' : ' · виртуально'}</span>${!t.real && (t.why || d.dry || !d.auto) ? `<br><span class="dim" style="font-size:var(--fs-xs);">не на бирже: ${t.why || (!d.auto ? 'автоторговля ⚡ выключена' : 'включена «Бумажная торговля (dry-run)» в настройках — ордера на биржу не отправляются; выключите её, чтобы торговать')}</span>` : ''}</span>
