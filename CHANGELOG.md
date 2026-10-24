@@ -20588,3 +20588,21 @@ v0.99.703 - ⚡ risk by the load (lab, "продолжай лаборатори�
          Rejected: more risk when few open (the opposite), the risk by the score, skipping the lone trades. The header's
          expectation and the ⚡ money text updated. Tests: t_dlm_bot (+ the load x0.625 / x1.25; placed 3.75% at 4%),
          t_dlm_binance, t_dlm_ui, t_bn_others, t_cstop_others — OK.
+v0.99.704 - ⚡ risk by the daily WaveTrend (lab, the user: "новые индикаторы на основе найденных на Гите, доработка их и создание
+         обученных моделей"). 16 open-source indicators (GitHub freqtrade strategies — BinHV45, ClucMay72018, EWO dips;
+         TradingView community scripts — UT Bot, SSL channel, WaveTrend, Squeeze Momentum, Range Filter, Chandelier Exit,
+         Williams Vix Fix, TD setup 9, Connors RSI, Ehlers Fisher, Hull MA, QQE, swing failure) on 1h / 4h / 1d of 211
+         coins 2020-2026 (ev4_engine.py, 4.1M signals): on their own about 0R (the best: EWO 4h +0.08..0.12R, 1 780 trades);
+         a walk-forward LightGBM on their 4h / 1d signals with the market context: +0.06..0.14R on the never-trained coins,
+         x1.1-1.3 a year — not a module. As filters of the deployed modules' trades (gh_states.py, gh_dlm.py): the daily
+         oscillators x the side split the ⚡ pool every year 2022-2026 — stretched against the trade (a long into a daily
+         oversold) +0.27R, with it +0.12R (WaveTrend, Fisher, EWO alike). Rule (dlm_osc_mult, the model's osc_risk): the
+         coin's WaveTrend wt1 (LazyBear 10/21) on its last closed daily bars x the side <= -3 -> the risk x1.25, >= 22 ->
+         x0.85 (the pool's 40% / 60%), else x1; on Binance and Gate; the order's record keeps "osc". Money from $100 a year
+         (port_osc3.py, with the load rule): the bundle median $10.1k -> $12.6k, the best 10% $35k -> $37k, the last 12
+         months $16.4k -> $19.2k, the drawdown 59% -> 57%, the worst 10% $1.43k -> $1.36k; ⚡ alone the median $5.0k ->
+         $6.4k; the ⚡ tab's sim (money704.py) $6.2k -> $7.2k. Controls: x1.04 always (the rule's mean) — median $10.7k;
+         the reverse rule $3.8k for ⚡ alone; the causal per-year thresholds (port_osc.py) — the same gain. Rejected: SSL
+         trend filters for SMC / EMA (median -4..6%), the P/R daily-trend split (one year only). Tests: t_dlm_bot (6): the
+         bot's wt1 == the research's on 40 pool trades (max diff 0.000), the multiplier by the model, the real order's risk
+         x it; t_dlm_binance, t_dlm_ui, t_bn_others, t_cstop_others — OK.

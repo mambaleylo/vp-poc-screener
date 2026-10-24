@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.703"
+APP_VERSION = "0.99.704"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28094,8 +28094,8 @@ _PROC_START = time.time()
 # худшее ожидание и лучшее": a year from $100 on the history (the 12-month windows from each week of 2023-02..2025-10, one
 # account, the bot's leverage, the honest pools; tools/winrate port_expect.py): the worst 10% / the median / the best 10% of
 # the years, the median drawdown. "bundle" = ⚡ 4% + P/R 2% + SMC 1% + EMA 0.5% (on Binance together), "dlm" = ⚡ alone
-EXPECT_YEAR = {"dlm": {"p10": 1022, "p50": 5043, "p90": 14587, "dd": 62, "last12": 10026},   # v0.99.703: ⚡'s risk by the load (port_expect2.py)
-               "bundle": {"p10": 1434, "p50": 10149, "p90": 35184, "dd": 59, "last12": 16364}}
+EXPECT_YEAR = {"dlm": {"p10": 1036, "p50": 6355, "p90": 15913, "dd": 59, "last12": 11663},   # v0.99.704: x the daily WaveTrend (port_osc3.py)
+               "bundle": {"p10": 1364, "p50": 12580, "p90": 37335, "dd": 57, "last12": 19209}}
 
 
 @app.route("/api/boot")
@@ -34465,6 +34465,60 @@ def dlm_load_mult():
     return float(lr.get("lo", 1.0)) if n < int(lr.get("n", 5)) else float(lr.get("hi", 1.0))
 
 
+def _wt1(H, L, C):
+    """v0.99.704 — WaveTrend (LazyBear, channel 10 / average 21) wt1 of the last bar: hlc3's distance from its EMA 10 in its
+    own EMA-10 mean deviation x 0.015, EMA 21 (the research's ev4_engine: each EMA starts at the first value)"""
+    def ema(x, n):
+        k, out, a = 2 / (n + 1), [], None
+        for v in x:
+            a = v if a is None else a + k * (v - a); out.append(a)
+        return out
+    ap = [(h + l + c) / 3 for h, l, c in zip(H, L, C)]
+    esa = ema(ap, 10)
+    d = ema([abs(a - e) for a, e in zip(ap, esa)], 10)
+    ci = [(a - e) / max(0.015 * dd, 1e-12) for a, e, dd in zip(ap, esa, d)]
+    return ema(ci, 21)[-1]
+
+
+_OSC = {}
+
+
+def dlm_osc_mult(sym, side, now=None):
+    """v0.99.704 — the ⚡ risk by the coin's daily WaveTrend (LazyBear's TradingView oscillator) x the trade's side on the
+    last closed daily bars: stretched against the trade (a long into a daily oversold, wt1 x side <= "lo") x"up", with it
+    (>= "hi") x"dn", else x1. The honest ⚡ pool (tools/winrate gh_dlm_split.py): the 20% most against +0.28R, the 20% most
+    with +0.15R, the same sign every year 2022-2026 (Fisher and EWO the same); a year from $100 (port_osc3.py) the bundle's
+    median $10.1k -> $12.6k, the last 12 months $16.4k -> $19.2k, the drawdown 59% -> 57%. The model's "osc_risk"; none or
+    no daily candles -> x1 (cached a coin a day)"""
+    m = (_DLM.get("model") or {}).get("osc_risk") or {}
+    if not m:
+        return 1.0
+    now = now or time.time()
+    day = int(now // 86400)
+    key = (sym, day)
+    wt = _OSC.get(key)
+    if wt is None:
+        try:
+            b = bn_closed(sym, "1d", 86400, 300, now) if DLM_BINANCE else None
+            if not b:
+                b = [c for c in (get_candles_range(sym, "1d", int(now) - 320 * 86400, int(now)) or []) if c["time"] + 86400 <= now]
+        except Exception as e:
+            log_error(f"⚡ daily candles {sym}: {e}")
+            return 1.0
+        if len(b) < 60:
+            return 1.0
+        wt = _wt1([c["high"] for c in b], [c["low"] for c in b], [c["close"] for c in b])
+        if len(_OSC) > 2000:
+            _OSC.clear()
+        _OSC[key] = wt
+    w = wt * side
+    if w <= float(m.get("lo", -1e9)):
+        return float(m.get("up", 1.0))
+    if w >= float(m.get("hi", 1e9)):
+        return float(m.get("dn", 1.0))
+    return 1.0
+
+
 def dlm_scan(t_bar, st):
     """at the close of a bar of the stream's chart (4h / 2h) that started at t_bar - its bar: the coins' limits of the
     stream scored by its models; the ones above its threshold become orders alive for its next 4 bars — one per coin &
@@ -34898,7 +34952,8 @@ def dlm_real_place(o):
             mmr = (STATE.get("scalp_mmr_map") or {}).get(sym, SCALP_DEFAULT_MMR_PCT)
         tiers = get_risk_limit_tiers_for_symbol(sym)
         equity = get_futures_total_equity()
-        risk = dlm_risk(equity) * dlm_load_mult()   # v0.99.703 — x the load
+        osc = dlm_osc_mult(sym, o["side"])   # v0.99.704 — x the daily WaveTrend
+        risk = dlm_risk(equity) * dlm_load_mult() * osc   # v0.99.703 — x the load
         rule = ((_DLM.get("model") or {}).get("rule") or {})
         sl, kx = _dlm_size_stop(o, rule)   # v0.99.692 — at the emergency stop, the risk x its distance / the stop's
         risk = round(risk * kx, 4)
@@ -34921,7 +34976,7 @@ def dlm_real_place(o):
         body = {"contract": sym, "size": int(contracts) if s > 0 else -int(contracts), "price": format_price_str(px, tick),
                 "tif": "gtc", "text": "t-vpdlm"}
         r = gate_signed_request("POST", "/futures/usdt/orders", body=body)
-        o["real"] = {"status": "LIMIT", "id": str(r.get("id")), "size": int(contracts), "price": px, "lev": lev, "tick": tick, "risk": round(risk / kx, 2)}
+        o["real"] = {"status": "LIMIT", "id": str(r.get("id")), "size": int(contracts), "price": px, "lev": lev, "tick": tick, "risk": round(risk / kx, 2), "osc": osc}
 
 
 def _dlm_cancel_order(oid):
@@ -35178,7 +35233,8 @@ def dlm_bn_place(o):
     cap = max((t_[2] for t_ in tiers), default=20)
     mmr = tiers[0][1] if tiers else SCALP_DEFAULT_MMR_PCT
     acct = bnf_account()
-    risk = round(dlm_risk(acct["equity"]) * dlm_load_mult() * kx, 4)   # v0.99.703 — x the load
+    osc = dlm_osc_mult(sym, s)   # v0.99.704 — x the daily WaveTrend
+    risk = round(dlm_risk(acct["equity"]) * dlm_load_mult() * osc * kx, 4)   # v0.99.703 — x the load
     tb = {bsym: tiers} if tiers else None
     margin, lev, skip = compute_risk_based_position(direction, lv, sl, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb, safety_margin=_dlm_liq_buf())
     if not skip and margin > acct["free"] * 0.9:   # the free margin checked: the risk scaled down to what the account carries
@@ -35205,7 +35261,7 @@ def dlm_bn_place(o):
     r = bnf_req("POST", "/fapi/v1/order", dict(_bnf_side_params(s, False, dual), symbol=bsym, type="LIMIT", timeInForce="GTC", quantity=qty,
                                                price=px, newClientOrderId=f"vpdlm{int(time.time() * 1000)}"))
     o["real"] = {"status": "LIMIT", "ex": "binance", "id": str(r.get("orderId")), "bsym": bsym, "scl": scl, "qty": q, "price": float(px) / scl,
-                 "lev": int(lev), "risk": round(risk / kx, 2), "dual": dual, "tick": info["tick"], "step": info["step"]}
+                 "lev": int(lev), "risk": round(risk / kx, 2), "osc": osc, "dual": dual, "tick": info["tick"], "step": info["step"]}
 
 
 def _dlm_bn_exits(t):
@@ -35562,7 +35618,7 @@ def dlm_stats():
             "binance": DLM_BINANCE, "bn_keys": bool(BINANCE_API_KEY and BINANCE_API_SECRET), "bn_check": _BNF.get("check"),   # v0.99.684
             "more_coins": DLM_MORE_COINS, "coins_n": 210 if DLM_MORE_COINS else 127,   # v0.99.686
             "risk": dlm_risk(), "risk_set": MODULE_RISK_PCT.get("dlm"), "max_pos": DLM_MAX_POS,   # v0.99.687
-            "model": dict({k: m.get(k) for k in ("ver", "q", "trained_to", "rule", "research", "side_cap", "liq_buf", "load_risk")},
+            "model": dict({k: m.get(k) for k in ("ver", "q", "trained_to", "rule", "research", "side_cap", "liq_buf", "load_risk", "osc_risk")},
                           streams=[{k: x.get(k) for k in ("name", "tf", "anchor", "depth_atr", "thr", "alive_bars", "take_atr", "stop_atr", "hold_bars", "far_take_atr", "pull_atr", "hard_stop_atr", "stop_mode", "close_h")} for x in m.get("streams") or []]) if m else None,
             "err": err, "scan": scan, "orders": orders[:40], "orders_n": len(orders),
             "open": [dict(t, why=t.get("why") or (_dlm_why_virtual(_ord.get(t["id"]) or {}) if not t.get("real") else None))
@@ -43768,7 +43824,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
       ${zBars(rows, v => sgR(+(+v).toFixed(3)))}
       <div class="zstrip"><span>WR <b>~${un.wr || 70}%</b></span><span>в среднем <b>${sgR(un.avg || 0.235)}</b></span><span>последние 12 мес <b>${sgR(un.last12_avg || 0.24)}</b></span><span><b>~65</b> сделок в месяц</span></div>
       ${d.streams && (d.streams.wick4h.n || d.streams.close2h.n) ? `<div class="dim" style="font-size:var(--fs-xs);">живые: 4ч ${d.streams.wick4h.n} (${d.streams.wick4h.n ? sgR(d.streams.wick4h.avg) + ', WR ' + d.streams.wick4h.wr + '%' : '—'}) · 2ч ${d.streams.close2h.n} (${d.streams.close2h.n ? sgR(d.streams.close2h.avg) + ', WR ' + d.streams.close2h.wr + '%' : '—'})</div>` : ''}
-      <div class="zsub">Сделки посчитаны по часовым свечам Binance: стоп — только если свеча своего графика (4ч у 4ч-сделок, 2ч у 2ч) закрылась за ним; фитили и часовые закрытия за стопом не выбивают, от обвала — аварийный стоп 3 ATR на бирже. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%${(m && m.load_risk) ? ` (риск по загрузке: пока открыто меньше ${m.load_risk.n} сделок ⚡ — ×${m.load_risk.lo}, дальше ×${m.load_risk.hi}: сделки общего прострела рынка на истории вдвое лучше одиночных)` : ''} с плечом, как у бота (ликвидация в ${mo.liq_buf || 1.25}× дальше аварийного стопа — маржа ограничивает число сделок), без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 6190)}</b>, худшие 10% ~${usd(mo.year_p10 || 2616)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 4253)}), последние 12 месяцев ~${usd(mo.last12 || 11271)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
+      <div class="zsub">Сделки посчитаны по часовым свечам Binance: стоп — только если свеча своего графика (4ч у 4ч-сделок, 2ч у 2ч) закрылась за ним; фитили и часовые закрытия за стопом не выбивают, от обвала — аварийный стоп 3 ATR на бирже. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%${(m && m.load_risk) ? ` (риск по загрузке: пока открыто меньше ${m.load_risk.n} сделок ⚡ — ×${m.load_risk.lo}, дальше ×${m.load_risk.hi}: сделки общего прострела рынка на истории вдвое лучше одиночных)` : ''}${(m && m.osc_risk) ? ` и по дневному WaveTrend (осциллятор LazyBear с TradingView): монета на дневке перепродана против сделки — ×${m.osc_risk.up}, перекуплена в её сторону — ×${m.osc_risk.dn}` : ''} с плечом, как у бота (ликвидация в ${mo.liq_buf || 1.25}× дальше аварийного стопа — маржа ограничивает число сделок), без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 7189)}</b>, худшие 10% ~${usd(mo.year_p10 || 2783)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 4926)}), последние 12 месяцев ~${usd(mo.last12 || 11387)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
       <div class="zbanner warn">Просадка: при обвале рынка счёт может временно упасть на 60–70% от пика — 24–25 мая 2025 за два дня стопы закрыли 19 сделок 4ч (−19R, при 4% на сделку это около −50%), с 2ч сделками просадки ещё глубже. Потом счёт восстанавливался, но к такому надо быть готовым и не повышать риск после серии стопов.</div>
       ${d.risk_set && d.risk_set > 6 ? `<div class="zbanner warn">Риск ${d.risk}% на сделку при до ${d.max_pos || 20} сделок сразу — это до ${Math.round(d.risk * (d.max_pos || 20))}% счёта под стопами одновременно. Лучше всего по деньгам — 3–4%: выше денег даже меньше (маржи хватает на меньшее число сделок), а просадки глубже.</div>` : ''}
       ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} (бот держит их у себя и выставляет на бирже, когда цена подошла на 1 ATR — так места и маржа не заняты далёкими лимитками) — переключатель «↳ ⚡ Лимитки 4ч+2ч» в автоторговле; риск — поле «⚡» (пусто = 4%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;

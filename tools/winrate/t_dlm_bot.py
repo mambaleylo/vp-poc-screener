@@ -195,4 +195,38 @@ V._DLM["model"] = m_
 lev_ok = buf0 == V.dlm_model().get("liq_buf") and sms and all(x == buf0 for x in sms) and l15[2] is None and l125[2] is None and l125[1] > l15[1] and l125[0] < l15[0]
 print(f"(5) the model's liquidation buffer {buf0}: leverage at 1.5x {l15[1]}, at 1.25x {l125[1]} (margin ${l15[0]:.0f} -> ${l125[0]:.0f}) {lev_ok}")
 ok &= lev_ok
+# (6) v0.99.704 — the risk by the daily WaveTrend: the bot's wt1 (its last 300 closed daily bars) == the research's (all of
+# the history, gh_dlm.json) on pool trades; the multiplier by the model's osc_risk; the real order's risk x it
+def daily(sym):
+    a = load1h(sym); T = np.array([c["time"] for c in a]); d = T // 86400; out = []
+    for k in np.unique(d):
+        ix = np.flatnonzero(d == k)
+        if len(ix) == 24:
+            out.append({"time": int(k * 86400), "open": a[ix[0]]["open"], "high": max(a[i]["high"] for i in ix),
+                        "low": min(a[i]["low"] for i in ix), "close": a[ix[-1]]["close"]})
+    return out
+osc = (V._DLM.get("model") or {}).get("osc_risk") or {}
+G = [g for g in json.load(open("gh_dlm.json")) if g]
+pick = [G[i] for i in np.random.default_rng(7).choice(len(G), 40, replace=False)]
+DCACHE = {}; worst_wt = 0.0; mult_ok = True; n_up = n_dn = 0
+for g in pick:
+    src, scl = g["sym"], 1.0   # the pool's Binance names (WaveTrend is scale-free)
+    if src not in DCACHE: DCACHE[src] = daily(src)
+    b = [c for c in DCACHE[src] if c["time"] + 86400 <= g["te"]][-300:]
+    w_bot = V._wt1([c["high"] for c in b], [c["low"] for c in b], [c["close"] for c in b]); w_res = g["wt_1d"] * g["d"]
+    worst_wt = max(worst_wt, abs(w_bot - w_res))
+    V.get_candles_range = lambda sym, tf, a_, z_, b=b: scaled(b, scl) if tf == "1d" else []
+    V._OSC.clear(); m = V.dlm_osc_mult(g["sym"], g["d"], now=g["te"])
+    x = g["wt_1d"]; want = osc["up"] if x <= osc["lo"] else (osc["dn"] if x >= osc["hi"] else 1.0)
+    if abs(x - osc["lo"]) > 0.5 and abs(x - osc["hi"]) > 0.5: mult_ok &= m == want
+    n_up += m == osc["up"]; n_dn += m == osc["dn"]
+_om = V.dlm_osc_mult; V.dlm_osc_mult = lambda sym, side, now=None: 1.25
+_o0, _t0 = V._DLM["orders"], V._DLM["trades"]; V._DLM["orders"], V._DLM["trades"] = [], []
+risks.clear(); d_ = mk("DDD_USDT", 1, 4.0); V._DLM["orders"].append(d_); V.dlm_real_place(d_)
+want_r = 4 * V.dlm_load_mult() * 1.25 * 1.5
+placed_osc = bool((d_.get("real") or {}).get("id")) and risks and abs(risks[-1] - want_r) < 1e-6 and d_["real"].get("osc") == 1.25 and a["real"].get("osc") == 1.0
+V.dlm_osc_mult = _om; V._DLM["orders"], V._DLM["trades"] = _o0, _t0
+osc_ok = bool(osc) and worst_wt < 0.5 and mult_ok and n_up > 0 and n_dn > 0 and placed_osc
+print(f"(6) daily WaveTrend: bot vs research max diff {worst_wt:.3f} on 40 pool trades · multiplier by the model ({osc}) {mult_ok} (x{osc.get('up')} {n_up}, x{osc.get('dn')} {n_dn}) · the real order's risk x it {want_r:.4f}% {placed_osc} {osc_ok}")
+ok &= osc_ok
 print("ALL OK" if ok else "FAILED"); sys.exit(0 if ok else 1)
