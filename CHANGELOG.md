@@ -20524,3 +20524,19 @@ v0.99.698 - P/R, SMC, EMA on Binance (the user: "торговать ещё вм�
          2026 replays: both $4 244 vs 4h only $2 781). Tests: t_bn_others (new: the entry, 2% at the stop, the triggers,
          one position a coin, an armed ⚡ limit, EMA's partial, the time exit, the cleanup, a 1000-coin, dry run / off ->
          Gate, the setting), t_dlm_binance, t_dlm_bot, t_dlm_ui, t_smc_bot, t_prx_lim — OK (t_prx_cs 13/16 as before).
+v0.99.699 - the other modules re-checked like ⚡ (the user: "перепроверь тогда другие индикаторы плюс гипотезы новые").
+         (1) The exits / fills on Binance 1m candles (m1_others.py, 10.2024 on, 40 coins): the lists' trades re-walked —
+         EMA +0.59R list / +0.69R 1m (31 trades), SMC +0.94 / +0.94 (77), P/R +0.47 / +0.48 (43, 2 limits unfilled): the
+         exit mechanics hold. (2) The pool's order inside an hour (the look-ahead found in ⚡): the SMC and EMA lists took
+         the touches of one hour by the model's score (lexsort (T, -SC)) — the bot gets them as the price reaches them
+         (the nearer level first). Honest (smc_order.py, ema_order.py): SMC +0.67R -> +0.42R, WR 59 -> 53% (581 trades;
+         the check coins +0.58 -> +0.33R); EMA +0.88R -> +0.55R, WR 79 -> 69% (305); every year still positive. P/R
+         (pr_order.py): the score order = random (+0.38R) — its list stays. The EMA / SMC backtest lists and the models'
+         research numbers replaced by the honest ones (ema_export10.py, smc_export2.py; the models themselves unchanged).
+         (3) The portfolio again on the honest lists (port699.py, port699b.py; one account, the bot's leverage): ⚡ 4%
+         alone — the median $3 590, the worst 10% $944, the last 12 months $6 105; ⚡ 4% + P/R 2% + SMC 1% + EMA 0.5% —
+         $7 254 / $1 071 / $10 130 (v0.99.698's "x3" came from the biased EMA / SMC lists); the three alone weak. The
+         Binance defaults for an empty risk field: P/R 2%, SMC 1%, EMA 0.5% (BN_OTHERS_RISK). A hypothesis left open:
+         "one level a coin & hour, the farthest" looked +27–39% but was tested on the touched levels only (a look-ahead) —
+         needs the engines' untouched armed levels. Tests: t_bn_others (the new defaults), t_smc_bot, t_smc_ui,
+         t_gatefill_ui, t_btgate — OK.

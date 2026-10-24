@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.698"
+APP_VERSION = "0.99.699"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -33020,7 +33020,7 @@ def api_cas_status():
 # levels: an unfilled fair-value gap on 4h / 1d / 1w, an untouched swing low / high on 1d / 1w, an order block on
 # 4h / 1d; OI / funding / crowd triggers, 12 classic indicators (Supertrend, Ichimoku, MACD, RSI divergence…). In the
 # same honest walk-forward (a yearly model on the bot's 127 coins, the 84 newer coins never trained on) only the SMC
-# levels held on both sets: the top 1% of first touches by the model — ~10 trades a month, +0.67R, WR 59%, every year
+# levels held on both sets: the top 1% of first touches by the model — ~10 trades a month, +0.67R, WR 59%, every year (v0.99.699: the honest order of the touches — +0.42R, WR 53%)
 # 2022–26 in plus; the check coins +0.58R. Alone weaker than 📐 EMA, but trades in twice as many weeks (37% vs 20%);
 # EMA + P/R + SMC at a quarter of EMA's risk: 22 trades a month instead of 12, a trade in 55% of the weeks, the
 # growth at an equal 1-in-10 drawdown the same or a bit higher. A limit at the level (the first touch in its period),
@@ -34897,10 +34897,10 @@ def _dlm_place_exits(t):
 # the stop and the take on the exchange (closePosition triggers), isolated margin, the leverage by the stop (the bot's
 # 1.5x buffer); one position a coin on the whole account (a position or an armed ⚡ limit on the coin -> no trade); the
 # time exit / P/R's close stop at the market; EMA's partial take reduce-only + the stop to the entry. The risk: the
-# module's own field, empty -> BN_OTHERS_RISK (2%: tools/winrate port697.py — ⚡ 4% + the three at 2% the best together)
+# module's own field, empty -> BN_OTHERS_RISK (v0.99.699: P/R 2%, SMC 1%, EMA 0.5% — port699b.py on the honest lists)
 BN_OTHERS = os.environ.get("VP_BN_OTHERS", "0") == "1"
 BN_OTHERS_MODES = ("prv", "smc", "emw")
-BN_OTHERS_RISK = 2.0
+BN_OTHERS_RISK = {"prv": 2.0, "smc": 1.0, "emw": 0.5}   # v0.99.699 — the honest lists (port699b.py): ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
 BNO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_bn_others.json")
 _BNO = {"pos": {}}   # Gate contract -> the Binance position this bot opened for P/R / SMC / EMA
 _bno_lock = threading.Lock()
@@ -34974,7 +34974,7 @@ def bno_open(mode, symbol, direction, entry, sl, tp):
     mmr = tiers[0][1] if tiers else SCALP_DEFAULT_MMR_PCT
     tb = {bsym: tiers} if tiers else None
     acct = bnf_account()
-    risk = float(MODULE_RISK_PCT.get(mode) or BN_OTHERS_RISK)
+    risk = float(MODULE_RISK_PCT.get(mode) or BN_OTHERS_RISK.get(mode, 1.0))
     margin, lev, skip = compute_risk_based_position(direction, e, slp, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb)
     if not skip and margin > acct["free"] * 0.9:   # the free margin: the risk scaled down to what the account carries
         if acct["free"] <= 1:
@@ -39754,7 +39754,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow subRow">
         <div>
           <div class="label">↳ 🔄 P/R, 🧱 SMC, 📐 EMA — тоже на Binance</div>
-          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, изолированная маржа; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто = 2%: на истории ⚡ 4% + эти три по 2% вместе дают в ~3 раза больше, чем один ⚡, при той же просадке. Включается вместе с автоторговлей самих модулей</div>
+          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, изолированная маржа; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто: P/R 2%, SMC 1%, EMA 0.5%. На истории (честный отбор сделок) ⚡ 4% вместе с ними — медиана за год примерно вдвое больше, чем один ⚡, при той же просадке; без ⚡ эти три слабые. Включается вместе с автоторговлей самих модулей</div>
         </div>
         <label class="switch"><input type="checkbox" id="setBnOthers"><span class="switchSlider"></span></label>
       </div>
