@@ -20568,3 +20568,12 @@ v0.99.701 - ⚡ a virtual trade says why it is not on the exchange (the user: "�
          bot's default — the orders are only logged); the order's own skip reason (no room, the coin busy, under the
          exchange minimum, the price far through the level while the bot was down...); placed before the bot started.
          Test: t_dlm_ui (a virtual trade in dry-run shows the reason), t_dlm_bot — OK.
+v0.99.702 - ⚡ the real limits armed earlier (the user: "открыта 1, но по факту 0 ... не dry run"): the bot keeps the orders and
+         puts a limit on Binance once the price is within DLM_ARM_ATR of it (polled every 5 s, paused while the 2h / 4h
+         scans run). At 0.3 ATR a fast spike through the level beat it — on the 1m candles of 352 backtest fills
+         (arm_miss.py) the price was seen within 0.3 ATR before the touch only in ~80%: a fifth of the backtest's trades
+         missed live (and as good: +0.26R, WR 85%); within 1 ATR — 98%. Now armed at 1.0 ATR (DLM_ARM_ATR), off again
+         beyond 1.6 (DLM_DISARM_ATR); the price already 0.3 ATR through a waiting order's level -> no trade as before
+         (DLM_THROUGH_ATR, its own constant now). A virtual open trade from before v0.99.701 also shows its reason (from
+         its order, dlm_stats); the reason texts clearer ("цена проскочила лимитку раньше, чем бот выставил её на биржу").
+         Tests: t_dlm_bot, t_dlm_binance, t_dlm_ui — OK.

@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.701"
+APP_VERSION = "0.99.702"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -34514,11 +34514,13 @@ def _dlm_why_virtual(o):
         return "автоторговля ⚡ выключена"
     if r.get("status") == "DRY_RUN" or AUTOTRADE_DRY_RUN:
         return "включена «Бумажная торговля (dry-run)» в настройках — ордера на биржу не отправляются; выключите её, чтобы торговать"
+    if not o:
+        return "причина не сохранилась (лимитки уже нет в памяти бота)"
     if r.get("detail"):
         return str(r["detail"])[:160]
     if int(o.get("t0") or 0) < _PROC_START - 60:
         return "лимитка поставлена до запуска бота / включения автоторговли"
-    return "цена прошла уровень между проверками бота — лимитка не успела встать на биржу"
+    return "цена проскочила уровень прострелом между проверками бота — лимитка не успела встать на биржу"
 
 
 def _dlm_open_trade(o, t_fill_bar, fill, real=None, t1h=None):
@@ -34747,8 +34749,9 @@ def _dlm_take_watch(t, mark=None, now=None):
 
 
 # ---- the exchange side: a real GTC limit, then the stop (trigger) and the take (a reduce-only limit = maker) ----
-DLM_ARM_ATR = float(os.environ.get("VP_DLM_ARM_ATR", "0.3"))   # v0.99.691 — a real limit goes on the exchange when the price is this close
-DLM_DISARM_ATR = 1.0   # ... and comes off again (back to waiting) when the price goes this far from it
+DLM_ARM_ATR = float(os.environ.get("VP_DLM_ARM_ATR", "1.0"))   # v0.99.691 — a real limit goes on the exchange when the price is this close (v0.99.702: 0.3 -> 1.0 ATR — at 0.3 a fast spike through the level beat the 5 s polls: ~20% of the backtest's fills missed live, arm_miss.py on 1m; at 1.0 ~2%)
+DLM_DISARM_ATR = 1.6   # ... and comes off again (back to waiting) when the price goes this far from it (v0.99.702: 1.0 -> 1.6)
+DLM_THROUGH_ATR = 0.3   # v0.99.702 — the price already this far through a waiting order's level: no trade (another entry than the research's)
 
 
 def _dlm_prices(syms):
@@ -34815,8 +34818,8 @@ def _dlm_arm(now):
         d = dist(o)
         if d > DLM_ARM_ATR:
             break
-        if d < -DLM_ARM_ATR:   # far through the level (the bot was down / no prices): a fill now would be another trade
-            o["real"] = {"status": "SKIPPED", "detail": "цена ушла за лимитку без бота (нет цен / бот не работал)"}
+        if d < -DLM_THROUGH_ATR:   # far through the level (the bot was down / no prices): a fill now would be another trade
+            o["real"] = {"status": "SKIPPED", "detail": "цена проскочила лимитку раньше, чем бот выставил её на биржу (резкий прострел, бот был занят пересчётом или не работал)"}
             continue
         try:
             dlm_real_place(o)
@@ -35532,6 +35535,8 @@ def dlm_stats():
         trades = list(_DLM["trades"])
         orders = [o for o in _DLM["orders"] if o["status"] == "OPEN"]
         scan, err = _DLM.get("scan"), _DLM.get("err")
+    with _dlm_lock:
+        _ord = {o["id"]: o for o in _DLM["orders"]}   # v0.99.702 — a virtual trade's order (its skip reason)
     done = [t for t in trades if t["status"] == "CLOSED" and t.get("r") is not None]
     fin = [t for t in done if t.get("rv") == DLM_MODEL_VER]   # v0.99.687 — the 4h trades; the 15m module's apart
     old = [t for t in done if t.get("rv") != DLM_MODEL_VER]
@@ -35546,7 +35551,8 @@ def dlm_stats():
             "model": dict({k: m.get(k) for k in ("ver", "q", "trained_to", "rule", "research", "side_cap", "liq_buf")},
                           streams=[{k: x.get(k) for k in ("name", "tf", "anchor", "depth_atr", "thr", "alive_bars", "take_atr", "stop_atr", "hold_bars", "far_take_atr", "pull_atr", "hard_stop_atr", "stop_mode", "close_h")} for x in m.get("streams") or []]) if m else None,
             "err": err, "scan": scan, "orders": orders[:40], "orders_n": len(orders),
-            "open": [t for t in trades if t["status"] == "OPEN"][-40:],
+            "open": [dict(t, why=t.get("why") or (_dlm_why_virtual(_ord.get(t["id"]) or {}) if not t.get("real") else None))
+                     for t in trades if t["status"] == "OPEN"][-40:],   # v0.99.702 — the reason also for a trade opened before v0.99.701
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for t in fin if t["result"] == "WIN") / len(fin), 1) if fin else None,
             "sum": round(sum(rs), 2) if rs else None, "per_day": round(len(fin) / days, 1) if days else None,
             "real_n": len(real), "real_sum": round(sum(t["r"] for t in real), 2) if real else None,
@@ -43751,7 +43757,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
       <div class="zsub">Сделки посчитаны по часовым свечам Binance: стоп — только если свеча своего графика (4ч у 4ч-сделок, 2ч у 2ч) закрылась за ним; фитили и часовые закрытия за стопом не выбивают, от обвала — аварийный стоп 3 ATR на бирже. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}% с плечом, как у бота (ликвидация в ${mo.liq_buf || 1.25}× дальше аварийного стопа — маржа ограничивает число сделок), без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 4841)}</b>, худшие 10% ~${usd(mo.year_p10 || 1779)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 3198)}), последние 12 месяцев ~${usd(mo.last12 || 6051)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
       <div class="zbanner warn">Просадка: при обвале рынка счёт может временно упасть на 60–70% от пика — 24–25 мая 2025 за два дня стопы закрыли 19 сделок 4ч (−19R, при 4% на сделку это около −50%), с 2ч сделками просадки ещё глубже. Потом счёт восстанавливался, но к такому надо быть готовым и не повышать риск после серии стопов.</div>
       ${d.risk_set && d.risk_set > 6 ? `<div class="zbanner warn">Риск ${d.risk}% на сделку при до ${d.max_pos || 20} сделок сразу — это до ${Math.round(d.risk * (d.max_pos || 20))}% счёта под стопами одновременно. Лучше всего по деньгам — 3–4%: выше денег даже меньше (маржи хватает на меньшее число сделок), а просадки глубже.</div>` : ''}
-      ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} (бот держит их у себя и выставляет на бирже, когда цена подошла на 0.3 ATR — так места и маржа не заняты далёкими лимитками) — переключатель «↳ ⚡ Лимитки 4ч+2ч» в автоторговле; риск — поле «⚡» (пусто = 4%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
+      ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} (бот держит их у себя и выставляет на бирже, когда цена подошла на 1 ATR — так места и маржа не заняты далёкими лимитками) — переключатель «↳ ⚡ Лимитки 4ч+2ч» в автоторговле; риск — поле «⚡» (пусто = 4%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
   }
   let h = card(`⚡ Лимитки 4ч+2ч ${pill}`, top);
   {   // v0.99.684 — the exchange: Gate or Binance (the keys, the balance)
