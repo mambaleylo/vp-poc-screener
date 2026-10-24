@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.693"
+APP_VERSION = "0.99.694"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4163,7 +4163,7 @@ def compute_max_safe_leverage(direction, sl_distance_pct, mmr_pct, leverage_cap,
 
 
 def compute_risk_based_position(direction, entry, sl, leverage_cap, mmr_pct, total_equity, risk_pct=None,
-                                 symbol=None, tiers_by_symbol=None):
+                                 symbol=None, tiers_by_symbol=None, safety_margin=None):
     """v0.99.102 — the new, fully-automatic replacement for both manual
     leverage AND manual position-size selection, per direct user
     confirmation ("максимально безопасное плечо → минимальный margin
@@ -4233,7 +4233,8 @@ def compute_risk_based_position(direction, entry, sl, leverage_cap, mmr_pct, tot
         if tier_lev is not None:
             real_leverage_cap = min(leverage_cap, tier_lev) if leverage_cap else tier_lev
 
-    leverage = compute_max_safe_leverage(direction, sl_distance_pct, real_mmr_pct, real_leverage_cap)
+    leverage = compute_max_safe_leverage(direction, sl_distance_pct, real_mmr_pct, real_leverage_cap,
+                                         safety_margin=safety_margin)   # v0.99.694 — ⚡: its own buffer at the emergency stop
     if leverage is None:
         return 0, 0, (f"даже плечо 1x не удерживает стоп ({sl_distance_pct:.3f}%) "
                        f"в безопасной зоне от ликвидации — сделка пропущена")
@@ -34769,6 +34770,15 @@ def _dlm_arm(now):
             o["real"] = {"status": "SKIPPED", "detail": "цена дошла до лимитки, когда места не было (монета занята / 20 сделок)"}
 
 
+def _dlm_liq_buf():
+    """v0.99.694 — the liquidation at this many times the exchange stop's distance (the emergency stop): the model's
+    "liq_buf" (the backtest's money uses the same), else the bot's 1.5"""
+    try:
+        return float((_DLM.get("model") or {}).get("liq_buf") or SCALP_SAFETY_MARGIN)
+    except (TypeError, ValueError):
+        return SCALP_SAFETY_MARGIN
+
+
 def _dlm_size_stop(o, rule):
     """the stop the position is computed at -> (price, risk factor): a close1h stream — the emergency stop (the exchange's;
     the leverage must keep the liquidation beyond it) with the risk x hard / stop, so the loss at the 1h-close stop is
@@ -34818,14 +34828,14 @@ def dlm_real_place(o):
         sl, kx = _dlm_size_stop(o, rule)   # v0.99.692 — at the emergency stop, the risk x its distance / the stop's
         risk = round(risk * kx, 4)
         margin, lev, skip = compute_risk_based_position(direction, o["lv"], sl, cap, mmr, equity, risk_pct=risk, symbol=sym,
-                                                        tiers_by_symbol={sym: tiers} if tiers else None)
+                                                        tiers_by_symbol={sym: tiers} if tiers else None, safety_margin=_dlm_liq_buf())
         contracts = 0
         if not skip and margin:   # the margin within the free balance (many positions at once), the risk scaled down
             free = get_futures_wallet_balance()
             if free and margin > free * 0.9:
                 risk = round(risk * free * 0.9 / margin, 2)
                 margin, lev, skip = compute_risk_based_position(direction, o["lv"], sl, cap, mmr, equity, risk_pct=risk, symbol=sym,
-                                                                tiers_by_symbol={sym: tiers} if tiers else None)
+                                                                tiers_by_symbol={sym: tiers} if tiers else None, safety_margin=_dlm_liq_buf())
         if not skip:
             contracts, _n, _m, skip = compute_contracts_from_margin(sym, o["lv"], margin, lev)
         if skip or not contracts:
@@ -34896,13 +34906,13 @@ def dlm_bn_place(o):
     acct = bnf_account()
     risk = round(dlm_risk(acct["equity"]) * kx, 4)
     tb = {bsym: tiers} if tiers else None
-    margin, lev, skip = compute_risk_based_position(direction, lv, sl, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb)
+    margin, lev, skip = compute_risk_based_position(direction, lv, sl, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb, safety_margin=_dlm_liq_buf())
     if not skip and margin > acct["free"] * 0.9:   # the free margin checked: the risk scaled down to what the account carries
         if acct["free"] <= 1:
             skip = f"нет свободной маржи (свободно {acct['free']:.2f}$)"
         else:
             risk = round(risk * acct["free"] * 0.9 / margin, 2)
-            margin, lev, skip = compute_risk_based_position(direction, lv, sl, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb)
+            margin, lev, skip = compute_risk_based_position(direction, lv, sl, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb, safety_margin=_dlm_liq_buf())
     if skip:
         o["real"] = {"status": "SKIPPED", "ex": "binance", "detail": str(skip)[:160]}
         return
@@ -35025,7 +35035,7 @@ def dlm_bn_tick(orders, trades):
             nostop = not r.get("sl_id") and now - t["t_in"] > 30   # Binance refused the stop for 30 s: no position left without one
             if nostop:
                 send_telegram(f"⚠️ ⚡ {bsym}: Binance не принял стоп — позиция закрыта по рынку", category="dlm")
-            cs = None if nostop or now >= t["until"] else _dlm_close_stop(t, now)   # v0.99.692 — a 1h close beyond the stop
+            cs = None if nostop or now >= t["until"] else _dlm_close_stop(t, now)   # v0.99.692 — a 1h close beyond the stop (v0.99.694: the close of the chart's candle)
             if now >= t["until"] or nostop or cs is not None:   # the time exit: the take / stop off, the rest at the market
                 _dlm_bn_cancel_exits(t)
                 try:
@@ -35043,7 +35053,7 @@ def dlm_bn_tick(orders, trades):
                               "r": _dlm_r_h(t, px, (now - t["t_in"]) / 3600, kind) if t.get("smode") else _dlm_r(t, px, int(t.get("hold") or 16) - 1, kind)})
                 changed = True
                 notify_trade_result("dlm", t["symbol"], t["direction"], t["entry"], px, kind, t["r"], real=True,
-                                    note=f"⚡ лимитка {DLM_TF.get(t.get('bs'), '4h')} · Binance" + (" · час закрылся за стопом" if cs is not None else ""))
+                                    note=f"⚡ лимитка {DLM_TF.get(t.get('bs'), '4h')} · Binance" + (" · свеча закрылась за стопом" if cs is not None else ""))
             continue
         # no position: which exit took it (a just-filled position may not show yet — given a minute unless the take filled)
         win = False
@@ -35170,7 +35180,7 @@ def dlm_real_tick():
                             _dlm_place_exits(t)
                         except Exception as e:
                             log_error(f"dlm take 1 ATR {sym}: {e}")
-                cs = None if now >= t["until"] else _dlm_close_stop(t, now)   # v0.99.692 — a 1h close beyond the stop
+                cs = None if now >= t["until"] else _dlm_close_stop(t, now)   # v0.99.692 — a 1h close beyond the stop (v0.99.694: the close of the chart's candle)
                 if now >= t["until"] or cs is not None:   # the time exit: the take / stop off, the rest at the market
                     if r.get("tp_kind") == "limit":
                         _dlm_cancel_order(r["tp_id"])
@@ -35188,7 +35198,7 @@ def dlm_real_tick():
                                   "r": _dlm_r_h(t, px, (now - t["t_in"]) / 3600, kind) if t.get("smode") else _dlm_r(t, px, int(t.get("hold") or 16) - 1, kind)})
                     r["close"] = str(res)[:120]; changed = True
                     notify_trade_result("dlm", sym, t["direction"], t["entry"], px, kind, t["r"], real=True,
-                                        note=f"⚡ лимитка {DLM_TF.get(t.get('bs'), '4h')}" + (" · час закрылся за стопом" if cs is not None else ""))
+                                        note=f"⚡ лимитка {DLM_TF.get(t.get('bs'), '4h')}" + (" · свеча закрылась за стопом" if cs is not None else ""))
                 continue
             # no position: which exit took it (a just-filled position may not show yet — given a minute unless the take filled)
             win = False
@@ -39510,7 +39520,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">Работа (4ч + 2ч — 210 монет)</div>
-          <div class="sub">на закрытии каждой 4ч и 2ч свечи: у каждого вида своя модель, лучший ~1% моментов — лимитка (4ч: на 1 ATR за тенью свечи, 2ч: на 2 ATR от закрытия), живёт 4 свечи; исполнилась — тейк 1.1 ATR, стоп: часовая свеча закрылась за 2 ATR (фитили не выбивают; аварийный стоп 3 ATR на бирже), выход через 32 свечи. Винрейт ~79%, ~3 сделки в день; без реальных сделок — виртуальный учёт</div>
+          <div class="sub">на закрытии каждой 4ч и 2ч свечи: у каждого вида своя модель, лучший ~1% моментов — лимитка (4ч: на 1 ATR за тенью свечи, 2ч: на 2 ATR от закрытия), живёт 4 свечи; исполнилась — тейк 1.1 ATR, стоп: свеча графика (4ч / 2ч) закрылась за 2 ATR (фитили не выбивают; аварийный стоп 3 ATR на бирже), выход через 32 свечи. Винрейт ~80%, ~3 сделки в день; без реальных сделок — виртуальный учёт</div>
         </div>
         <label class="switch"><input type="checkbox" id="setDlm"><span class="switchSlider"></span></label>
       </div>
@@ -43423,9 +43433,9 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
       ${zBars(rows, v => sgR(+(+v).toFixed(3)))}
       <div class="zstrip"><span>WR <b>~${un.wr || 70}%</b></span><span>в среднем <b>${sgR(un.avg || 0.235)}</b></span><span>последние 12 мес <b>${sgR(un.last12_avg || 0.24)}</b></span><span><b>~65</b> сделок в месяц</span></div>
       ${d.streams && (d.streams.wick4h.n || d.streams.close2h.n) ? `<div class="dim" style="font-size:var(--fs-xs);">живые: 4ч ${d.streams.wick4h.n} (${d.streams.wick4h.n ? sgR(d.streams.wick4h.avg) + ', WR ' + d.streams.wick4h.wr + '%' : '—'}) · 2ч ${d.streams.close2h.n} (${d.streams.close2h.n ? sgR(d.streams.close2h.avg) + ', WR ' + d.streams.close2h.wr + '%' : '—'})</div>` : ''}
-      <div class="zsub">Сделки посчитаны по часовым свечам Binance: стоп — только если часовая свеча закрылась за ним (61% прежних стопов были фитилями, которые закрывались обратно, и почти половина таких сделок потом шла в тейк). Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%, без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 5458)}</b>, худшие 10% ~${usd(mo.year_p10 || 1780)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 3465)}), последние 12 месяцев ~${usd(mo.last12 || 4503)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
+      <div class="zsub">Сделки посчитаны по часовым свечам Binance: стоп — только если свеча своего графика (4ч у 4ч-сделок, 2ч у 2ч) закрылась за ним; фитили и часовые закрытия за стопом не выбивают, от обвала — аварийный стоп 3 ATR на бирже. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}% с плечом, как у бота (ликвидация в ${mo.liq_buf || 1.5}× дальше аварийного стопа — маржа ограничивает число сделок), без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 3222)}</b>, худшие 10% ~${usd(mo.year_p10 || 1407)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 2203)}), последние 12 месяцев ~${usd(mo.last12 || 4457)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
       <div class="zbanner warn">Просадка: при обвале рынка счёт может временно упасть на 60–70% от пика — 24–25 мая 2025 за два дня стопы закрыли 19 сделок 4ч (−19R, при 4% на сделку это около −50%), с 2ч сделками просадки ещё глубже. Потом счёт восстанавливался, но к такому надо быть готовым и не повышать риск после серии стопов.</div>
-      ${d.risk_set && d.risk_set > 6 ? `<div class="zbanner warn">Риск ${d.risk}% на сделку при до ${d.max_pos || 20} сделок сразу — это до ${Math.round(d.risk * (d.max_pos || 20))}% счёта под стопами одновременно. Лучше всего по деньгам — 4–6%: выше денег не прибавляется (не хватает маржи), а просадки глубже.</div>` : ''}
+      ${d.risk_set && d.risk_set > 6 ? `<div class="zbanner warn">Риск ${d.risk}% на сделку при до ${d.max_pos || 20} сделок сразу — это до ${Math.round(d.risk * (d.max_pos || 20))}% счёта под стопами одновременно. Лучше всего по деньгам — 3–4%: выше денег даже меньше (маржи хватает на меньшее число сделок), а просадки глубже.</div>` : ''}
       ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} (бот держит их у себя и выставляет на бирже, когда цена подошла на 0.3 ATR — так места и маржа не заняты далёкими лимитками) — переключатель «↳ ⚡ Лимитки 4ч+2ч» в автоторговле; риск — поле «⚡» (пусто = 4%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
   }
   let h = card(`⚡ Лимитки 4ч+2ч ${pill}`, top);

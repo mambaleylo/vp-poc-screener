@@ -109,8 +109,8 @@ V.get_contract_spec = lambda s: {"leverage_max": 50, "order_price_round": 0.0001
 V.get_risk_limit_tiers_for_symbol = lambda s: None
 V.get_futures_total_equity = lambda: 1000.0
 V.get_futures_wallet_balance = lambda: 1000.0
-risks = []
-V.compute_risk_based_position = lambda *a, **k: (risks.append(k.get("risk_pct")), (50.0, 10, None))[1]
+risks = []; sms = []; _crbp = V.compute_risk_based_position
+V.compute_risk_based_position = lambda *a, **k: (risks.append(k.get("risk_pct")), sms.append(k.get("safety_margin")), (50.0, 10, None))[2]
 V.compute_contracts_from_margin = lambda *a, **k: (37, 1, 50.0, None)
 V.set_leverage = lambda *a, **k: None
 V.get_tickers = lambda: []
@@ -140,13 +140,15 @@ V.dlm_real_tick(); V.dlm_real_tick()
 win = ta["status"] == "CLOSED" and ta["result"] == "WIN" and ta["r"] > 0
 # a short whose 1h candle closes beyond the 2 ATR stop: out at the market, LOSS (a wick beyond it and back: nothing)
 i_ = mk("III_USDT", -1, 4.0); V._DLM["orders"].append(i_); V.dlm_real_place(i_); X_.fill(i_["real"]["id"]); V.dlm_real_tick()
-ti = next(t for t in V._DLM["trades"] if t["symbol"] == "III_USDT"); h0 = int(time.time()) // 3600 * 3600 - 7200
+ti = next(t for t in V._DLM["trades"] if t["symbol"] == "III_USDT")
+h0 = int(time.time()) // 14400 * 14400 - 3 * 3600   # v0.99.694 — the hours h0, h0+1h; h0+2h ends a 4h candle (UTC)
 ti["t1h"] = h0; ti["cs_bar"] = 0
-H1K["III_USDT"] = [{"time": h0, "open": 4.0, "high": 4.025, "low": 3.99, "close": 4.005}]   # a wick to 4.025 (> the stop 4.02), the close back
+H1K["III_USDT"] = [{"time": h0, "open": 4.0, "high": 4.025, "low": 3.99, "close": 4.005},   # a wick to 4.025 (> the stop 4.02), the close back
+                   {"time": h0 + 3600, "open": 4.005, "high": 4.026, "low": 4.0, "close": 4.022}]   # an hour closes beyond 4.02 — not a 4h close
 V.dlm_real_tick()
-wick_ok = ti["status"] == "OPEN"
-H1K["III_USDT"].append({"time": h0 + 3600, "open": 4.005, "high": 4.026, "low": 4.0, "close": 4.022})   # the close beyond 4.02
-ti["cs_bar"] = h0 - 30   # due again: both hours looked at
+wick_ok = ti["status"] == "OPEN" and ti.get("ch") == 4   # the 4h stream: the stop on its chart's 4h close
+H1K["III_USDT"].append({"time": h0 + 7200, "open": 4.022, "high": 4.03, "low": 4.01, "close": 4.021})   # the 4h candle closes beyond 4.02
+ti["cs_bar"] = h0 - 30   # due again: the three hours looked at
 V.dlm_real_tick()
 cstop = wick_ok and ti["status"] == "CLOSED" and ti["result"] == "LOSS" and ti.get("close_stop") and "III_USDT" in closed
 tb_["until"] = time.time() - 1          # the second trade runs out of time
@@ -174,6 +176,15 @@ arm_ok = arm_ok and (f_.get("real") or {}).get("status") == "SKIPPED" and not (f
 PX["EEE_USDT"] = 5.02   # 2 ATR away: the armed limit comes off, the order waits again
 V.dlm_real_tick()
 late_ok = arm_ok and e_.get("real") is None and e_["status"] == "OPEN"
-print(f"(4) placed at 4% {placed} · exits {exits_ok} · take 1.1 ATR + the emergency stop 3 ATR {bool(tp_ok)} · WIN {win} · a 1h close beyond the stop -> out (a wick: no) {cstop} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped} · armed near the price / waits far / no room at the touch -> none / off when far {late_ok}")
+print(f"(4) placed at 4% {placed} · exits {exits_ok} · take 1.1 ATR + the emergency stop 3 ATR {bool(tp_ok)} · WIN {win} · a 4h close beyond the stop -> out (a wick / a 1h close: no) {cstop} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped} · armed near the price / waits far / no room at the touch -> none / off when far {late_ok}")
 ok &= placed and exits_ok and bool(tp_ok) and cstop and win and tx and cx and not left and capped and late_ok
+# (5) v0.99.694 — the leverage: the liquidation at the model's "liq_buf" x the emergency stop's distance (the backtest's money
+# uses the same); the deployed model's value, a lower one -> more leverage, less margin
+m_ = V._DLM.get("model") or {}; buf0 = m_.get("liq_buf")
+V._DLM["model"] = dict(m_, liq_buf=1.5); l15 = _crbp("LONG", 1.0, 0.94, 50, 0.4, 1000, risk_pct=6, safety_margin=V._dlm_liq_buf())
+V._DLM["model"] = dict(m_, liq_buf=1.25); l125 = _crbp("LONG", 1.0, 0.94, 50, 0.4, 1000, risk_pct=6, safety_margin=V._dlm_liq_buf())
+V._DLM["model"] = m_
+lev_ok = buf0 == V.dlm_model().get("liq_buf") and sms and all(x == buf0 for x in sms) and l15[2] is None and l125[2] is None and l125[1] > l15[1] and l125[0] < l15[0]
+print(f"(5) the model's liquidation buffer {buf0}: leverage at 1.5x {l15[1]}, at 1.25x {l125[1]} (margin ${l15[0]:.0f} -> ${l125[0]:.0f}) {lev_ok}")
+ok &= lev_ok
 print("ALL OK" if ok else "FAILED"); sys.exit(0 if ok else 1)

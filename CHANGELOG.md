@@ -20460,3 +20460,27 @@ v0.99.693 - ⚡ the trade chart (the user's TLM 2h long of 28.09: "почему 
          hour (now the one holding it). The 3 ATR emergency stop (the list's "sl2", a live trade's "hsl") now drawn
          ("ав"), the SL legend says the 1h close. The trade itself was right: out by time at −0.54R, the stop 2 ATR,
          the take 1.1 ATR. Test: t_dlm_ui (that TLM trade: the entry / exit candles, the emergency stop line).
+v0.99.694 - ⚡ the stop on the close of the chart's own candle (the 4h trades: a 4h close beyond 2 ATR, the 2h: a 2h close;
+         was any 1h close). The user: "куча стопов ложных" (C98: two wicks below the stop let through, then a 1h
+         close below it out, the 4h candle closing back). Of the 692 1h-close stops 16% would have reached the take
+         without them (closetf693.py). The candle length (closetf2.py): 2h / 4h / the chart's better than 1h, 3h / 6h /
+         12h not — the chart's own close the best: better than the 1h close in 92% of the year windows with the bot's
+         leverage; WR 80%, +0.191R (692: 79%, +0.187R); on 1m candles (40 coins, 10.2024 on, rule694_1m.py) +0.275R vs
+         +0.270R. The emergency stop stays 3 ATR (3.5 / 4: fewer emergency stops but less leverage — less money).
+         The money corrected: the research sim had the leverage by the 2 ATR stop, the bot keeps the liquidation 1.5x
+         beyond the EMERGENCY stop (3 ATR) — 1.5x the margin a trade, so fewer of the 20 trades fit. With the bot's
+         leverage (sim2, closetf4.py) the 692 rule: a year from $100 the median $2 578 (was shown $5 458); this rule
+         $3 222, the worst 10% $1 407, harsh $2 203, the last 12 months $4 457, the drawdown 60%. Checked again the
+         692 decision (the user: "но ведь когда внедрялась система с запасным стопом ты сказал что так лучше",
+         closetf5.py / closetf6.py): with the bot's leverage the old stop by a touch (2 ATR, take 1.1) had more money
+         by the median ($4 997) and in 6 of 8 quarters of 2024–25, the close stops in the last two (the last 12
+         months $1 580 vs $4 457) and a higher win rate (75% vs 80%). With the liquidation 1.25x beyond the emergency
+         stop (closetf7.py) the chart's close wins on all (the median $4 841 vs $4 307, the last 12 months $6 051 vs
+         $2 074, the drawdown 66% vs 77%) — the user decides; the model's "liq_buf" (now 1.5, as before) is the ⚡
+         leverage's buffer (_dlm_liq_buf -> compute_risk_based_position(safety_margin=)). The risk 3–4% best now (5–6%:
+         less money — the margin). A reset of the time exit after a stop touch and back to the entry (the user's idea,
+         reset693.py): no gain (it touches only the 2–3% time exits). The bot: the trade's "ch" (the stream's close_h),
+         _dlm_ch_close — the virtual walk and the real close check only at an hour ending a ch-hour candle (UTC). The
+         chart, the texts. Tests: t_dlm_bot ((3) 10/10 backtest trades re-made with the new rule; (4) a wick and a 1h
+         close beyond -> nothing, the 4h close -> out; (5) the leverage by the model's buffer), t_dlm_binance (the same
+         on a fake Binance), t_dlm_ui, t_dlm_coins, t_dlm_parity — OK.
