@@ -20410,9 +20410,11 @@ v0.99.691 - ⚡ the audit (the user: "все ещё раз проверь, по 
          average 1.6 h before the touch, and won the coin / the side's 20 over 2h orders the price reached earlier —
          a look-ahead. By the touch's 1h bar (pool1h.py, honest1h.py, dlm4_export6.py) the pool makes +0.222R (was shown
          +0.238R), a year from $100 at 4%: the median $9 477 (was shown $18 248), the worst 10% $2 168 ($3 633), harsh
-         $6 383 ($11 967). The decisions stand: 4h + 2h with the new take is still the best (4h alone $1 611, the take
-         1 ATR $2 671); the side's cap 20 too (30 / 40 / none: $7 700–8 500). The bot's virtual fills now go by the
-         touch's 1h bar as well (_dlm_touch_time).
+         $6 383 ($11 967). And in the same touch hour the level nearer to that hour's open fills first (the
+         price's real way; the research had taken the higher score — a 2h order then "lost" to a deeper 4h one it in
+         fact beat): +0.187R, the median $4 087, the worst 10% $644, harsh $2 702 (honest2.py, dlm4_export7.py). The decisions stand: 4h + 2h with the new take is still the best (4h alone $1 611, the take
+         1 ATR $2 671); the side's cap 20 too (30 / 40 / none: $7 700–8 500). The bot's virtual fills now go the same way:
+         the touch found on the 1h candles, not waiting for the 4h / 2h bar to close (_dlm_hit).
          (2) no order while a trade of the coin & side was open — the research decides when the price comes: 5% of the
          backtest's trades were missing; now an order is made regardless.
          (3) the virtual trades had no 20-a-side cap: twice the backtest's trades in mid-2026; capped as the research.
@@ -20424,7 +20426,11 @@ v0.99.691 - ⚡ the audit (the user: "все ещё раз проверь, по 
          (5) bn_map looked only in the 15m / 1d candle caches: a ⚡ coin no other module had loaded could not be placed
          on Binance ("монеты нет на Binance") — the test had put a 15m cache in by hand; now any interval.
          (6) a slow 4h scan (the first candles after a restart) could make the 2h scan of the same bar close "stale".
-         After the fixes the replay matches the backtest list (see the commit). Also checked: the features (parity), the
+         After the fixes the replay of this code matches the backtest list: 398 of 400 trades of Jun–Oct 2026 the
+         same (R within 0.0005), 2 + 1 differ (several orders touched in one hour, 15.09).
+         Open: the 2h stream made +0.08R in the 2nd half of 2026 (4h +0.19R) and, its levels nearer, takes the coins
+         from the deeper 4h orders — on the bot's own Jun–Oct 2026 orders 4h alone $100 -> $384 vs both $321 (policy2026.py);
+         over 2023–25 both were better. Being decided on Jan–Oct 2026. Also checked: the features (parity), the
          exits (every matched trade's R within 0.0005), the new labels (newlabel.py reproduces the old ones exactly,
          4 of 1.46M differ on one coin's changed candles). Tests: t_dlm_bot (the arming), t_dlm_binance (armed by the
          tickers on a fake Binance, a 4h-only cache), t_dlm_parity, t_dlm_coins, t_dlm_ui.

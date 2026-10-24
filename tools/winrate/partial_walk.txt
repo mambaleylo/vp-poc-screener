@@ -1,0 +1,45 @@
+@njit
+def walk2(T, O, H, L, C, i1, end_t, s, fill, a, soft, hard, close_mode, size_by, n, far, pf, be):
+    """as wickstop.walk + a partial take: when the price reaches +1 ATR without the dip first, pf of the position is
+    taken there, the rest runs to `far` (be: its stop to the entry); with the dip first the whole at +1 ATR"""
+    risk = size_by * a; hsl = fill - s * hard * a; ssl = fill - s * soft * a
+    tp1 = fill + s * a; tp2 = fill + s * far * a; mae = 0.0; ext = False; pulled = False; left = 1.0; pnl = 0.0; fees = 0.0002 * fill
+    b = i1
+    while b < len(C) and T[b] < end_t:
+        q = b - i1
+        adv = (fill - L[b]) if s > 0 else (H[b] - fill)
+        if (s > 0 and L[b] <= hsl) or (s < 0 and H[b] >= hsl):
+            x = O[b] if (q > 0 and ((s > 0 and O[b] <= hsl) or (s < 0 and O[b] >= hsl))) else hsl
+            pnl += left * s * (x - fill); fees += left * 0.0005 * fill
+            return (pnl - fees - 0.0003 * (q + 1) / 24 * fill) / risk, (1 if left < 1.0 else 0), T[b] + 3600
+        if q > 0:
+            if ext:
+                if (s > 0 and H[b] >= tp2) or (s < 0 and L[b] <= tp2):
+                    pnl += left * s * (tp2 - fill); fees += left * 0.0002 * fill
+                    return (pnl - fees - 0.0003 * (q + 1) / 24 * fill) / risk, 2, T[b] + 3600
+            elif pulled:
+                if (s > 0 and H[b] >= tp1) or (s < 0 and L[b] <= tp1):
+                    pnl += s * (tp1 - fill); fees += 0.0002 * fill
+                    return (pnl - fees - 0.0003 * (q + 1) / 24 * fill) / risk, 1, T[b] + 3600
+            elif (s > 0 and H[b] >= tp1) or (s < 0 and L[b] <= tp1):
+                if n > 0 and max(mae, adv) < n * a:
+                    ext = True
+                    if pf > 0:
+                        pnl += pf * s * (tp1 - fill); fees += pf * 0.0002 * fill; left = 1.0 - pf
+                        if be:
+                            hsl = fill; ssl = fill
+                            if (s > 0 and L[b] <= hsl) or (s < 0 and H[b] >= hsl):   # the worst order: the dip after the touch
+                                fees += left * 0.0005 * fill
+                                return (pnl - fees - 0.0003 * (q + 1) / 24 * fill) / risk, 1, T[b] + 3600
+                else:
+                    pnl += s * (tp1 - fill); fees += 0.0002 * fill
+                    return (pnl - fees - 0.0003 * (q + 1) / 24 * fill) / risk, 1, T[b] + 3600
+        if close_mode and ((s > 0 and C[b] <= ssl) or (s < 0 and C[b] >= ssl)):
+            pnl += left * s * (C[b] - fill); fees += left * 0.0005 * fill
+            return (pnl - fees - 0.0003 * (q + 1) / 24 * fill) / risk, (1 if left < 1.0 else 4), T[b] + 3600
+        if adv > mae: mae = adv
+        if not ext and mae >= n * a: pulled = True
+        b += 1
+    b = min(b, len(C)) - 1
+    pnl += left * s * (C[b] - fill); fees += left * 0.0005 * fill
+    return (pnl - fees - 0.0003 * (b - i1 + 1) / 24 * fill) / risk, 3, T[b] + 3600
