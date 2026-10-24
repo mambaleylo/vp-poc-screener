@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.692"
+APP_VERSION = "0.99.693"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -43086,7 +43086,7 @@ function btRowHtml(t, onclick) {
     <span><span class="dim">${d}</span> <b>${(t.s || '').replace('_USDT', '')}</b> <span class="${t.d > 0 ? 'win' : 'loss'}">${t.d > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${btLabel(t)}${t.k ? ' · ' + (BT_KIND[t.k] || t.k) : ''}</span></span>
     <span style="white-space:nowrap;">${r} ›</span></div>`;
 }
-function btOpen(mod, i) { const t = (window._btData[mod] || [])[i]; if (t) btChart(Object.assign({mod}, t)); }
+function btOpen(mod, i) { const t = (window._btData[mod] || [])[i]; if (t) btChart(Object.assign({mod}, t, mod === 'dlm' && t.sl2 != null && t.hs == null ? {hs: t.sl2} : {})); }   // v0.99.693 — ⚡ the 3 ATR emergency stop of the list drawn
 function btLiveOpen(mod, i) { const t = (window._btLive[mod] || [])[i]; if (t) btChart(t); }
 function btFromRbx(t) {   // a live 📈 trade -> the chart's trade
   const e = t.entry != null ? t.entry : t.px;
@@ -43106,7 +43106,7 @@ function btFromSmc(t) {   // v0.99.678 — a live 🧱 trade -> the chart's trad
   return {mod: 'smc', s: t.symbol, d: t.side, c: '1h', lvl: t.fam, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
 }
 function btFromDlm(t) {   // v0.99.679 — a live ⚡ trade -> the chart's trade (v0.99.687: 4h candles; the 15m module's own on 15m)
-  return {mod: 'dlm', st: t.bs === 900 ? null : (t.st || 'wick4h'), s: t.symbol, d: t.side, c: t.bs === 900 ? '15m' : (t.bs === 7200 ? '2h' : '4h'), t: t.t0, lv: t.lv, e: t.entry, sl: t.sl, tp: t.tp, f: t.fbar, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+  return {mod: 'dlm', st: t.bs === 900 ? null : (t.st || 'wick4h'), s: t.symbol, d: t.side, c: t.bs === 900 ? '15m' : (t.bs === 7200 ? '2h' : '4h'), t: t.t0, lv: t.lv, e: t.entry, sl: t.sl, hs: t.hsl, tp: t.tp, f: t.fbar, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
 }
 function btFromPrx(t) {
   return {mod: 'prv', s: t.symbol, d: t.side, c: (t.tf || 1) + 'h', t: t.hour, e: t.entry != null ? t.entry : t.px, sl: t.sl, tp: t.tp, hs: t.hs, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
@@ -43135,7 +43135,7 @@ async function btChart(o) {
 }
 function btGateFillNote(o, d) {   // v0.99.668 — the user's IO: a limit filled by Binance's wick that Gate's candles never reached
   if (o.live || d.src !== 'gate' || (d.c && d.c !== o.c) || o.e == null || !(d.bars || []).length) return '';
-  const sec = ({'15m': 0.25, '1h': 1, '4h': 4, '12h': 12, '1d': 24}[o.c] || 1) * 3600;
+  const sec = ({'15m': 0.25, '1h': 1, '2h': 2, '4h': 4, '12h': 12, '1d': 24}[o.c] || 1) * 3600;
   const w1 = o.mod === 'dlm' ? o.t + 3 * ({'4h': 14400, '2h': 7200}[o.c] || 900) : (o.mod === 'emx' || o.mod === 'smc') ? o.t : (o.mod === 'prv' ? o.t + 2 * 3600 : (o.mod === 'rbx' ? (o.f || o.t) : null));
   if (w1 == null) return '';
   const win = d.bars.filter(b => b.time >= o.t && b.time <= w1);
@@ -43158,9 +43158,9 @@ function btDraw(bars, o) {
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
-  const sec = ({'15m': 0.25, '1h': 1, '4h': 4, '12h': 12, '1d': 24}[o.c] || 24) * 3600;   // v0.99.680 — 15m (was taken as a day: the exit dot at the left edge)
+  const sec = ({'15m': 0.25, '1h': 1, '2h': 2, '4h': 4, '12h': 12, '1d': 24}[o.c] || 24) * 3600;   // v0.99.680 — 15m (was taken as a day: the exit dot at the left edge); v0.99.693 — 2h (the same: the exit dot a day early)
   const oi = bars.findIndex(b => b.time >= o.t);
-  const ei = o.mod === 'dlm' && o.f ? bars.findIndex(b => b.time >= o.f) : oi;   // v0.99.680 — ⚡ the entry on the bar the limit filled in, not where it was placed
+  const ei = o.mod === 'dlm' && o.f ? bars.findIndex(b => b.time + sec > o.f) : oi;   // v0.99.680 — ⚡ the entry on the bar the limit filled in, not where it was placed (v0.99.693: the bar holding the fill hour — was the next one)
   const xi = o.x ? bars.findIndex(b => b.time >= o.x - sec) : -1;
   const isL = o.d > 0;
   const hl = [{p: o.e, color: '#ffffff', label: 'вход', tag: 'вх', width: 2, from: ei}, {p: o.sl, color: '#f87171', label: o.hs != null ? 'стоп (закр.)' : 'стоп', tag: 'SL', width: 2, from: ei}];
@@ -43169,7 +43169,7 @@ function btDraw(bars, o) {
   if (o.pt != null) hl.push({p: o.pt, color: '#a7f3d0', label: 'частичная', tag: 'ч', width: 1, from: ei});   // v0.99.654
   if (o.mod === 'dlm' && o.lv != null && oi >= 0 && ei > oi) hl.push({p: o.lv, color: '#ffd54f', label: 'лимитка', tag: 'лим', width: 1, from: oi});   // v0.99.680
   const zones = [], dots = [], series = [], legend = [{text: (BT_CH[o.c] || o.c) + ' свечи', color: '#a6b0c0'}, {text: isL ? 'лонг' : 'шорт', color: isL ? '#34d399' : '#f87171'}];
-  if (o.hs != null) legend.push({text: 'SL — по закрытию свечи · ав — аварийный', color: '#f87171'});
+  if (o.hs != null) legend.push({text: `SL — по закрытию ${o.mod === 'dlm' ? 'часовой ' : ''}свечи · ав — аварийный`, color: '#f87171'});
   if (o.mod === 'dlm') legend.push({text: `лимитка выставлена ${o.t ? new Date(o.t * 1000).toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'}) : ''}, живёт 4 свечи`, color: '#ffd54f'});
   if (o.pt != null) legend.push({text: `ч — частичная фиксация (${o.mod === 'rbx' ? '¼' : '⅓'}), дальше стоп в безубытке`, color: '#a7f3d0'});
   if (ei >= 0) {

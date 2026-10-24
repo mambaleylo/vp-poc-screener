@@ -38,7 +38,19 @@ with sync_playwright() as p:
     pg.locator("#btBox_dlm div[onclick^='btOpen']", has_text="2ч").first.evaluate("e => e.click()"); pg.wait_for_timeout(3000)
     pg.screenshot(path="ui_dlm_chart2h.png")
     t2 = pg.locator("#vgiModalTitle").inner_text(); print("chart 2h:", t2, "· bars asked", sorted(set(seen_ch)))
+    pg.keyboard.press("Escape"); pg.wait_for_timeout(500)
+    # v0.99.693 — the user's TLM 2h long of 28.09 (out by time 30.09 20:00 UTC): its exit dot was drawn a day early (no '2h'
+    # in the chart's bar length), and the 3 ATR emergency stop of the list was not drawn
+    pg.evaluate("() => { const f = emwPanel; emwPanel = (c, box, bars, opt) => { window._dots = opt.dots; window._hl = opt.hlines; return f(c, box, bars, opt); }; }")
+    i_tlm = next(i for i, t in enumerate(_BTD["dlm"]) if t["s"] == "TLM_USDT" and t["t"] == 1790553600)
+    pg.evaluate("() => btOpen('dlm', window._btData.dlm.findIndex(t => t.s === 'TLM_USDT' && t.t === 1790553600))"); pg.wait_for_timeout(3000)
+    pg.screenshot(path="ui_dlm_tlm.png")
+    dots = pg.evaluate("() => window._dots"); hl = pg.evaluate("() => window._hl")
+    tlm = _BTD["dlm"][i_tlm]
+    exit_ok = dots[-1]["t"] == tlm["x"] - 7200 and abs(dots[-1]["p"] - tlm["xp"]) < 1e-12 and dots[0]["t"] == tlm["f"] // 7200 * 7200
+    hs_ok = any(h["tag"] == "ав" and abs(h["p"] - tlm["sl2"]) < 1e-12 for h in hl)
+    print("TLM 2h: entry dot", time.strftime("%d.%m %H:%M", time.gmtime(dots[0]["t"])), "· exit dot", time.strftime("%d.%m %H:%M", time.gmtime(dots[-1]["t"])), "(the exit bar)", exit_ok, "· emergency stop drawn", hs_ok)
     pg.keyboard.press("Escape")
     gone = "setDlmSingle" not in html and "setDlmLadder" not in html and "Лесенка" not in txt
-    print("errors", errs, "· single/ladder gone", gone, "· 4h text", "4ч" in txt and "старый модуль 15м" in txt, "· 2h chart", "2ч" in t2)
+    print("errors", errs, "· TLM exit / emergency stop", exit_ok and hs_ok, "· single/ladder gone", gone, "· 4h text", "4ч" in txt and "старый модуль 15м" in txt, "· 2h chart", "2ч" in t2)
     b.close()

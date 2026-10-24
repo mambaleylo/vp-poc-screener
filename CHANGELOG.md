@@ -20454,3 +20454,9 @@ v0.99.692 - ⚡ the exits for a high win rate (the user: "я просил с х�
          t_dlm_bot (10/10 backtest trades re-made incl. an emergency stop; the real path: the stop at 3 ATR, the take
          1.1, a wick — no exit, a 1h close beyond — out), t_dlm_binance (the same on a fake Binance), t_dlm_ui,
          t_dlm_coins, t_dlm_parity — OK.
+v0.99.693 - ⚡ the trade chart (the user's TLM 2h long of 28.09: "почему тут стоп в 2 раза короче?"): the chart had no
+         '2h' bar length, took it as a day — the exit dot (and the trade box) of every 2h trade a day early, so an
+         exit by time after 32 candles (64h) looked like ~1.3 days; the entry dot was on the 2h candle after the fill
+         hour (now the one holding it). The 3 ATR emergency stop (the list's "sl2", a live trade's "hsl") now drawn
+         ("ав"), the SL legend says the 1h close. The trade itself was right: out by time at −0.54R, the stop 2 ATR,
+         the take 1.1 ATR. Test: t_dlm_ui (that TLM trade: the entry / exit candles, the emergency stop line).
