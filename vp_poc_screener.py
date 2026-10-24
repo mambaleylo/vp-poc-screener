@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.695"
+APP_VERSION = "0.99.696"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -35286,7 +35286,7 @@ def dlm_stats():
             "binance": DLM_BINANCE, "bn_keys": bool(BINANCE_API_KEY and BINANCE_API_SECRET), "bn_check": _BNF.get("check"),   # v0.99.684
             "more_coins": DLM_MORE_COINS, "coins_n": 210 if DLM_MORE_COINS else 127,   # v0.99.686
             "risk": dlm_risk(), "risk_set": MODULE_RISK_PCT.get("dlm"), "max_pos": DLM_MAX_POS,   # v0.99.687
-            "model": dict({k: m.get(k) for k in ("ver", "q", "trained_to", "rule", "research", "side_cap")},
+            "model": dict({k: m.get(k) for k in ("ver", "q", "trained_to", "rule", "research", "side_cap", "liq_buf")},
                           streams=[{k: x.get(k) for k in ("name", "tf", "anchor", "depth_atr", "thr", "alive_bars", "take_atr", "stop_atr", "hold_bars", "far_take_atr", "pull_atr", "hard_stop_atr", "stop_mode", "close_h")} for x in m.get("streams") or []]) if m else None,
             "err": err, "scan": scan, "orders": orders[:40], "orders_n": len(orders),
             "open": [t for t in trades if t["status"] == "OPEN"][-40:],
@@ -43058,13 +43058,44 @@ function btListHtml(mod) {
   const charts = [...new Set(all.map(btKey))];
   const idx = all.map((t, i) => i).filter(i => st.f === 'all' || btKey(all[i]) === st.f);
   const rs = idx.map(i => all[i].r), avg = rs.reduce((a, b) => a + b, 0) / (rs.length || 1), wr = rs.filter(r => r > 0).length / (rs.length || 1) * 100;
+  const m50 = mod === 'dlm' ? dlmMoney50(idx.map(i => all[i]), window._dlmCfg || {risk: 4, max_pos: 20, buf: 1.5}) : null;   // v0.99.696
   const chip = (k, lbl, n) => `<span onclick="btSet('${mod}', 'f', '${k}')" style="display:inline-block;padding:3px 9px;margin:0 6px 6px 0;border-radius:999px;cursor:pointer;border:1px solid var(--line);${st.f === k ? 'background:var(--card);color:var(--tx);' : 'color:var(--tx-3);'}">${lbl} · ${n}</span>`;
   let h = `<div>${chip('all', 'все', all.length)}${charts.length > 1 ? charts.map(c => chip(c, BT_SMC_GRP[c] || BT_EMA_TF[c] || BT_CH[c] || c, all.filter(t => btKey(t) === c).length)).join('') : ''}</div>
-    <div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">${idx.length} сделок · в среднем ${avg > 0 ? '+' : ''}${avg.toFixed(2)}R · WR ${wr.toFixed(0)}% · тап по сделке — график</div>
+    <div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">${idx.length} сделок · в среднем ${avg > 0 ? '+' : ''}${avg.toFixed(2)}R · WR ${wr.toFixed(0)}% · тап по сделке — график${m50 ? ` · у последних ${m50.n} рядом с R — $ сделки и счёт после неё, со $100 при риске ${(window._dlmCfg || {}).risk || 4}% из настроек, до ${(window._dlmCfg || {}).max_pos || 20} сделок сразу (пачки сигналов, маржа)` : ''}</div>
     <div id="btg_${mod}" style="font-size:var(--fs-xs);margin-bottom:6px;">${btGateHtml(mod)}</div>`;
   h += idx.slice(0, st.n).map(i => btRowHtml(all[i], `btOpen('${mod}', ${i})`)).join('');
   if (idx.length > st.n) h += `<div style="text-align:center;margin-top:6px;"><button class="btnNeutral" onclick="btSet('${mod}', 'n', ${st.n + 60})">ещё ${Math.min(60, idx.length - st.n)}</button></div>`;
   return h;
+}
+function dlmMoney50(list, cfg, n = 50) {   // v0.99.696 — the user: "на последних 50 сделках из бэктеста писать сколько было бы
+  // денег со 100$ с учётом пачек сигналов и риском из настроек": the last n trades (by the fill), $100, the risk % of the
+  // equity a trade at the 2 ATR stop, at most max_pos at once, the margin with the bot's leverage (the liquidation buf x
+  // the emergency stop, isolated, up to 20x) — a trade without a free slot is skipped, without the margin it is smaller
+  list.forEach(t => { delete t._usd; delete t._bal; delete t._skip; });
+  const tr = list.filter(t => t.r != null && t.f && t.x && t.e && t.sl).sort((a, b) => a.f - b.f).slice(-n);
+  if (!tr.length) return null;
+  let eq = 100, peak = 100, mdd = 0, skipped = 0, cut = 0;
+  const open = [];
+  const settle = upto => {
+    open.sort((a, b) => a.x - b.x);
+    while (open.length && open[0].x <= upto) {
+      const p = open.shift(); eq += p.ru * p.r; p.t._usd = p.ru * p.r; p.t._bal = eq;
+      peak = Math.max(peak, eq); mdd = Math.max(mdd, 1 - eq / peak);
+    }
+  };
+  for (const t of tr) {
+    settle(t.f);
+    if (open.length >= cfg.max_pos) { skipped++; t._skip = 'нет места'; continue; }
+    const st = Math.max(0.002, Math.abs(t.e - t.sl) / t.e), sth = t.sl2 ? Math.abs(t.e - t.sl2) / t.e : st * 1.5;
+    const lev = Math.min(20, Math.floor(1 / (cfg.buf * sth + 0.0105)));
+    if (lev < 1 || eq <= 0) { skipped++; t._skip = 'нет места'; continue; }
+    let ru = eq * cfg.risk / 100, mg = ru / st / lev;
+    const free = (eq - open.reduce((a, p) => a + p.mg, 0)) * 0.9;
+    if (mg > free) { if (free <= 0) { skipped++; t._skip = 'нет маржи'; continue; } ru *= free / mg; mg = free; cut++; }
+    open.push({x: t.x, r: t.r, ru, mg, t});
+  }
+  settle(Infinity);
+  return {eq: Math.max(0, eq), n: tr.length, skipped, cut, mdd, from: tr[0].f, to: Math.max(...tr.map(t => t.x))};
 }
 function liveCheckHtml(lc) {   // v0.99.648 — the live trades under the current rule vs the backtest
   if (!lc) return '';
@@ -43102,7 +43133,7 @@ function btRowHtml(t, onclick) {
   const r = t.r == null ? '<span class="dim">открыта</span>' : `<span class="${t.r > 0 ? 'win' : (t.r < 0 ? 'loss' : '')}">${t.r > 0 ? '+' : ''}${(+t.r).toFixed(2)}R</span>`;
   return `<div onclick="${onclick}" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
     <span><span class="dim">${d}</span> <b>${(t.s || '').replace('_USDT', '')}</b> <span class="${t.d > 0 ? 'win' : 'loss'}">${t.d > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${btLabel(t)}${t.k ? ' · ' + (BT_KIND[t.k] || t.k) : ''}</span></span>
-    <span style="white-space:nowrap;">${r} ›</span></div>`;
+    <span style="white-space:nowrap;">${t._usd != null ? `<span class="${t._usd > 0 ? 'win' : (t._usd < 0 ? 'loss' : '')}">${t._usd >= 0 ? '+' : '−'}$${Math.abs(t._usd).toFixed(t._bal < 1000 ? 2 : 0)}</span> <span class="dim">→ $${Math.round(t._bal).toLocaleString('ru-RU')}</span> · ` : (t._skip ? `<span class="dim">${t._skip}</span> · ` : '')}${r} ›</span></div>`;
 }
 function btOpen(mod, i) { const t = (window._btData[mod] || [])[i]; if (t) btChart(Object.assign({mod}, t, mod === 'dlm' && t.sl2 != null && t.hs == null ? {hs: t.sl2} : {})); }   // v0.99.693 — ⚡ the 3 ATR emergency stop of the list drawn
 function btLiveOpen(mod, i) { const t = (window._btLive[mod] || [])[i]; if (t) btChart(t); }
@@ -43415,6 +43446,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
   const m = d.model, rs = (m && m.research) || {}, rule = (m && m.rule) || {};
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? `<span class="pill pos">${d.dry ? 'торгует (dry-run)' : 'торгует'}</span>` : '<span class="pill">виртуально</span>');
   const sts = (m && m.streams) || [];
+  window._dlmCfg = {risk: d.risk || 4, max_pos: d.max_pos || 20, buf: (m && m.liq_buf) || 1.5};   // v0.99.696 — the backtest list's money
   const dur = (bars, h) => { const x = bars * h; return x >= 24 ? `${Math.floor(x / 24)} дн${x % 24 ? ' ' + x % 24 + ' ч' : ''}` : `${x} ч`; };
   const stTxt = x => { const h = x.tf === '2h' ? 2 : 4; return `<b>${x.tf === '2h' ? '2ч' : '4ч'}</b> — лимитка на ${x.depth_atr} ATR ${x.anchor === 'wick' ? 'за тенью только что закрытой свечи (под минимумом для лонга, над максимумом для шорта)' : 'от цены закрытия свечи'}, живёт ${x.alive_bars || 4} свечи (${dur(x.alive_bars || 4, h)}); ${x.far_take_atr ? `тейк ${x.far_take_atr} ATR, но если цена сначала уйдёт против на ${x.pull_atr} ATR (раньше, чем дойдёт до +${x.take_atr || 1} ATR) — тейк ${x.take_atr || 1} ATR` : `тейк ${x.take_atr || 1} ATR`}, ${x.stop_mode === 'close1h' ? `стоп — если ${(x.close_h || 1) > 1 ? x.close_h + '-часовая свеча графика' : 'часовая свеча'} закрылась за ${x.stop_atr || 2} ATR (аварийный стоп на бирже — ${x.hard_stop_atr || 3} ATR)` : `стоп ${x.stop_atr || 2} ATR`}, выход через ${dur(x.hold_bars || 32, h)}`; };
   let top = `<div class="dim hintx">Модель смотрит все ${d.coins_n || 210} монет на закрытии каждой свечи и в лучшем ~${m && m.q ? +((1 - m.q) * 100).toFixed(0) : 1}% моментов ставит лимитку — ловит продолжение прострела. Два вида, у каждого своя модель:<br>${sts.length ? sts.map(stTxt).join(';<br>') : stTxt({tf: '4h', anchor: 'wick', depth_atr: 1})}.<br>Если по монете стоят обе — сделкой становится та, что исполнилась первой, вторая снимается. Сделок до ${d.max_pos || 20} сразу, каждая на ${d.risk}% счёта.</div>`;

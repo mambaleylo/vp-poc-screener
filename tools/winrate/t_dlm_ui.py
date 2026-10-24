@@ -51,6 +51,34 @@ with sync_playwright() as p:
     hs_ok = any(h["tag"] == "ав" and abs(h["p"] - tlm["sl2"]) < 1e-12 for h in hl)
     print("TLM 2h: entry dot", time.strftime("%d.%m %H:%M", time.gmtime(dots[0]["t"])), "· exit dot", time.strftime("%d.%m %H:%M", time.gmtime(dots[-1]["t"])), "(the exit bar)", exit_ok, "· emergency stop drawn", hs_ok)
     pg.keyboard.press("Escape")
+    # v0.99.696 — the last 50 backtest trades: next to each one's R its $ and the account after it, from $100 with the
+    # settings' risk, the bunches (20 at once), the margin by the bot's leverage — checked against an independent replica
+    pg.evaluate("() => document.getElementById('vgiModal').classList.remove('open')"); pg.wait_for_timeout(300)
+    pg.evaluate("() => btRender('dlm')"); pg.wait_for_timeout(500)
+    pg.locator("#btBox_dlm").screenshot(path="ui_dlm_m50.png")
+    rows = [l for l in pg.locator("#btBox_dlm").inner_text().split("\n") if "→ $" in l]
+    import re as _re
+    shown = [int(_re.sub(r"\D", "", l.split("→ $")[1].split("·")[0])) for l in rows]
+    rk, mp, buf = V.dlm_risk(), V.DLM_MAX_POS, float(V.dlm_model().get("liq_buf") or 1.5)
+    tr = sorted([t for t in _BTD["dlm"] if t.get("r") is not None], key=lambda t: t["f"])[-50:]
+    eq, op, bal = 100.0, [], []
+    def _settle(upto):
+        global eq
+        for p_ in sorted([p_ for p_ in op if p_[0] <= upto]): eq += p_[1] * p_[2]; op.remove(p_); bal.append(round(eq))
+    for t in tr:   # the same bunches, independently: close what ended, a slot, the margin by the leverage at the emergency stop
+        _settle(t["f"])
+        if len(op) >= mp: continue
+        st = max(0.002, abs(t["e"] - t["sl"]) / t["e"]); sth = abs(t["e"] - t["sl2"]) / t["e"]
+        lev = min(20, int(1 / (buf * sth + 0.0105)))
+        if lev < 1: continue
+        ru = eq * rk / 100; mg = ru / st / lev; free = (eq - sum(p_[3] for p_ in op)) * 0.9
+        if mg > free:
+            if free <= 0: continue
+            ru *= free / mg; mg = free
+        op.append((t["x"], t["r"], ru, mg))
+    _settle(float("inf"))
+    m50_ok = len(rows) >= 20 and all(any(abs(x - b_) <= 1 for b_ in bal) for x in shown) and max(shown) == max(bal)
+    print("rows with $:", len(rows), "· e.g.", rows[0].strip()[:120] if rows else "-", "· python final", bal[-1] if bal else None, m50_ok)
     gone = "setDlmSingle" not in html and "setDlmLadder" not in html and "Лесенка" not in txt
-    print("errors", errs, "· TLM exit / emergency stop", exit_ok and hs_ok, "· single/ladder gone", gone, "· 4h text", "4ч" in txt and "старый модуль 15м" in txt, "· 2h chart", "2ч" in t2)
+    print("errors", errs, "· last 50 money", m50_ok, "· TLM exit / emergency stop", exit_ok and hs_ok, "· single/ladder gone", gone, "· 4h text", "4ч" in txt and "старый модуль 15м" in txt, "· 2h chart", "2ч" in t2)
     b.close()

@@ -20491,3 +20491,10 @@ v0.99.695 - ⚡ the leverage for more money (the user: "меня интерес�
          (60%). The emergency stop is a STOP_MARKET at 3 ATR; the liquidation now 3.75 ATR from the entry (was 4.5):
          the price must jump 0.75 ATR past the triggered stop before it fills. Tests: t_dlm_bot (5) the placement
          passes the model's 1.25, t_dlm_binance, t_dlm_ui, t_dlm_coins, t_dlm_parity — OK.
+v0.99.696 - ⚡ the backtest list in money (the user: "на последних 50 сделках из бэктеста писать сколько было бы денег со 100$
+         с учётом пачек сигналов и риском из настроек ... не строку, а сумму, напротив R по каждой сделке"): next to
+         each of the last 50 trades' R (by the fill; of the chosen filter) its $ and the account after its close, from
+         $100: the risk % from the settings (dlm_risk) at the 2 ATR stop, at most DLM_MAX_POS at once (a bunch beyond
+         it: "нет места"), the margin by the bot's leverage (the liquidation liq_buf x the emergency stop, up to 20x,
+         90% of the free equity — less: the trade smaller, none: "нет маржи"). dlmMoney50 (JS); the status passes the
+         model's liq_buf. Test: t_dlm_ui (the $ of the rows == an independent python replica).
