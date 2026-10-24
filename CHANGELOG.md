@@ -20652,3 +20652,11 @@ v0.99.708 - ⚡ / Binance: the bot on another phone takes over what is on the ex
          EMA 0.5%; the rest 0.5%), the placeholders show them (they said 0.5 / 0.25 — Gate's). Tests: t_dlm_binance (the
          limit with its stop + take and GTD; "a new phone": the limit, a ⚡ position and an SMC-like one taken over, nothing
          placed or cancelled; managed on the next tick), t_dlm_bot, t_dlm_ui, t_bn_others, t_cstop_others, t_smc_bot — OK.
+v0.99.709 - 🧱 SMC held 96 h (was 72): on the honest list (q 0.993, only the touches in the bot's reach; smc_exits.py) the hold
+         84 / 96 / 108 / 120 h all beat 72 h — +0.89 / +0.94 / +0.92 / +0.89R a trade vs +0.79R, WR 71%; the take 3R stays
+         (2 / 2.5 / 4R worse). The bundle a year from $100 (port_smcx.py, SMC 1.5%): the median $16.8k -> $17.4k, the best
+         10% $45k -> $50k, the last 12 months $33.2k -> $36.6k, the worst 10% and the drawdown the same ($1.5k, 62%). SMC model
+         ver 4 (SMC_MODEL_VER), rule hold_h 96; the list 317 trades +0.94R; the settings' SMC text (the real exits, 96 h,
+         1.5% on Binance); the header's expectation. Also rejected: SMC on all 211 coins (the 84 new +0.27R), the SMC model
+         trained on 211 coins (+0.65R vs +0.79R), the breakout / cascade in the Binance bundle (a safer worst year, a lower
+         median — left as an option). Tests: t_smc_bot, t_cstop_others, t_bn_others, t_smc_ui — OK.

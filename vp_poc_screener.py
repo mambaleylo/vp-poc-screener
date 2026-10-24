@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.708"
+APP_VERSION = "0.99.709"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28095,7 +28095,7 @@ _PROC_START = time.time()
 # account, the bot's leverage, the honest pools; tools/winrate port_expect.py): the worst 10% / the median / the best 10% of
 # the years, the median drawdown. "bundle" = ⚡ 4% + P/R 2% + SMC 1.5% + EMA 0.5% (on Binance together), "dlm" = ⚡ alone
 EXPECT_YEAR = {"dlm": {"p10": 1036, "p50": 6355, "p90": 15913, "dd": 59, "last12": 11663},   # v0.99.704: x the daily WaveTrend (port_osc3.py)
-               "bundle": {"p10": 1502, "p50": 16849, "p90": 44963, "dd": 62, "last12": 33175}}   # v0.99.707: SMC q 0.993 at 1.5%; SMC and EMA only the touches in their reach (port_honest.py)
+               "bundle": {"p10": 1483, "p50": 17417, "p90": 49818, "dd": 62, "last12": 36587}}   # v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
 
 
 @app.route("/api/boot")
@@ -33061,7 +33061,7 @@ def api_cas_status():
 # stop 1 daily ATR past it, take 3R, out after 72 h.
 SMC_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_smc_model.json")
 SMC_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_smc_model.json"
-SMC_MODEL_VER = 3   # v0.99.706 — 3: the threshold q 0.99 -> 0.993 (fewer, better trades). 2 (v0.99.700): the stop at a 4h close (1 dATR), the emergency one 2 dATR, the honest touch order
+SMC_MODEL_VER = 4   # v0.99.709 — 4: the hold 72 -> 96 h. 3 (v0.99.706): the threshold q 0.99 -> 0.993 (fewer, better trades). 2 (v0.99.700): the stop at a 4h close (1 dATR), the emergency one 2 dATR, the honest touch order
 SMC_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_smc_state.json")
 SMC_ENABLED = os.environ.get("VP_SMC", "1") == "1"
 AUTOTRADE_ENABLED_SMC = os.environ.get("VP_AUTOTRADE_SMC", "0") == "1"
@@ -40473,7 +40473,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ 🧱 SMC</div>
-          <div class="sub">реальная сделка по рынку Gate при касании уровня (по Gate или фитилю Binance): стоп 1 дневной ATR и тейк 3R сразу на бирже, через 72 ч бот закрывает сделку. Риск — поле «🧱» выше (пусто = 0.25%)</div>
+          <div class="sub">реальная сделка по рынку при касании уровня (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 2 дневных ATR и тейк 3R сразу на бирже, выход по закрытию 4ч-свечи за 1 дневным ATR, через 96 ч бот закрывает сделку. Риск — поле «🧱» выше (пусто = 1.5% на Binance)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeSmc"><span class="switchSlider"></span></label>
       </div>
