@@ -34482,7 +34482,8 @@ def _dlm_open_trade(o, t_fill_bar, fill, real=None, t1h=None):
         tr.update({"tp1": tp1, "tp2": tr["tp"], "pull": float(st.get("pull_atr", 0.4)), "take": "far", "mae": 0.0})
     if st.get("stop_mode") == "close1h" and bs != 900:   # v0.99.692
         tr.update({"smode": "close1h", "hsl": fill - s * float(st.get("hard_stop_atr", 3.0)) * a,
-                   "t1h": int(t1h if t1h is not None else time.time() // 3600 * 3600)})
+                   "t1h": int(t1h if t1h is not None else time.time() // 3600 * 3600),
+                   "ch": int(st.get("close_h") or 1)})   # v0.99.694 — the stop checked at the close of a candle of ch hours (the chart's)
     with _dlm_lock:
         if any(t["id"] == tr["id"] for t in _DLM["trades"]):
             return None
@@ -34503,10 +34504,16 @@ def _dlm_1h(sym, start, now):
     return [c for c in b if c["time"] >= start]
 
 
+def _dlm_ch_close(t, c):
+    """v0.99.694 — the 1h candle c ends a candle of the trade's close-stop length (UTC-aligned: 4h = 00, 04, ... UTC)"""
+    return (c["time"] + 3600) % (int(t.get("ch") or 1) * 3600) == 0
+
+
 def _dlm_walk_1h(t, now):
     """v0.99.692 — a virtual close1h trade on the 1h candles from its touch hour: the emergency stop first in an hour
     (an hour opening through it: out at its open), the take not in the touch hour, out at an hour's close beyond the
-    stop, the time exit at the last close before `until` -> (result, exit, hours, t_out) or None (still open)"""
+    stop (v0.99.694: only an hour ending a candle of the trade's "ch" hours — the chart's 4h / 2h), the time exit at the
+    last close before `until` -> (result, exit, hours, t_out) or None (still open)"""
     s, e, sl, hsl, tp = t["side"], t["entry"], t["sl"], t["hsl"], t["tp"]
     b = [c for c in _dlm_1h(t["symbol"], t["t1h"], now) if c["time"] < t["until"]]
     for q, c in enumerate(b):
@@ -34515,7 +34522,7 @@ def _dlm_walk_1h(t, now):
             return "LOSS", (c["open"] if gap else hsl), q + 1, c["time"] + 3600
         if q > 0 and ((c["high"] >= tp) if s > 0 else (c["low"] <= tp)):
             return "WIN", tp, q + 1, c["time"] + 3600
-        if (c["close"] <= sl) if s > 0 else (c["close"] >= sl):
+        if _dlm_ch_close(t, c) and ((c["close"] <= sl) if s > 0 else (c["close"] >= sl)):
             return "LOSS", c["close"], q + 1, c["time"] + 3600
     if b and b[-1]["time"] + 3600 >= t["until"]:
         return "TIME_EXIT", b[-1]["close"], len(b), b[-1]["time"] + 3600
@@ -34530,7 +34537,8 @@ def _dlm_r_h(t, ex, hours, kind):
 
 
 def _dlm_close_stop(t, now):
-    """v0.99.692 — a real close1h trade: the last closed 1h candle since the fill closed beyond the stop -> its close"""
+    """v0.99.692 — a real close1h trade: the last closed 1h candle since the fill closed beyond the stop -> its close
+    (v0.99.694: only an hour ending a candle of the trade's "ch" hours)"""
     if t.get("smode") != "close1h":
         return None
     last = int(t.get("cs_bar") or 0)
@@ -34541,7 +34549,7 @@ def _dlm_close_stop(t, now):
         return None
     t["cs_bar"] = b[-1]["time"] + 3600
     for c in b:
-        if (c["close"] <= t["sl"]) if t["side"] > 0 else (c["close"] >= t["sl"]):
+        if _dlm_ch_close(t, c) and ((c["close"] <= t["sl"]) if t["side"] > 0 else (c["close"] >= t["sl"])):
             return c["close"]
     return None
 
@@ -35269,7 +35277,7 @@ def dlm_stats():
             "more_coins": DLM_MORE_COINS, "coins_n": 210 if DLM_MORE_COINS else 127,   # v0.99.686
             "risk": dlm_risk(), "risk_set": MODULE_RISK_PCT.get("dlm"), "max_pos": DLM_MAX_POS,   # v0.99.687
             "model": dict({k: m.get(k) for k in ("ver", "q", "trained_to", "rule", "research", "side_cap")},
-                          streams=[{k: x.get(k) for k in ("name", "tf", "anchor", "depth_atr", "thr", "alive_bars", "take_atr", "stop_atr", "hold_bars", "far_take_atr", "pull_atr", "hard_stop_atr", "stop_mode")} for x in m.get("streams") or []]) if m else None,
+                          streams=[{k: x.get(k) for k in ("name", "tf", "anchor", "depth_atr", "thr", "alive_bars", "take_atr", "stop_atr", "hold_bars", "far_take_atr", "pull_atr", "hard_stop_atr", "stop_mode", "close_h")} for x in m.get("streams") or []]) if m else None,
             "err": err, "scan": scan, "orders": orders[:40], "orders_n": len(orders),
             "open": [t for t in trades if t["status"] == "OPEN"][-40:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for t in fin if t["result"] == "WIN") / len(fin), 1) if fin else None,
@@ -43169,7 +43177,7 @@ function btDraw(bars, o) {
   if (o.pt != null) hl.push({p: o.pt, color: '#a7f3d0', label: 'частичная', tag: 'ч', width: 1, from: ei});   // v0.99.654
   if (o.mod === 'dlm' && o.lv != null && oi >= 0 && ei > oi) hl.push({p: o.lv, color: '#ffd54f', label: 'лимитка', tag: 'лим', width: 1, from: oi});   // v0.99.680
   const zones = [], dots = [], series = [], legend = [{text: (BT_CH[o.c] || o.c) + ' свечи', color: '#a6b0c0'}, {text: isL ? 'лонг' : 'шорт', color: isL ? '#34d399' : '#f87171'}];
-  if (o.hs != null) legend.push({text: `SL — по закрытию ${o.mod === 'dlm' ? 'часовой ' : ''}свечи · ав — аварийный`, color: '#f87171'});
+  if (o.hs != null) legend.push({text: 'SL — по закрытию свечи · ав — аварийный', color: '#f87171'});
   if (o.mod === 'dlm') legend.push({text: `лимитка выставлена ${o.t ? new Date(o.t * 1000).toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'}) : ''}, живёт 4 свечи`, color: '#ffd54f'});
   if (o.pt != null) legend.push({text: `ч — частичная фиксация (${o.mod === 'rbx' ? '¼' : '⅓'}), дальше стоп в безубытке`, color: '#a7f3d0'});
   if (ei >= 0) {
@@ -43398,7 +43406,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? `<span class="pill pos">${d.dry ? 'торгует (dry-run)' : 'торгует'}</span>` : '<span class="pill">виртуально</span>');
   const sts = (m && m.streams) || [];
   const dur = (bars, h) => { const x = bars * h; return x >= 24 ? `${Math.floor(x / 24)} дн${x % 24 ? ' ' + x % 24 + ' ч' : ''}` : `${x} ч`; };
-  const stTxt = x => { const h = x.tf === '2h' ? 2 : 4; return `<b>${x.tf === '2h' ? '2ч' : '4ч'}</b> — лимитка на ${x.depth_atr} ATR ${x.anchor === 'wick' ? 'за тенью только что закрытой свечи (под минимумом для лонга, над максимумом для шорта)' : 'от цены закрытия свечи'}, живёт ${x.alive_bars || 4} свечи (${dur(x.alive_bars || 4, h)}); ${x.far_take_atr ? `тейк ${x.far_take_atr} ATR, но если цена сначала уйдёт против на ${x.pull_atr} ATR (раньше, чем дойдёт до +${x.take_atr || 1} ATR) — тейк ${x.take_atr || 1} ATR` : `тейк ${x.take_atr || 1} ATR`}, ${x.stop_mode === 'close1h' ? `стоп — если часовая свеча закрылась за ${x.stop_atr || 2} ATR (аварийный стоп на бирже — ${x.hard_stop_atr || 3} ATR)` : `стоп ${x.stop_atr || 2} ATR`}, выход через ${dur(x.hold_bars || 32, h)}`; };
+  const stTxt = x => { const h = x.tf === '2h' ? 2 : 4; return `<b>${x.tf === '2h' ? '2ч' : '4ч'}</b> — лимитка на ${x.depth_atr} ATR ${x.anchor === 'wick' ? 'за тенью только что закрытой свечи (под минимумом для лонга, над максимумом для шорта)' : 'от цены закрытия свечи'}, живёт ${x.alive_bars || 4} свечи (${dur(x.alive_bars || 4, h)}); ${x.far_take_atr ? `тейк ${x.far_take_atr} ATR, но если цена сначала уйдёт против на ${x.pull_atr} ATR (раньше, чем дойдёт до +${x.take_atr || 1} ATR) — тейк ${x.take_atr || 1} ATR` : `тейк ${x.take_atr || 1} ATR`}, ${x.stop_mode === 'close1h' ? `стоп — если ${(x.close_h || 1) > 1 ? x.close_h + '-часовая свеча графика' : 'часовая свеча'} закрылась за ${x.stop_atr || 2} ATR (аварийный стоп на бирже — ${x.hard_stop_atr || 3} ATR)` : `стоп ${x.stop_atr || 2} ATR`}, выход через ${dur(x.hold_bars || 32, h)}`; };
   let top = `<div class="dim hintx">Модель смотрит все ${d.coins_n || 210} монет на закрытии каждой свечи и в лучшем ~${m && m.q ? +((1 - m.q) * 100).toFixed(0) : 1}% моментов ставит лимитку — ловит продолжение прострела. Два вида, у каждого своя модель:<br>${sts.length ? sts.map(stTxt).join(';<br>') : stTxt({tf: '4h', anchor: 'wick', depth_atr: 1})}.<br>Если по монете стоят обе — сделкой становится та, что исполнилась первой, вторая снимается. Сделок до ${d.max_pos || 20} сразу, каждая на ${d.risk}% счёта.</div>`;
   if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
   else {
