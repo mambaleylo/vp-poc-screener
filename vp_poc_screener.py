@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.709"
+APP_VERSION = "0.99.710"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -34564,6 +34564,8 @@ def dlm_scan(t_bar, st):
     best.sort(key=lambda x: -x[0])
     near = [{"symbol": s_, "side": sd, "pct": round(100 * x), "tf": tf} for x, s_, sd in best[:8]]
     with _dlm_lock:
+        have = {o["id"] for o in _DLM["orders"]} | {t["id"] for t in _DLM["trades"]}   # v0.99.710 — a catch-up scan makes no copy
+        new = [o for o in new if o["id"] not in have]
         _DLM["orders"].extend(new)
         sc_all = dict(_DLM.get("scan") or {})
         sc_all.update({"t": int(time.time()), "bar": t_bar, "coins": coins, "src": src})
@@ -35505,8 +35507,23 @@ def _dlm_atr_at(sym, t, bs=14400):
     return float(a) if a else None
 
 
-_ADOPT = {"t": 0.0, "last": []}
+_ADOPT = {"t": 0.0, "last": [], "n": None}
 DLM_ADOPT_SEC = 600
+
+
+def dlm_adopt_off():
+    """v0.99.710 — why the take-over from Binance does not run (None — it runs)"""
+    if not DLM_ENABLED:
+        return "модуль ⚡ выключен"
+    if not DLM_BINANCE:
+        return "⚡ торгует не на Binance — включите «⚡ на Binance»"
+    if not (BINANCE_API_KEY and BINANCE_API_SECRET):
+        return "нет ключей Binance"
+    if AUTOTRADE_DRY_RUN:
+        return "включена «Бумажная торговля (dry-run)» — выключите в настройках"
+    if not AUTOTRADE_ENABLED_DLM:
+        return "автоторговля ⚡ выключена"
+    return None
 
 
 def dlm_bn_adopt(now=None):
@@ -35642,6 +35659,7 @@ def dlm_real_tick():
         _ADOPT["t"] = now
         try:
             got = dlm_bn_adopt(now)
+            _ADOPT["n"] = len(got)
             if got:
                 _ADOPT["last"] = got[-20:]
                 send_telegram("🔁 Подхватил с Binance то, чего нет в записях бота (другой телефон / потерянный файл):\n" + "\n".join(got[:15]), category="dlm")
@@ -35800,6 +35818,24 @@ def dlm_real_tick():
         dlm_save()
 
 
+def dlm_catch_up(now=None):
+    """v0.99.710 — the user (the bot started on another phone): "ближайших сделок нет списка": a scan ran only at a 4h / 2h
+    close, so a bot started mid-bar had no orders (and no "nearest") for up to 2 h, and the orders of the last bars still
+    alive (4 bars) were not made again. At the start: the scans of each stream's last alive_bars closed bars (the oldest
+    first; the same closed bars -> the same orders as the old run; ids already there are skipped); a waiting order the
+    price went far through meanwhile is skipped by _dlm_arm as before"""
+    now = now or time.time()
+    for st in _dlm_streams(dlm_model()):
+        bs = int(st["bar_sec"]); last = int(now // bs * bs)
+        for k in range(int(st.get("alive_bars", 4)), 0, -1):
+            t_close = last - (k - 1) * bs
+            try:
+                dlm_scan(t_close, st)
+            except Exception as e:
+                log_error(f"dlm catch-up {st.get('name')} {t_close}: {e}")
+    dlm_save()
+
+
 def dlm_loop():
     time.sleep(110)
     dlm_load()
@@ -35807,6 +35843,11 @@ def dlm_loop():
         dlm_model()
     except Exception as e:
         log_error(f"dlm_loop model: {e}")
+    if DLM_ENABLED:
+        try:
+            dlm_catch_up()   # v0.99.710
+        except Exception as e:
+            log_error(f"dlm catch-up: {e}")
     while True:
         heartbeat("dlm_loop")
         try:
@@ -35848,6 +35889,7 @@ def dlm_stats():
     real = [t for t in fin if t.get("real")]
     return {"on": DLM_ENABLED, "auto": AUTOTRADE_ENABLED_DLM, "tg": TELEGRAM_ALERTS_DLM, "dry": AUTOTRADE_DRY_RUN,
             "binance": DLM_BINANCE, "bn_keys": bool(BINANCE_API_KEY and BINANCE_API_SECRET), "bn_check": _BNF.get("check"),   # v0.99.684
+            "adopt": {"t": int(_ADOPT["t"]) or None, "n": _ADOPT["n"], "last": _ADOPT["last"][-10:], "off": dlm_adopt_off()},   # v0.99.710
             "more_coins": DLM_MORE_COINS, "coins_n": 210 if DLM_MORE_COINS else 127,   # v0.99.686
             "risk": dlm_risk(), "risk_set": MODULE_RISK_PCT.get("dlm"), "max_pos": DLM_MAX_POS,   # v0.99.687
             "model": dict({k: m.get(k) for k in ("ver", "q", "trained_to", "rule", "research", "side_cap", "liq_buf", "load_risk", "osc_risk")},
@@ -35865,6 +35907,24 @@ def dlm_stats():
                         for n in ("wick4h", "close2h") for x in [[t for t in fin if (t.get("st") or "wick4h") == n]]},   # v0.99.689
             "last": [{k: t.get(k) for k in ("symbol", "side", "t0", "fbar", "t_in", "r", "result", "real", "entry", "lv", "sl", "tp", "exit", "t_out", "bs", "st", "tp1", "tp2", "take")}
                      for t in sorted(fin, key=lambda t: -t["t_in"])[:40]]}
+
+
+@app.route("/api/dlm/adopt", methods=["POST"])
+def api_dlm_adopt():
+    """v0.99.710 — "🔁 подхватить с Binance сейчас": the take-over now (its reason when it cannot run)"""
+    off = dlm_adopt_off()
+    if off and not (DLM_BINANCE and BINANCE_API_KEY and not AUTOTRADE_DRY_RUN):
+        return jsonify({"ok": False, "err": off})
+    try:
+        with live_http():
+            got = dlm_bn_adopt()
+        _ADOPT.update(t=time.time(), n=len(got))
+        if got:
+            _ADOPT["last"] = got[-20:]
+        return jsonify({"ok": True, "lines": got})
+    except Exception as e:
+        log_error(f"dlm adopt now: {e}")
+        return jsonify({"ok": False, "err": str(e)[:200]})
 
 
 @app.route("/api/dlm/status")
@@ -44008,6 +44068,15 @@ async function bnClearKeys() {
   refreshDlm(true);
 }
 
+async function dlmAdopt() {   // v0.99.710
+  const btn = document.getElementById('adoptBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'читаю Binance…'; }
+  let r = {};
+  try { r = await (await fetch('/api/dlm/adopt', {method: 'POST'})).json(); } catch (e) { r = {ok: false, err: 'нет связи'}; }
+  alert(r.ok ? ((r.lines || []).length ? 'Подхвачено:\\n' + r.lines.join('\\n') : 'Всё на Binance уже в записях бота — подхватывать нечего') : 'Не получилось: ' + (r.err || ''));
+  refreshDlm(true);
+}
+
 async function bnCheck() {
   const btn = document.getElementById('bnCheckBtn');
   if (btn) { btn.disabled = true; btn.textContent = 'проверяю…'; }
@@ -44083,6 +44152,11 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
         <input id="bnSecret" type="password" placeholder="Secret Key" autocomplete="off" style="width:100%;box-sizing:border-box;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:8px;border-radius:var(--r-xs);">
         <div style="display:flex;gap:6px;flex-wrap:wrap;"><button class="zbtn" id="bnSaveBtn" onclick="bnSaveKeys()">Сохранить и проверить</button>${d.bn_keys ? '<button class="zbtn" onclick="bnClearKeys()">Удалить ключи</button>' : ''}</div></details>`;
       if (d.binance && !d.bn_keys) b += `<div class="zbanner warn" style="margin-top:8px;">Выбран Binance, но ключей нет — реальные сделки не откроются</div>`;
+      const ad = d.adopt || {};   // v0.99.710 — the take-over from Binance (another phone / a lost file)
+      b += `<div class="zsub" style="margin-top:8px;">🔁 Подхват с Binance (лимитки и позиции, которых нет в записях бота): ${ad.off ? `<span class="loss">не работает — ${ad.off}</span>`
+        : (ad.t ? `проверено в ${new Date(ad.t * 1000).toLocaleTimeString().slice(0, 5)} — ${ad.n ? 'подхвачено ' + ad.n : 'всё уже в записях'}` : 'первая проверка через ~2 мин после запуска')}</div>`
+        + ((ad.last || []).length ? `<div class="dim" style="font-size:var(--fs-xs);">${ad.last.map(x => String(x).replace(/&/g, '&amp;').replace(/</g, '&lt;')).join('<br>')}</div>` : '')
+        + (d.binance && d.bn_keys ? `<button class="zbtn" id="adoptBtn" onclick="dlmAdopt()">🔁 подхватить с Binance сейчас</button>` : '');
     }
     h += card(`🏦 Биржа: ${d.binance ? 'Binance' : 'Gate'}`, b);
   }

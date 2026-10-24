@@ -76,6 +76,16 @@ for t in picks:
     hits += lv_ok and same
     print(f"   {t['s']:12s} {t['d']:+d} order {'✓' if lv_ok else '✗'} · R bot {r} vs backtest {t['r']} ({t['k']}) {'✓' if same else '✗'}")
 print(f"(3) {hits}/{len(picks)}"); ok &= hits >= len(picks) - 1
+# (3b) v0.99.710 — a bot started mid-bar (another phone): the catch-up scans of the last alive bars make the orders of a
+# bar already closed again; run twice — no copies
+t = picks[0]; bs = 7200 if t["st"] == "close2h" else 14400
+V.RESEARCH_COINS_211 = V.RESEARCH_COINS_127 = (t["s"],); V._DLM.update({"orders": [], "trades": []})
+V.dlm_catch_up(now=t["t"] + bs + 600)
+n1 = len(V._DLM["orders"]); got = [x for x in V._DLM["orders"] if x["side"] == t["d"] and x.get("st") == t["st"] and abs(x["lv"] / t["lv"] - 1) < 1e-4]
+V.dlm_catch_up(now=t["t"] + bs + 600)
+cu_ok = bool(got) and got[0]["until"] == t["t"] + 4 * bs and len(V._DLM["orders"]) == n1
+print(f"(3b) catch-up at the start: the order of a bar closed before {bool(got)} · no copies on a second run {len(V._DLM['orders']) == n1} {cu_ok}")
+ok &= cu_ok
 # (4) the real path on a fake exchange (Gate)
 class X:
     def __init__(s): s.orders = {}; s.pos = {}; s.trig = {}; s.n = 0

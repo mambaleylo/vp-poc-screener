@@ -20660,3 +20660,12 @@ v0.99.709 - 🧱 SMC held 96 h (was 72): on the honest list (q 0.993, only the t
          1.5% on Binance); the header's expectation. Also rejected: SMC on all 211 coins (the 84 new +0.27R), the SMC model
          trained on 211 coins (+0.65R vs +0.79R), the breakout / cascade in the Binance bundle (a safer worst year, a lower
          median — left as an option). Tests: t_smc_bot, t_cstop_others, t_bn_others, t_smc_ui — OK.
+v0.99.710 - ⚡ a bot started mid-bar makes its orders at once; the take-over from Binance visible, with a button. The user (the
+         bot started on another phone): "запустил — подхвата нет, ближайших сделок нет списка". (1) dlm_catch_up at the
+         start: the scans of each stream's last 4 closed bars (the orders still alive; the same closed candles -> the same
+         orders as the old run; dlm_scan skips ids already there) — before, a scan ran only at a 4h / 2h close, so a bot
+         started mid-bar had no orders and no "nearest" for up to 2 h and never re-made the alive ones. (2) The exchange
+         card shows the take-over: when it last ran and what it took, or why it does not run (⚡ off / not on Binance / no
+         keys / dry-run / ⚡ autotrade off — dlm_adopt_off); the button "🔁 подхватить с Binance сейчас" (/api/dlm/adopt).
+         Tests: t_dlm_bot (3b: the catch-up re-makes a closed bar's order, no copies on a second run), t_dlm_binance,
+         t_dlm_ui — OK.
