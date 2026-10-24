@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.707"
+APP_VERSION = "0.99.708"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9199,9 +9199,9 @@ RISK_PCT_MAX = 100.0   # v0.99.435 — user: "не ограничивай 50%"
 
 def module_risk_pct(mod):
     """v0.99.435 — the risk % a module's order uses when "Авто-риск" gives
-    none: the module's own setting, else the common "Риск на сделку"."""
+    none: the module's own setting, else 0.5% (v0.99.708; was the common "Риск на сделку", removed)."""
     own = MODULE_RISK_PCT.get(mod)
-    return float(own) if own else float(AUTOTRADE_RISK_PCT_OF_BALANCE)
+    return float(own) if own else 0.5   # v0.99.708 — the common "Риск на сделку" field is gone (the user): an empty field = 0.5%
 
 
 def compound_sizing(mod, auto_pct=None):
@@ -34869,6 +34869,7 @@ def _dlm_cancel_back(o):
                 return False
         except BinanceError:
             return False
+        _dlm_bn_cancel_pre(r)   # v0.99.708 — its stop / take placed with it
     else:
         if not _dlm_cancel_order(r["id"]):
             return False
@@ -35280,10 +35281,55 @@ def dlm_bn_place(o):
             log_error(f"binance isolated {bsym}: {e}")
     bnf_req("POST", "/fapi/v1/leverage", {"symbol": bsym, "leverage": int(lev)})
     px = bn_fmt(lv, info["tick"], up=(s < 0))
-    r = bnf_req("POST", "/fapi/v1/order", dict(_bnf_side_params(s, False, dual), symbol=bsym, type="LIMIT", timeInForce="GTC", quantity=qty,
-                                               price=px, newClientOrderId=f"vpdlm{int(time.time() * 1000)}"))
+    base_p = dict(_bnf_side_params(s, False, dual), symbol=bsym, type="LIMIT", quantity=qty, price=px, newClientOrderId=f"vpdlm{int(time.time() * 1000)}")
+    gtd = int(max(float(o["until"]), time.time() + 700) * 1000)   # v0.99.708 — Binance takes a GTD at least 10 min ahead
+    try:
+        r = bnf_req("POST", "/fapi/v1/order", dict(base_p, timeInForce="GTD", goodTillDate=gtd)); tif = "GTD"
+    except BinanceError as e:
+        log_error(f"binance GTD limit {bsym}: {e} — GTC")
+        r = bnf_req("POST", "/fapi/v1/order", dict(base_p, timeInForce="GTC")); tif = "GTC"
     o["real"] = {"status": "LIMIT", "ex": "binance", "id": str(r.get("orderId")), "bsym": bsym, "scl": scl, "qty": q, "price": float(px) / scl,
-                 "lev": int(lev), "risk": round(risk / kx, 2), "osc": osc, "load": lm, "dual": dual, "tick": info["tick"], "step": info["step"]}
+                 "lev": int(lev), "risk": round(risk / kx, 2), "osc": osc, "load": lm, "dual": dual, "tick": info["tick"], "step": info["step"], "tif": tif}
+    _dlm_bn_pre_exits(o, sl)
+
+
+def _dlm_bn_pre_exits(o, sl_x):
+    """v0.99.708 — the user: "я хочу чтобы лимитки сопровождались как и сделки ... чтобы не удалять ничего": the limit goes
+    on Binance with its exits — the emergency stop and the take as closePosition triggers of its side — so a fill while the
+    bot is down (the phone off, Termux killed) is never a naked position; with the GTD the exchange itself expires an
+    unfilled limit at the order's end. The bot running: on the fill the stop is kept as the trade's one (the fill at the
+    level) and the take swapped for its reduce-only limit (_dlm_bn_take_over); a limit cancelled / expired -> both off
+    (_dlm_bn_cancel_pre). sl_x — the emergency stop in the exchange's prices"""
+    r = o["real"]; s = o["side"]; bsym, scl = r["bsym"], r["scl"]
+    st = _dlm_stream(o.get("st") or "wick4h") or ((_DLM.get("model") or {}).get("rule") or {})
+    tk = float(st.get("far_take_atr") or st.get("take_atr", 1.0))
+    for key, kind, trig in (("pre_sl", "STOP_MARKET", bn_fmt(sl_x, r["tick"], up=(s < 0))),
+                            ("pre_tp", "TAKE_PROFIT_MARKET", bn_fmt((o["lv"] + s * tk * o["atr"]) * scl, r["tick"], up=(s > 0)))):
+        try:
+            r[key] = list(bnf_place_cond(bsym, s, kind, trig, r.get("dual"))); r[key + "_px"] = trig
+        except BinanceError as e:
+            log_error(f"binance {kind} with the limit {bsym}: {e}")
+            r[key + "_err"] = str(e)[:120]
+
+
+def _dlm_bn_cancel_pre(r, keep_sl=False):
+    """v0.99.708 — the exits placed with a limit off the exchange (the limit gone unfilled / the trade's own placed)"""
+    for key in (("pre_tp",) if keep_sl else ("pre_sl", "pre_tp")):
+        if r.get(key):
+            if bnf_cancel(r["bsym"], r[key][0], r[key][1]):
+                r.pop(key, None); r.pop(key + "_px", None)
+
+
+def _dlm_bn_take_over(t, r_o):
+    """v0.99.708 — a filled limit's pre-placed exits: the stop kept as the trade's when it is where the trade's own would be
+    (the fill at the level, within a tick), else off (the trade's placed by _dlm_bn_exits); the take trigger always off —
+    the trade's take is a reduce-only limit (maker)"""
+    r = t["real"]; s = t["side"]; scl = r["scl"]
+    if r_o.get("pre_sl"):
+        want = bn_fmt((t.get("hsl") or t["sl"]) * scl, r["tick"], up=(s < 0))
+        if r_o.get("pre_sl_px") == want:
+            r["sl_kind"], r["sl_id"] = r_o["pre_sl"][0], r_o["pre_sl"][1]; r_o.pop("pre_sl", None); r_o.pop("pre_sl_px", None)
+    _dlm_bn_cancel_pre(r_o)
 
 
 def _dlm_bn_exits(t):
@@ -35346,6 +35392,10 @@ def dlm_bn_tick(orders, trades):
                                                                                         filled=filled, order=r["id"]))
             if t:
                 try:
+                    _dlm_bn_take_over(t, r)   # v0.99.708 — the exits placed with the limit
+                except Exception as e:
+                    log_error(f"dlm binance pre exits {t['symbol']}: {e}")
+                try:
                     _dlm_bn_exits(t)
                 except Exception as e:
                     log_error(f"dlm binance exits {t['symbol']}: {e}")
@@ -35353,6 +35403,10 @@ def dlm_bn_tick(orders, trades):
                     send_telegram(_dlm_fill_msg(t, o, fill, "Binance"), category="dlm")
         else:
             o["status"] = "EXPIRED" if now >= o["until"] else "CANCELLED"
+            try:
+                _dlm_bn_cancel_pre(r)   # v0.99.708 — the limit gone unfilled: its stop / take off too
+            except Exception as e:
+                log_error(f"dlm binance pre exits off {o['symbol']}: {e}")
     for t in trades:
         r = t["real"]; bsym, s = r["bsym"], t["side"]
         p = next((x for x in pos.get(bsym) or [] if (x["amt"] > 0) == (s > 0)), None)
@@ -35431,10 +35485,168 @@ def dlm_bn_tick(orders, trades):
     return changed
 
 
+def _bn_gate_sym(bsym):
+    """v0.99.708 — a Binance symbol -> (the bot's coin, price scale): XUSDT -> X_USDT; 1000XUSDT -> X_USDT / 1000 unless the
+    bot's coin is 1000X_USDT itself"""
+    b = bsym[:-4] if bsym.endswith("USDT") else bsym
+    cands = [(b + "_USDT", 1.0)] + ([(b[4:] + "_USDT", 1000.0)] if b.startswith("1000") else [])
+    for sym, scl in cands:
+        if sym in RESEARCH_COINS_211:
+            return sym, scl
+    return cands[-1]
+
+
+def _dlm_atr_at(sym, t, bs=14400):
+    """the Wilder ATR(14) of the coin's chart (4h) on the bars closed by t, the bot's prices"""
+    b = _dlm_closed(sym, "4h" if bs == 14400 else "2h", bs, 120, t) or []
+    if len(b) < 20:
+        return None
+    a = dlm_wilder([c["high"] for c in b], [c["low"] for c in b], [c["close"] for c in b])[-1]
+    return float(a) if a else None
+
+
+_ADOPT = {"t": 0.0, "last": []}
+DLM_ADOPT_SEC = 600
+
+
+def dlm_bn_adopt(now=None):
+    """v0.99.708 — the user: "хочу сейчас запустить с другого телефона, но не хочу удалять ордера с биржи, хочу чтобы новый
+    телефон их узнал": a bot without its state (another phone, a lost file) takes over what this bot left on Binance,
+    nothing is cancelled:
+    (1) a ⚡ limit (its client id "vpdlm<ms>") no order of the bot has -> a ⚡ order again (the 4h stream; the level =
+        its price, the ATR = the coin's 4h ATR at the limit's placing, alive 3 bars of 4h from it); a waiting order of the
+        bot's own scan at the same coin, side and level takes it instead; its exits put with it when it has none
+        (_dlm_bn_pre_exits) — a fill is never a naked position;
+    (2) a position no record of the bot has: with a reduce-only limit (⚡'s take) -> a ⚡ trade (the ATR from its
+        exchange stop: the emergency stop is 3 ATR; the 4h close stop, the take and the time exit — 32 bars of 4h from
+        now — managed again); with a stop + take trigger -> P/R / SMC / EMA's record (the module by the take / stop
+        distance: P/R 0.75, SMC 1.5, EMA 2), its trigger cleaned up after the exchange closes it; with no stop -> told only.
+    Runs at the start and every DLM_ADOPT_SEC. -> the lines of what was taken over"""
+    now = now or time.time()
+    opn = bnf_req("GET", "/fapi/v1/openOrders") or []
+    try:
+        algos = bnf_req("GET", "/fapi/v1/openAlgoOrders") or []
+    except BinanceError as e:
+        log_error(f"binance open algo orders: {e}")
+        algos = []
+    if isinstance(algos, dict):
+        algos = algos.get("orders") or algos.get("rows") or []
+    pos = bnf_positions()
+    dual = bnf_dual()
+    syms = bnf_symbols()
+    with _dlm_lock:
+        known_o = {str(o["real"]["id"]) for o in _DLM["orders"] if (o.get("real") or {}).get("id")}
+        known_b = {t["real"].get("bsym") for t in _DLM["trades"] if t.get("real") and t["status"] == "OPEN"}
+    with _bno_lock:
+        known_b |= {r_["bsym"] for r_ in _BNO["pos"].values()}
+    trig = {}   # bsym -> {"STOP_MARKET": (kind, id, price), "TAKE_PROFIT_MARKET": ...} — the closing triggers on the exchange
+    for x in algos:
+        k = x.get("orderType") or x.get("type")
+        if k in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
+            trig.setdefault(x.get("symbol"), {})[k] = ("algo", str(x.get("algoId")), float(x.get("triggerPrice") or x.get("stopPrice") or 0))
+    for x in opn:
+        if x.get("type") in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
+            trig.setdefault(x.get("symbol"), {}).setdefault(x["type"], ("order", str(x.get("orderId")), float(x.get("stopPrice") or 0)))
+    lines, changed = [], False
+    # (1) the ⚡ limits
+    for x in opn:
+        cid = str(x.get("clientOrderId") or "")
+        if x.get("type") != "LIMIT" or str(x.get("reduceOnly")).lower() == "true" or not cid.startswith("vpdlm") or str(x.get("orderId")) in known_o:
+            continue
+        bsym = x["symbol"]; sym, scl = _bn_gate_sym(bsym); s = 1 if x.get("side") == "BUY" else -1
+        info = syms.get(bsym) or {}
+        lv = float(x["price"]) / scl
+        try:
+            t_pl = int(cid[5:]) / 1000
+        except ValueError:
+            t_pl = float(x.get("time") or now * 1000) / 1000
+        bar = int(t_pl // 14400 * 14400)
+        r = {"status": "LIMIT", "ex": "binance", "id": str(x.get("orderId")), "bsym": bsym, "scl": scl, "qty": float(x.get("origQty") or 0),
+             "price": lv, "lev": None, "risk": None, "dual": dual, "tick": info.get("tick"), "step": info.get("step"), "tif": x.get("timeInForce"), "adopted": True}
+        with _dlm_lock:
+            o = next((y for y in _DLM["orders"] if y["status"] == "OPEN" and y.get("real") is None and y["symbol"] == sym and y["side"] == s
+                      and abs(y["lv"] - lv) <= max(abs(lv) * 1e-6, (info.get("tick") or 0) / scl)), None)
+        if o is None:
+            a = _dlm_atr_at(sym, t_pl)
+            if not a:
+                lines.append(f"⚠️ {bsym}: лимитка {x.get('side')} {x['price']} — нет свечей для ATR, не подхвачена (стоит на бирже как есть)")
+                continue
+            o = {"id": f"dlm_{sym}_{s}_{bar - 14400}", "symbol": sym, "side": s, "lv": lv, "atr": a, "score": None, "t0": bar - 14400, "bs": 14400,
+                 "st": "wick4h", "until": max(bar + 3 * 14400, now + 3600), "px": lv, "status": "OPEN", "real": None, "adopted": True}
+            with _dlm_lock:
+                _DLM["orders"].append(o)
+        o["real"] = r
+        known_o.add(r["id"])
+        tg = trig.get(bsym) or {}
+        if tg.get("STOP_MARKET"):
+            r["pre_sl"], r["pre_sl_px"] = [tg["STOP_MARKET"][0], tg["STOP_MARKET"][1]], None
+        if tg.get("TAKE_PROFIT_MARKET"):
+            r["pre_tp"] = [tg["TAKE_PROFIT_MARKET"][0], tg["TAKE_PROFIT_MARKET"][1]]
+        if not tg.get("STOP_MARKET") and r["tick"]:
+            _dlm_bn_pre_exits(o, (o["lv"] - s * 3.0 * o["atr"]) * scl)
+        changed = True
+        lines.append(f"⚡ {sym.replace('_USDT', '')} {'лонг' if s > 0 else 'шорт'}: лимитка {lv:.6g} подхвачена" + ("" if r.get("pre_sl") else " (стоп не поставился)"))
+    # (2) the positions
+    for bsym, lst in pos.items():
+        if bsym in known_b:
+            continue
+        sym, scl = _bn_gate_sym(bsym); info = syms.get(bsym) or {}
+        tg = trig.get(bsym) or {}
+        take_lim = next((y for y in opn if y.get("symbol") == bsym and y.get("type") == "LIMIT" and str(y.get("reduceOnly")).lower() == "true"), None)
+        for p in lst:
+            s = 1 if p["amt"] > 0 else -1; entry = p["entry"] / scl
+            stp = tg.get("STOP_MARKET"); tpo = tg.get("TAKE_PROFIT_MARKET")
+            if take_lim is not None:
+                a = abs(entry - stp[2] / scl) / 3.0 if stp and stp[2] else _dlm_atr_at(sym, now)
+                if not a:
+                    lines.append(f"⚠️ {bsym}: позиция без записи — нет ATR, не подхвачена")
+                    continue
+                o = {"id": f"dlm_{sym}_{s}_adopt{int(now)}", "symbol": sym, "side": s, "lv": entry, "atr": a, "score": None, "t0": int(now // 14400 * 14400),
+                     "bs": 14400, "st": "wick4h", "until": now + 4 * 14400, "status": "OPEN", "real": None, "adopted": True}
+                real = {"ex": "binance", "bsym": bsym, "scl": scl, "tick": info.get("tick"), "step": info.get("step"), "dual": dual, "risk": None,
+                        "lev": None, "filled": abs(p["amt"]), "order": None, "seen": True, "adopted": True,
+                        "tp_kind": "limit", "tp_id": str(take_lim.get("orderId"))}
+                if stp:
+                    real["sl_kind"], real["sl_id"] = stp[0], stp[1]
+                t = _dlm_open_trade(o, int(now // 14400 * 14400), entry, real=real)
+                if t:
+                    t["tp"] = float(take_lim.get("price") or 0) / scl or t["tp"]
+                    changed = True
+                    lines.append(f"⚡ {sym.replace('_USDT', '')} {t['direction']}: позиция подхвачена — вход {entry:.6g}, стоп на бирже "
+                                 f"{(stp[2] / scl) if stp else '—'}, тейк {t['tp']:.6g}, выход по закрытию 4ч и по времени снова ведёт бот")
+            elif stp or tpo:
+                d_sl = abs(entry - stp[2] / scl) if stp else 0; d_tp = abs(tpo[2] / scl - entry) if tpo else 0
+                ratio = d_tp / d_sl if d_sl else 0
+                mode = min((("prv", 0.75), ("smc", 1.5), ("emw", 2.0)), key=lambda m_: abs(m_[1] - ratio))[0] if ratio else "smc"
+                rec = {"mode": mode, "bsym": bsym, "scl": scl, "side": s, "qty": abs(p["amt"]), "entry": p["entry"], "lev": None, "risk": None, "dual": dual,
+                       "tick": info.get("tick"), "step": info.get("step"), "min_qty": info.get("min_qty"), "t": int(now), "adopted": True,
+                       "sl_kind": stp[0] if stp else None, "sl_id": stp[1] if stp else None, "tp_kind": tpo[0] if tpo else None, "tp_id": tpo[1] if tpo else None}
+                with _bno_lock:
+                    _BNO["pos"][sym] = rec
+                bno_save()
+                changed = True
+                lines.append(f"{ {'prv': 'P/R', 'smc': '🧱 SMC', 'emw': '📈 EMA'}[mode] } {sym.replace('_USDT', '')}: позиция подхвачена — стоп и тейк на бирже; "
+                             f"выход по времени и по закрытию свечи этот бот по ней не ведёт (их запись на старом телефоне)")
+            else:
+                lines.append(f"⚠️ {bsym}: позиция без стопа на бирже и без записи бота — поставьте стоп сами")
+    if changed:
+        dlm_save()
+    return lines
+
+
 def dlm_real_tick():
     """every DLM_POLL_SEC: the real limits (filled / expired / a foreign position on the coin) and the real trades
     (the stop / take on the exchange, the time exit, the result)"""
     now = time.time()
+    if DLM_BINANCE and BINANCE_API_KEY and not AUTOTRADE_DRY_RUN and now - _ADOPT["t"] > DLM_ADOPT_SEC:   # v0.99.708
+        _ADOPT["t"] = now
+        try:
+            got = dlm_bn_adopt(now)
+            if got:
+                _ADOPT["last"] = got[-20:]
+                send_telegram("🔁 Подхватил с Binance то, чего нет в записях бота (другой телефон / потерянный файл):\n" + "\n".join(got[:15]), category="dlm")
+        except Exception as e:
+            log_error(f"dlm binance adopt: {e}")
     try:
         _dlm_arm(now)   # v0.99.691 — the waiting orders go on the exchange as the price comes
     except Exception as e:
@@ -40156,29 +40368,22 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeDryRun"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">Риск на сделку</div>
-          <div class="sub">% от баланса, который теряется при срабатывании стопа (с комиссиями) — общий: для модулей ниже, у которых своё поле пустое. Плечо — максимально безопасное под стоп конкретного сигнала, маржа — сколько нужно для этого риска (если не хватает свободного баланса — сделка пропускается)<br>Допустимо от 0.1% до 100%. Ориентиры: 1–2% — консервативно (10 стопов подряд ≈ −10…−18%); 5% — умеренно (5 стопов ≈ −23%); 10–20% — агрессивно (3 стопа ≈ −27…−49%); 30% — очень агрессивно (2 стопа ≈ −51%); 50% — 2 стопа ≈ −75%; 100% — один стоп обнуляет счёт</div>
-        </div>
-        <input type="number" id="setAutotradeRiskPct" min="0.1" max="100" step="0.5" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
-      </div>
-      <div class="settingRow subRow" style="flex-wrap:wrap;">
+      <div class="settingRow" style="flex-wrap:wrap;">
         <div style="flex:1 1 100%;">
-          <div class="label">↳ Риск Neuro · P/R · Зоны · 🎯</div>
-          <div class="sub">свой % для каждого модуля (0.1–100); пустое поле — общий % выше. 🎯 сильные зоны: пустое поле — 0.5% (их много одновременно, на истории просадка доходила до 50R). Бэктест «с $15» каждого модуля считает со своим %</div>
+          <div class="label">Риск на сделку — у каждого модуля свой</div>
+          <div class="sub">% от счёта, который теряется на стопе (0.1–100). Пустое поле — значение модуля по умолчанию (на Binance, по истории связки): ⚡ 4% · P/R 2% · 🧱 SMC 1.5% · EMA 0.5%; остальные модули — 0.5%. У ⚡ к своему % ещё множители: загрузка (×0.625 / ×1.25) и дневной WaveTrend (×1.25 / ×0.85)</div>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-          <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro 0.5" title="Нейро: пусто — 0.5% (не общий %)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro 0.5" title="Нейро: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSnr" min="0.1" max="100" step="0.5" placeholder="S/R" title="S/R Zones" style="display:none;width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R 0.5" title="Peak Reversal: пусто — 0.5% (не общий %)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctEmw" min="0.1" max="100" step="0.5" placeholder="EMA 0.5" title="EMA — касания: пусто — 0.5% (не общий %)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctZones" min="0.1" max="100" step="0.5" placeholder="Зоны" title="Зоны" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctZm" min="0.1" max="100" step="0.1" placeholder="🎯 0.5" title="🎯 Сильные зоны: пусто — 0.5% (не общий %!)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctRbx" min="0.1" max="100" step="0.1" placeholder="📈 0.5" title="📈 Пробой: пусто — 0.5% (не общий %)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctCas" min="0.1" max="100" step="0.1" placeholder="🌊 0.5" title="🌊 Каскад: пусто — 0.5% (не общий %)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R 2" title="Peak Reversal: пусто — 2% на Binance (0.5% на Gate)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctEmw" min="0.1" max="100" step="0.5" placeholder="EMA 0.5" title="EMA — касания: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctZones" min="0.1" max="100" step="0.5" placeholder="Зоны 0.5" title="Зоны: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctZm" min="0.1" max="100" step="0.1" placeholder="🎯 0.5" title="🎯 Сильные зоны: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctRbx" min="0.1" max="100" step="0.1" placeholder="📈 0.5" title="📈 Пробой: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctCas" min="0.1" max="100" step="0.1" placeholder="🌊 0.5" title="🌊 Каскад: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctDlm" min="0.1" max="100" step="0.05" placeholder="⚡ 4" title="⚡ Лимитки 4ч+2ч: пусто — 4% на сделку, до 20 сделок сразу; больше 10% не берётся" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctSmc" min="0.1" max="100" step="0.05" placeholder="🧱 0.25" title="🧱 SMC: пусто — 0.25% (не общий %); на истории — четверть риска EMA" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctSmc" min="0.1" max="100" step="0.05" placeholder="🧱 1.5" title="🧱 SMC: пусто — 1.5% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
         </div>
       </div>
       <div class="settingRow subRow">
@@ -45258,7 +45463,6 @@ const setInputs = {
 };
 
 const setValueInputs = {
-  autotrade_risk_pct: document.getElementById('setAutotradeRiskPct'),
   risk_pct_neuro: document.getElementById('setRiskPctNeuro'),   // v0.99.435
   risk_pct_snr: document.getElementById('setRiskPctSnr'),
   risk_pct_prv: document.getElementById('setRiskPctPrv'),

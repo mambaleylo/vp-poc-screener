@@ -20634,3 +20634,21 @@ v0.99.707 - 📈 EMA backtest list with the bot's reach filter (as SMC in v0.99.
          ~$16.8k, the best 10% ~$45k, the last 12 months ~$33.2k, drawdowns ~62% — the header's expectation. Also checked:
          the bundle's risk split with the new SMC (port_w705.py) — the current one stays; SMC by level kind — nearly all
          are 4h / daily bullish FVG longs, nothing to cut. Tests: t_cstop_others (EMA re-made from the new list), t_bn_others — OK.
+v0.99.708 - ⚡ / Binance: the bot on another phone takes over what is on the exchange; a limit goes with its exits; the common
+         risk field gone. (1) The user: "хочу сейчас запустить с другого телефона, но не хочу удалять ордера с биржи, хочу
+         чтобы новый телефон их узнал" — dlm_bn_adopt (at the start and every 10 min, Binance, not dry-run): a ⚡ limit
+         ("vpdlm" client id) no order of the bot has -> a ⚡ order again (the level = its price, the 4h ATR at its placing,
+         alive 3 bars of 4h from it; a waiting scan order at the same level takes it instead), its stop / take triggers
+         kept or put; a position with no record: with a reduce-only take limit -> a ⚡ trade again (the ATR from its
+         exchange stop, the 4h close stop / take / time exit managed again, 32 bars of 4h from now); with a stop + take
+         trigger -> P/R / SMC / EMA's Binance record (the module by take / stop: 0.75 / 1.5 / 2; their time exit and close
+         stop stay with the old phone's records); no stop -> told. Nothing cancelled or placed for what is taken over; a
+         Telegram line lists it. (2) The user: "я хочу чтобы лимитки сопровождались как и сделки ... чтобы не удалять
+         ничего": a ⚡ limit on Binance goes as a GTD (the exchange expires it at the order's end) with its emergency stop
+         and take as closePosition triggers (_dlm_bn_pre_exits): a fill while the bot is down is never a naked position;
+         the bot running — on the fill the stop is kept when at the trade's own level, the take swapped for the reduce-only
+         limit; a limit cancelled / expired -> its triggers off. (3) The user: "общее поле риск на сделку удалим": the
+         field is gone from the settings; an empty module field -> the module's default (Binance: ⚡ 4%, P/R 2%, SMC 1.5%,
+         EMA 0.5%; the rest 0.5%), the placeholders show them (they said 0.5 / 0.25 — Gate's). Tests: t_dlm_binance (the
+         limit with its stop + take and GTD; "a new phone": the limit, a ⚡ position and an SMC-like one taken over, nothing
+         placed or cancelled; managed on the next tick), t_dlm_bot, t_dlm_ui, t_bn_others, t_cstop_others, t_smc_bot — OK.

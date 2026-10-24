@@ -10,7 +10,7 @@ from common import V
 KEY, SEC = "k" * 64, "s" * 64
 X = {"orders": {}, "algos": {}, "pos": {}, "next": 100, "calls": [], "wallet": 1000.0, "free": 1000.0, "dual": False, "dual_lock": False,
      "algo_api": True, "mtype": {}, "lev": {}}
-INFO = {"AAAUSDT": (0.001, 0.1, 0.1, 5.0), "1000PEPEUSDT": (0.0000001, 1.0, 1.0, 5.0), "BBBUSDT": (0.01, 1.0, 1.0, 5.0)}
+INFO = {"AAAUSDT": (0.001, 0.1, 0.1, 5.0), "1000PEPEUSDT": (0.0000001, 1.0, 1.0, 5.0), "BBBUSDT": (0.01, 1.0, 1.0, 5.0), "CCCUSDT": (0.001, 1.0, 1.0, 5.0)}
 
 
 class R:
@@ -53,7 +53,7 @@ def fake(method, url, headers=None, timeout=None, **k):
     if path in ("/fapi/v3/account", "/fapi/v2/account"):
         return R(200, {"totalWalletBalance": str(X["wallet"]), "totalMarginBalance": str(X["wallet"]), "availableBalance": str(X["free"]), "totalUnrealizedProfit": "0"})
     if path in ("/fapi/v3/positionRisk",):
-        return R(200, [{"symbol": s, "positionAmt": str(a), "entryPrice": "1", "markPrice": str(X.get("mark", {}).get(s, 1)), "positionSide": "BOTH"}
+        return R(200, [{"symbol": s, "positionAmt": str(a), "entryPrice": str(X.get("entry", {}).get(s, 1)), "markPrice": str(X.get("mark", {}).get(s, 1)), "positionSide": "BOTH"}
                        for s, a in X["pos"].items() if a])
     if path == "/fapi/v1/positionSide/dual":
         if method == "GET":
@@ -95,6 +95,10 @@ def fake(method, url, headers=None, timeout=None, **k):
             else:
                 return R(400, {"code": -2011, "msg": "Unknown order sent."})
         return R(200, o)
+    if path == "/fapi/v1/openOrders":   # v0.99.708
+        return R(200, [dict(o, origQty=o.get("quantity"), clientOrderId=o.get("newClientOrderId", "")) for o in X["orders"].values() if o["status"] in ("NEW", "PARTIALLY_FILLED")])
+    if path == "/fapi/v1/openAlgoOrders":
+        return R(200, [dict(a, orderType=a["type"]) for a in X["algos"].values() if a["algoStatus"] == "NEW"])
     if path == "/fapi/v1/algoOrder":
         if not X["algo_api"]:
             return R(404, {"code": -5000, "msg": "Path not found"})
@@ -284,6 +288,39 @@ V.dlm_real_place(h)
 res["position cap"] = not h.get("real")
 V.DLM_MAX_POS = cap0; V._DLM["trades"] = [t for t in V._DLM["trades"] if t["id"] != "held"]
 # (13) the UI
+# v0.99.708 — (a) the limit goes with its stop + take (closePosition triggers) and a GTD; (b) "another phone": the state lost ->
+# the bot takes over its limit (with its triggers), a ⚡ position (stop + take limit) and an SMC-like one (stop + take
+# triggers: take / stop = 1.5), nothing placed or cancelled on the exchange
+X["algo_api"] = True; X["dual"] = False; X["dual_lock"] = False; V._BNF["dual"] = None; X["pos"].clear()
+V._DLM.update({"orders": [], "trades": []}); V._BNO["pos"].clear()
+now = time.time(); tb = int(now // 14400 * 14400)
+g = mk("AAA_USDT", 1, 10.0, 0.1); V._DLM["orders"].append(g); V.dlm_real_place(g)
+rg = g["real"]; lo = X["orders"].get(int(rg.get("id") or 0)) or {}
+psl = X["algos"].get(int((rg.get("pre_sl") or [0, 0])[1])) or {}; ptp = X["algos"].get(int((rg.get("pre_tp") or [0, 0])[1])) or {}
+res["limit with its stop + take, GTD"] = (lo.get("timeInForce") == "GTD" and int(lo.get("goodTillDate", 0)) >= (now + 600) * 1000
+                                          and psl.get("type") == "STOP_MARKET" and psl.get("closePosition") == "true" and psl.get("triggerPrice") == "9.8"
+                                          and ptp.get("type") == "TAKE_PROFIT_MARKET" and ptp.get("triggerPrice") == "10.1")
+h = mk("BBB_USDT", -1, 20.0, 0.2); V._DLM["orders"].append(h); V.dlm_real_place(h)
+ho = X["orders"][int(h["real"]["id"])]; ho.update(status="FILLED", executedQty=ho["quantity"], avgPrice="20"); X["pos"]["BBBUSDT"] = -float(ho["quantity"]); X.setdefault("entry", {})["BBBUSDT"] = 20.0
+V.dlm_real_tick()
+tB = next(t for t in V._DLM["trades"] if t["symbol"] == "BBB_USDT"); sl0, tp0 = tB["real"].get("sl_id"), tB["real"].get("tp_id")
+X["pos"]["CCCUSDT"] = 10.0; X["entry"]["CCCUSDT"] = 5.0
+for kind, trg in (("STOP_MARKET", "4.8"), ("TAKE_PROFIT_MARKET", "5.3")):
+    i = oid(); X["algos"][i] = {"symbol": "CCCUSDT", "side": "SELL", "type": kind, "triggerPrice": trg, "closePosition": "true", "algoId": i, "algoStatus": "NEW"}
+V._DLM.update({"orders": [], "trades": []}); V._BNO["pos"].clear()   # the new phone: no state
+_atr = V._dlm_atr_at; V._dlm_atr_at = lambda sym, t, bs=14400: 0.1
+n0 = len(X["calls"]); got = V.dlm_bn_adopt()
+moves = [c for c in X["calls"][n0:] if c[0] in ("POST", "DELETE") and c[1] in ("/fapi/v1/order", "/fapi/v1/algoOrder")]
+oA = next((o for o in V._DLM["orders"] if (o.get("real") or {}).get("id") == rg["id"]), None)
+tB2 = next((t for t in V._DLM["trades"] if t["symbol"] == "BBB_USDT" and t["status"] == "OPEN"), None)
+cc = V._BNO["pos"].get("CCC_USDT") or {}
+res["new phone: takes over, cancels nothing"] = (not moves and oA is not None and oA["side"] == 1 and abs(oA["lv"] - 10.0) < 1e-9 and (oA["real"].get("pre_sl") or [0, 0])[1] == rg["pre_sl"][1]
+                                                 and tB2 is not None and tB2["side"] == -1 and tB2["real"].get("sl_id") == sl0 and tB2["real"].get("tp_id") == tp0
+                                                 and abs(tB2["entry"] - 20.0) < 1e-9 and cc.get("mode") == "smc" and cc.get("sl_id") and cc.get("tp_id") and len(got) == 3)
+V.dlm_real_tick()   # the next tick: the adopted ones managed, nothing new placed for them
+res["adopted managed on the next tick"] = tB2["status"] == "OPEN" and tB2["real"].get("sl_id") == sl0 and oA["status"] == "OPEN"
+V._dlm_atr_at = _atr
+print("   adopt:", got)
 html = V.app.test_client().get("/").get_data(as_text=True)
 st = V.app.test_client().get("/api/dlm/status").get_json()
 res["ui"] = "setDlmBinance" in html and "bnSaveKeys" in html and st["binance"] is True and st["bn_keys"] is True and st["bn_check"]["ok"]
