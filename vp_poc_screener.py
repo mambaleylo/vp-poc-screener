@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.704"
+APP_VERSION = "0.99.705"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -34570,8 +34570,7 @@ def dlm_scan(t_bar, st):
         sc_all.setdefault("by", {})[st["name"]] = {"t": int(time.time()), "bar": t_bar, "coins": coins, "cands": cands, "orders": len(new), "near": near}
         sc_all["near"] = sorted([x for v in sc_all["by"].values() for x in v.get("near") or []], key=lambda x: -x["pct"])[:8]
         _DLM["scan"] = sc_all
-    if new and TELEGRAM_ALERTS_DLM:
-        send_telegram(f"⚡ лимитки {tf}: " + ", ".join(f"{o['symbol'].replace('_USDT', '')} {'↑' if o['side'] > 0 else '↓'} {o['lv']:.6g}" for o in new[:10]), category="dlm")
+    # v0.99.705 — no Telegram for the new orders (the user: "набор лимиток для меня бесполезен"): only a filled one (_dlm_fill_msg)
     dlm_save()   # v0.99.691 — the real limits: _dlm_arm (dlm_real_tick) places them as the price comes
 
 
@@ -34777,6 +34776,27 @@ def dlm_settle(now):
     dlm_save()
 
 
+DLM_STREAM_RU = {"wick4h": "4ч, лимитка на фитиль", "close2h": "2ч, лимитка за 2 ATR"}
+
+
+def _dlm_fill_msg(t, o, fill, where):
+    """v0.99.705 — the Telegram message of a filled ⚡ limit (the only ⚡ message before the result): the indicator (⚡ Лимитки,
+    its stream), the coin and side, the fill, the take / stop / emergency stop, the time exit, the model's score and the
+    risk with its multipliers (the load, the daily WaveTrend)"""
+    r = o.get("real") or {}
+    pct = lambda p: (p - fill) / fill * 100
+    mult = []
+    if r.get("load") not in (None, 1, 1.0):
+        mult.append(f"загрузка ×{r['load']:g}")
+    if r.get("osc") not in (None, 1, 1.0):
+        mult.append(f"дневной WaveTrend ×{r['osc']:g}")
+    st = DLM_STREAM_RU.get(t.get("st") or "wick4h", DLM_TF.get(t.get("bs"), "4h"))
+    return (f"{'🟢' if t['side'] > 0 else '🔴'} {t['symbol'].replace('_USDT', '')} {t['direction']} · ⚡ Лимитки ({st}) — исполнилась на {where} @ {fill:.6g}\n"
+            f"тейк {t['tp']:.6g} ({pct(t['tp']):+.1f}%){_dlm_take_note(t)} · стоп {t['sl']:.6g} ({pct(t['sl']):+.1f}%, по закрытию свечи) · "
+            + (f"аварийный {t['hsl']:.6g} ({pct(t['hsl']):+.1f}%) · " if t.get("hsl") else "") + f"до {time.strftime('%d.%m %H:%M', time.localtime(t['until']))}\n"
+            f"оценка модели {t.get('score')}" + (f" · риск {r['risk']:g}%" if r.get("risk") is not None else "") + (f" ({', '.join(mult)})" if mult else ""))
+
+
 def _dlm_take_note(t):
     """the Telegram note on the take: 2 ATR, back to 1 ATR (its price) if the price first goes `pull` ATR against"""
     return f" (если цена сначала уйдёт против на {t.get('pull', 0.4):g} ATR — тейк {t['tp1']:.6g})" if t.get("tp2") and t.get("take") == "far" else ""
@@ -34953,7 +34973,8 @@ def dlm_real_place(o):
         tiers = get_risk_limit_tiers_for_symbol(sym)
         equity = get_futures_total_equity()
         osc = dlm_osc_mult(sym, o["side"])   # v0.99.704 — x the daily WaveTrend
-        risk = dlm_risk(equity) * dlm_load_mult() * osc   # v0.99.703 — x the load
+        lm = dlm_load_mult()
+        risk = dlm_risk(equity) * lm * osc   # v0.99.703 — x the load
         rule = ((_DLM.get("model") or {}).get("rule") or {})
         sl, kx = _dlm_size_stop(o, rule)   # v0.99.692 — at the emergency stop, the risk x its distance / the stop's
         risk = round(risk * kx, 4)
@@ -34976,7 +34997,7 @@ def dlm_real_place(o):
         body = {"contract": sym, "size": int(contracts) if s > 0 else -int(contracts), "price": format_price_str(px, tick),
                 "tif": "gtc", "text": "t-vpdlm"}
         r = gate_signed_request("POST", "/futures/usdt/orders", body=body)
-        o["real"] = {"status": "LIMIT", "id": str(r.get("id")), "size": int(contracts), "price": px, "lev": lev, "tick": tick, "risk": round(risk / kx, 2), "osc": osc}
+        o["real"] = {"status": "LIMIT", "id": str(r.get("id")), "size": int(contracts), "price": px, "lev": lev, "tick": tick, "risk": round(risk / kx, 2), "osc": osc, "load": lm}
 
 
 def _dlm_cancel_order(oid):
@@ -35234,7 +35255,8 @@ def dlm_bn_place(o):
     mmr = tiers[0][1] if tiers else SCALP_DEFAULT_MMR_PCT
     acct = bnf_account()
     osc = dlm_osc_mult(sym, s)   # v0.99.704 — x the daily WaveTrend
-    risk = round(dlm_risk(acct["equity"]) * dlm_load_mult() * osc * kx, 4)   # v0.99.703 — x the load
+    lm = dlm_load_mult()
+    risk = round(dlm_risk(acct["equity"]) * lm * osc * kx, 4)   # v0.99.703 — x the load
     tb = {bsym: tiers} if tiers else None
     margin, lev, skip = compute_risk_based_position(direction, lv, sl, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb, safety_margin=_dlm_liq_buf())
     if not skip and margin > acct["free"] * 0.9:   # the free margin checked: the risk scaled down to what the account carries
@@ -35261,7 +35283,7 @@ def dlm_bn_place(o):
     r = bnf_req("POST", "/fapi/v1/order", dict(_bnf_side_params(s, False, dual), symbol=bsym, type="LIMIT", timeInForce="GTC", quantity=qty,
                                                price=px, newClientOrderId=f"vpdlm{int(time.time() * 1000)}"))
     o["real"] = {"status": "LIMIT", "ex": "binance", "id": str(r.get("orderId")), "bsym": bsym, "scl": scl, "qty": q, "price": float(px) / scl,
-                 "lev": int(lev), "risk": round(risk / kx, 2), "osc": osc, "dual": dual, "tick": info["tick"], "step": info["step"]}
+                 "lev": int(lev), "risk": round(risk / kx, 2), "osc": osc, "load": lm, "dual": dual, "tick": info["tick"], "step": info["step"]}
 
 
 def _dlm_bn_exits(t):
@@ -35328,8 +35350,7 @@ def dlm_bn_tick(orders, trades):
                 except Exception as e:
                     log_error(f"dlm binance exits {t['symbol']}: {e}")
                 if TELEGRAM_ALERTS_DLM:
-                    send_telegram(f"⚡ {t['symbol'].replace('_USDT', '')} {t['direction']} · лимитка {DLM_TF.get(t.get('bs'), '4h')} исполнилась на Binance @ {fill:.6g}\n"
-                                  f"тейк {t['tp']:.6g}{_dlm_take_note(t)} · стоп {t['sl']:.6g} · до {time.strftime('%H:%M', time.localtime(t['until']))}", category="dlm")
+                    send_telegram(_dlm_fill_msg(t, o, fill, "Binance"), category="dlm")
         else:
             o["status"] = "EXPIRED" if now >= o["until"] else "CANCELLED"
     for t in trades:
@@ -35472,8 +35493,7 @@ def dlm_real_tick():
                     except Exception as e:
                         log_error(f"dlm exits {t['symbol']}: {e}")
                     if TELEGRAM_ALERTS_DLM:
-                        send_telegram(f"⚡ {t['symbol'].replace('_USDT', '')} {t['direction']} · лимитка {DLM_TF.get(t.get('bs'), '4h')} исполнилась @ {fill:.6g} ({filled} контр.)\n"
-                                      f"тейк {t['tp']:.6g}{_dlm_take_note(t)} · стоп {t['sl']:.6g} · до {time.strftime('%H:%M', time.localtime(t['until']))}", category="dlm")
+                        send_telegram(_dlm_fill_msg(t, o, fill, f"Gate, {filled} контр."), category="dlm")
             else:
                 o["status"] = "EXPIRED" if now >= o["until"] else "CANCELLED"
         for t in trades:

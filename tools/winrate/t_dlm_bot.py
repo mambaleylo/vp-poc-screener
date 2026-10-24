@@ -117,7 +117,7 @@ V.get_tickers = lambda: []
 closed = []
 V.close_position_for_mode = lambda mode, sym, d: (closed.append(sym), X_.pos.__setitem__(sym, 0), {"ok": True})[2]
 V.notify_trade_result = lambda *a, **k: None
-V.send_telegram = lambda *a, **k: None
+TG = []; V.send_telegram = lambda msg, *a, **k: TG.append(msg); V.TELEGRAM_ALERTS_DLM = True   # v0.99.705 — the fill's message
 V.AUTOTRADE_DRY_RUN = False; V.AUTOTRADE_ENABLED_DLM = True; V.MODULE_RISK_PCT["dlm"] = None
 V._DLM.update({"orders": [], "trades": []})
 now = time.time(); tb = int(now // 14400 * 14400)
@@ -229,4 +229,13 @@ V.dlm_osc_mult = _om; V._DLM["orders"], V._DLM["trades"] = _o0, _t0
 osc_ok = bool(osc) and worst_wt < 0.5 and mult_ok and n_up > 0 and n_dn > 0 and placed_osc
 print(f"(6) daily WaveTrend: bot vs research max diff {worst_wt:.3f} on 40 pool trades · multiplier by the model ({osc}) {mult_ok} (x{osc.get('up')} {n_up}, x{osc.get('dn')} {n_dn}) · the real order's risk x it {want_r:.4f}% {placed_osc} {osc_ok}")
 ok &= osc_ok
+# (7) v0.99.705 — Telegram: no message for the new orders (dlm_scan sends nothing), a filled limit -> the indicator, the
+# stream, the fill, take / stop / emergency stop and the risk with its multipliers
+import inspect
+fills = [m for m in TG if "исполнилась" in m]
+f0 = next((m for m in fills if "AAA" in m), "")
+tg_ok = ("send_telegram" not in inspect.getsource(V.dlm_scan) and not any("лимитки 4h" in m or "лимитки 2h" in m for m in TG)
+         and "⚡ Лимитки (4ч, лимитка на фитиль)" in f0 and "тейк" in f0 and "аварийный" in f0 and "оценка модели" in f0 and "риск 2.5%" in f0 and "загрузка ×0.625" in f0)
+print(f"(7) Telegram: orders silent, a fill told {tg_ok}\n" + f0)
+ok &= tg_ok
 print("ALL OK" if ok else "FAILED"); sys.exit(0 if ok else 1)

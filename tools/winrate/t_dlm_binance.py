@@ -119,7 +119,7 @@ V.requests.get = lambda url, params=None, timeout=None, **k: fake("GET", url + (
 V.BINANCE_CREDENTIALS_FILE = os.path.join(tempfile.mkdtemp(), "bn.json")
 V.dlm_save = lambda: None
 V.notify_trade_result = lambda *a, **k: None
-V.send_telegram = lambda *a, **k: None
+TG = []; V.send_telegram = lambda msg, *a, **k: TG.append(msg); V.TELEGRAM_ALERTS_DLM = True   # v0.99.705
 V.log_error = lambda m: print("   log:", m) if "binance algo" not in m and "binance one-way" not in m else None
 V._BNC[("AAA_USDT", "4h")] = {"bsym": "AAAUSDT", "scl": 1.0, "cols": [[]] * 6}
 V._BNC[("PEPE_USDT", "2h")] = {"bsym": "1000PEPEUSDT", "scl": 1000.0, "cols": [[]] * 6}
@@ -159,6 +159,7 @@ res["fill -> stop + take"] = (t["status"] == "OPEN" and abs(t["entry"] - 9.99) <
                               and sl.get("side") == "SELL" and abs(float(sl["triggerPrice"]) - 9.79) < 1e-9 and tp.get("type") == "LIMIT"
                               and tp.get("reduceOnly") == "true" and abs(float(tp["price"]) - 10.09) < 1e-9 and tp["quantity"] == o["quantity"]
                               and t["bs"] == 14400 and t["hold"] == 32 and t["fbar"] % 14400 == 0)
+res["fill told in Telegram"] = any("AAA" in m and "⚡ Лимитки" in m and "исполнилась на Binance" in m and "оценка модели" in m and "риск" in m for m in TG)   # v0.99.705
 # (4) the take fills -> WIN, the stop cancelled
 tp.update(status="FILLED", executedQty=tp["quantity"]); X["pos"]["AAAUSDT"] = 0.0
 V.dlm_real_tick()

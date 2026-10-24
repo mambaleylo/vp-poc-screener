@@ -20606,3 +20606,10 @@ v0.99.704 - ⚡ risk by the daily WaveTrend (lab, the user: "новые инди
          trend filters for SMC / EMA (median -4..6%), the P/R daily-trend split (one year only). Tests: t_dlm_bot (6): the
          bot's wt1 == the research's on 40 pool trades (max diff 0.000), the multiplier by the model, the real order's risk
          x it; t_dlm_binance, t_dlm_ui, t_bn_others, t_cstop_others — OK.
+v0.99.705 - ⚡ Telegram only for a filled limit (the user: "шьются постоянно про лимитки уведомления в ТГ бесполезные, лучше
+         присылать, когда лимитка реально исполнилась, с указанием какой индикатор"): no message for the new orders of a
+         scan any more; a filled one (Binance / Gate) -> _dlm_fill_msg: the indicator "⚡ Лимитки" and its stream (4ч на
+         фитиль / 2ч за 2 ATR), the coin and side, the fill price, the take / the stop (on the candle's close) / the emergency
+         stop with their %, the time exit's date and hour, the model's score and the risk with its multipliers (the load —
+         now kept with the order as "load" — and the daily WaveTrend). The trade's result message as before. Tests:
+         t_dlm_bot (7) (dlm_scan sends nothing, the fill's message), t_dlm_binance (the fill told), t_dlm_ui, t_bn_others — OK.
