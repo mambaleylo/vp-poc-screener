@@ -20577,3 +20577,14 @@ v0.99.702 - ⚡ the real limits armed earlier (the user: "открыта 1, но
          (DLM_THROUGH_ATR, its own constant now). A virtual open trade from before v0.99.701 also shows its reason (from
          its order, dlm_stats); the reason texts clearer ("цена проскочила лимитку раньше, чем бот выставил её на биржу").
          Tests: t_dlm_bot, t_dlm_binance, t_dlm_ui — OK.
+v0.99.703 - ⚡ risk by the load (lab, "продолжай лабораторию"): on the honest pool a ⚡ trade opened while few others are open
+         earns less (fewer than 3 open: +0.10R) than one in a bunch (8+ open: +0.26R) — the same every year: a bunch is
+         a broad move into the levels, the reversal comes for many coins at once. Rule (dlm_load_mult, the model's
+         load_risk {n 5, lo 0.625, hi 1.25}): fewer than 5 ⚡ trades open (virtual + real, the 4h / 2h streams) -> the
+         risk x0.625 of the setting, otherwise x1.25; in the Binance and Gate placing. Money from $100 over a year
+         (dynrisk4.py, port_expect2.py, the bot's leverage and margin): ⚡ alone the median $4.8k -> $6.2k, the worst
+         10% $1.8k -> $2.6k, the last 12 months $6.1k -> $11.3k, drawdown 66%; the bundle (⚡ + P/R + SMC + EMA) the
+         median $7.7k -> $10.1k, the worst 10% $1.3k -> $1.4k, the best 10% $28k -> $35k, drawdowns 63% -> 59%.
+         Rejected: more risk when few open (the opposite), the risk by the score, skipping the lone trades. The header's
+         expectation and the ⚡ money text updated. Tests: t_dlm_bot (+ the load x0.625 / x1.25; placed 3.75% at 4%),
+         t_dlm_binance, t_dlm_ui, t_bn_others, t_cstop_others — OK.

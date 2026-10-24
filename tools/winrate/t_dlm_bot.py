@@ -126,8 +126,16 @@ mk = lambda sym, side, lv: {"id": f"dlm_{sym}_{side}_{tb}", "symbol": sym, "side
 a, b_, c = mk("AAA_USDT", 1, 1.0), mk("BBB_USDT", -1, 2.0), mk("CCC_USDT", 1, 3.0)
 V._DLM["orders"] += [a, b_, c]
 for o in (a, b_, c): V.dlm_real_place(o)
-placed = (all((o.get("real") or {}).get("id") for o in (a, b_, c)) and risks and all(r == 6.0 for r in risks)   # 4% x 3 / 2 at the emergency stop
-          and all(o["real"]["risk"] == 4.0 for o in (a, b_, c)))
+placed = (all((o.get("real") or {}).get("id") for o in (a, b_, c)) and risks and all(r == 3.75 for r in risks)   # 4% x 0.625 (few open) x 3 / 2 at the emergency stop
+          and all(o["real"]["risk"] == 2.5 for o in (a, b_, c)))
+# v0.99.703 — the load: 5+ open -> x1.25, fewer -> x0.625; the old 4h-less trades (bs 900) not counted
+_tr0 = V._DLM["trades"]
+V._DLM["trades"] = [{"status": "OPEN", "bs": 14400}] * 4 + [{"status": "OPEN", "bs": 900}] * 3
+m_lo = V.dlm_load_mult()
+V._DLM["trades"] = [{"status": "OPEN", "bs": 14400}] * 5
+m_hi = V.dlm_load_mult()
+V._DLM["trades"] = _tr0
+load_ok = m_lo == 0.625 and m_hi == 1.25
 X_.fill(a["real"]["id"]); X_.fill(b_["real"]["id"])
 V.dlm_real_tick()
 ta = next(t for t in V._DLM["trades"] if t["symbol"] == "AAA_USDT"); tb_ = next(t for t in V._DLM["trades"] if t["symbol"] == "BBB_USDT")
@@ -176,8 +184,8 @@ arm_ok = arm_ok and (f_.get("real") or {}).get("status") == "SKIPPED" and not (f
 PX["EEE_USDT"] = 5.02   # 2 ATR away: the armed limit comes off, the order waits again
 V.dlm_real_tick()
 late_ok = arm_ok and e_.get("real") is None and e_["status"] == "OPEN"
-print(f"(4) placed at 4% {placed} · exits {exits_ok} · take 1.1 ATR + the emergency stop 3 ATR {bool(tp_ok)} · WIN {win} · a 4h close beyond the stop -> out (a wick / a 1h close: no) {cstop} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped} · armed near the price / waits far / no room at the touch -> none / off when far {late_ok}")
-ok &= placed and exits_ok and bool(tp_ok) and cstop and win and tx and cx and not left and capped and late_ok
+print(f"(4) load x0.625/x1.25 {load_ok} · placed at 4% {placed} · exits {exits_ok} · take 1.1 ATR + the emergency stop 3 ATR {bool(tp_ok)} · WIN {win} · a 4h close beyond the stop -> out (a wick / a 1h close: no) {cstop} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped} · armed near the price / waits far / no room at the touch -> none / off when far {late_ok}")
+ok &= load_ok and placed and exits_ok and bool(tp_ok) and cstop and win and tx and cx and not left and capped and late_ok
 # (5) v0.99.694 — the leverage: the liquidation at the model's "liq_buf" x the emergency stop's distance (the backtest's money
 # uses the same); the deployed model's value, a lower one -> more leverage, less margin
 m_ = V._DLM.get("model") or {}; buf0 = m_.get("liq_buf")

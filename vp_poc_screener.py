@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.702"
+APP_VERSION = "0.99.703"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28094,8 +28094,8 @@ _PROC_START = time.time()
 # худшее ожидание и лучшее": a year from $100 on the history (the 12-month windows from each week of 2023-02..2025-10, one
 # account, the bot's leverage, the honest pools; tools/winrate port_expect.py): the worst 10% / the median / the best 10% of
 # the years, the median drawdown. "bundle" = ⚡ 4% + P/R 2% + SMC 1% + EMA 0.5% (on Binance together), "dlm" = ⚡ alone
-EXPECT_YEAR = {"dlm": {"p10": 943, "p50": 3590, "p90": 11266, "dd": 66, "last12": 6105},
-               "bundle": {"p10": 1275, "p50": 7673, "p90": 28135, "dd": 63, "last12": 9809}}
+EXPECT_YEAR = {"dlm": {"p10": 1022, "p50": 5043, "p90": 14587, "dd": 62, "last12": 10026},   # v0.99.703: ⚡'s risk by the load (port_expect2.py)
+               "bundle": {"p10": 1434, "p50": 10149, "p90": 35184, "dd": 59, "last12": 16364}}
 
 
 @app.route("/api/boot")
@@ -34451,6 +34451,20 @@ def dlm_risk(equity=None):
     return min(MODULE_RISK_PCT.get("dlm") or DLM_RISK_DEFAULT, 10.0)
 
 
+def dlm_load_mult():
+    """v0.99.703 — the risk by how busy ⚡ is: the trades of a lone coin's spike (fewer than "n" ⚡ trades open, virtual +
+    real — the research pool's own count) made +0.10R, the ones of a market-wide spike (8+) +0.26R, every year
+    (tools/winrate bunch_r.py): x"lo" of the risk below n, x"hi" from n (dynrisk4.py: < 5 open 2.5% / else 5% at a 4%
+    setting — a year from $100 the median $4 841 -> $6 190, the worst 10% $1 779 -> $2 616, the last 12 months $6 051 ->
+    $11 271, the drawdown the same 66%). The model's "load_risk"; none -> x1"""
+    lr = (_DLM.get("model") or {}).get("load_risk") or {}
+    if not lr:
+        return 1.0
+    with _dlm_lock:
+        n = sum(1 for t in _DLM["trades"] if t["status"] == "OPEN" and int(t.get("bs") or 900) != 900)
+    return float(lr.get("lo", 1.0)) if n < int(lr.get("n", 5)) else float(lr.get("hi", 1.0))
+
+
 def dlm_scan(t_bar, st):
     """at the close of a bar of the stream's chart (4h / 2h) that started at t_bar - its bar: the coins' limits of the
     stream scored by its models; the ones above its threshold become orders alive for its next 4 bars — one per coin &
@@ -34884,7 +34898,7 @@ def dlm_real_place(o):
             mmr = (STATE.get("scalp_mmr_map") or {}).get(sym, SCALP_DEFAULT_MMR_PCT)
         tiers = get_risk_limit_tiers_for_symbol(sym)
         equity = get_futures_total_equity()
-        risk = dlm_risk(equity)
+        risk = dlm_risk(equity) * dlm_load_mult()   # v0.99.703 — x the load
         rule = ((_DLM.get("model") or {}).get("rule") or {})
         sl, kx = _dlm_size_stop(o, rule)   # v0.99.692 — at the emergency stop, the risk x its distance / the stop's
         risk = round(risk * kx, 4)
@@ -35164,7 +35178,7 @@ def dlm_bn_place(o):
     cap = max((t_[2] for t_ in tiers), default=20)
     mmr = tiers[0][1] if tiers else SCALP_DEFAULT_MMR_PCT
     acct = bnf_account()
-    risk = round(dlm_risk(acct["equity"]) * kx, 4)
+    risk = round(dlm_risk(acct["equity"]) * dlm_load_mult() * kx, 4)   # v0.99.703 — x the load
     tb = {bsym: tiers} if tiers else None
     margin, lev, skip = compute_risk_based_position(direction, lv, sl, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb, safety_margin=_dlm_liq_buf())
     if not skip and margin > acct["free"] * 0.9:   # the free margin checked: the risk scaled down to what the account carries
@@ -35548,7 +35562,7 @@ def dlm_stats():
             "binance": DLM_BINANCE, "bn_keys": bool(BINANCE_API_KEY and BINANCE_API_SECRET), "bn_check": _BNF.get("check"),   # v0.99.684
             "more_coins": DLM_MORE_COINS, "coins_n": 210 if DLM_MORE_COINS else 127,   # v0.99.686
             "risk": dlm_risk(), "risk_set": MODULE_RISK_PCT.get("dlm"), "max_pos": DLM_MAX_POS,   # v0.99.687
-            "model": dict({k: m.get(k) for k in ("ver", "q", "trained_to", "rule", "research", "side_cap", "liq_buf")},
+            "model": dict({k: m.get(k) for k in ("ver", "q", "trained_to", "rule", "research", "side_cap", "liq_buf", "load_risk")},
                           streams=[{k: x.get(k) for k in ("name", "tf", "anchor", "depth_atr", "thr", "alive_bars", "take_atr", "stop_atr", "hold_bars", "far_take_atr", "pull_atr", "hard_stop_atr", "stop_mode", "close_h")} for x in m.get("streams") or []]) if m else None,
             "err": err, "scan": scan, "orders": orders[:40], "orders_n": len(orders),
             "open": [dict(t, why=t.get("why") or (_dlm_why_virtual(_ord.get(t["id"]) or {}) if not t.get("real") else None))
@@ -43754,7 +43768,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
       ${zBars(rows, v => sgR(+(+v).toFixed(3)))}
       <div class="zstrip"><span>WR <b>~${un.wr || 70}%</b></span><span>в среднем <b>${sgR(un.avg || 0.235)}</b></span><span>последние 12 мес <b>${sgR(un.last12_avg || 0.24)}</b></span><span><b>~65</b> сделок в месяц</span></div>
       ${d.streams && (d.streams.wick4h.n || d.streams.close2h.n) ? `<div class="dim" style="font-size:var(--fs-xs);">живые: 4ч ${d.streams.wick4h.n} (${d.streams.wick4h.n ? sgR(d.streams.wick4h.avg) + ', WR ' + d.streams.wick4h.wr + '%' : '—'}) · 2ч ${d.streams.close2h.n} (${d.streams.close2h.n ? sgR(d.streams.close2h.avg) + ', WR ' + d.streams.close2h.wr + '%' : '—'})</div>` : ''}
-      <div class="zsub">Сделки посчитаны по часовым свечам Binance: стоп — только если свеча своего графика (4ч у 4ч-сделок, 2ч у 2ч) закрылась за ним; фитили и часовые закрытия за стопом не выбивают, от обвала — аварийный стоп 3 ATR на бирже. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}% с плечом, как у бота (ликвидация в ${mo.liq_buf || 1.25}× дальше аварийного стопа — маржа ограничивает число сделок), без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 4841)}</b>, худшие 10% ~${usd(mo.year_p10 || 1779)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 3198)}), последние 12 месяцев ~${usd(mo.last12 || 6051)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
+      <div class="zsub">Сделки посчитаны по часовым свечам Binance: стоп — только если свеча своего графика (4ч у 4ч-сделок, 2ч у 2ч) закрылась за ним; фитили и часовые закрытия за стопом не выбивают, от обвала — аварийный стоп 3 ATR на бирже. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%${(m && m.load_risk) ? ` (риск по загрузке: пока открыто меньше ${m.load_risk.n} сделок ⚡ — ×${m.load_risk.lo}, дальше ×${m.load_risk.hi}: сделки общего прострела рынка на истории вдвое лучше одиночных)` : ''} с плечом, как у бота (ликвидация в ${mo.liq_buf || 1.25}× дальше аварийного стопа — маржа ограничивает число сделок), без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 6190)}</b>, худшие 10% ~${usd(mo.year_p10 || 2616)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 4253)}), последние 12 месяцев ~${usd(mo.last12 || 11271)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
       <div class="zbanner warn">Просадка: при обвале рынка счёт может временно упасть на 60–70% от пика — 24–25 мая 2025 за два дня стопы закрыли 19 сделок 4ч (−19R, при 4% на сделку это около −50%), с 2ч сделками просадки ещё глубже. Потом счёт восстанавливался, но к такому надо быть готовым и не повышать риск после серии стопов.</div>
       ${d.risk_set && d.risk_set > 6 ? `<div class="zbanner warn">Риск ${d.risk}% на сделку при до ${d.max_pos || 20} сделок сразу — это до ${Math.round(d.risk * (d.max_pos || 20))}% счёта под стопами одновременно. Лучше всего по деньгам — 3–4%: выше денег даже меньше (маржи хватает на меньшее число сделок), а просадки глубже.</div>` : ''}
       ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} (бот держит их у себя и выставляет на бирже, когда цена подошла на 1 ATR — так места и маржа не заняты далёкими лимитками) — переключатель «↳ ⚡ Лимитки 4ч+2ч» в автоторговле; риск — поле «⚡» (пусто = 4%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
