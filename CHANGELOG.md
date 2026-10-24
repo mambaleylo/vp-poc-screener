@@ -20561,3 +20561,10 @@ v0.99.700 - SMC and EMA: the stop at a 4h close (as ⚡). On the honest pools (s
          $11k, 66%. Tests: t_cstop_others (new: the bot re-makes 8/8 SMC and 10/10 EMA list trades of every exit kind;
          the real order at the emergency stop with x2, a 4h close -> out at the market), t_bn_others (+ the header's
          expectation), t_smc_bot, t_dlm_bot, t_dlm_ui — OK.
+v0.99.701 - ⚡ a virtual trade says why it is not on the exchange (the user: "открыта 1, но по факту 0, в автоторговле пусто",
+         "автоторговля включена"): the ZK long was virtual — its order never went on the exchange, the tab did not say
+         why. Now the "открыто" tile shows on the exchange / virtual and the reason, and each virtual open trade carries
+         "why" (_dlm_why_virtual, set when the settle opens it): ⚡ autotrade off; "Бумажная торговля (dry-run)" on (the
+         bot's default — the orders are only logged); the order's own skip reason (no room, the coin busy, under the
+         exchange minimum, the price far through the level while the bot was down...); placed before the bot started.
+         Test: t_dlm_ui (a virtual trade in dry-run shows the reason), t_dlm_bot — OK.

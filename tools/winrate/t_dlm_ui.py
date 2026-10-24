@@ -5,6 +5,7 @@ from common import V
 V.dlm_model(); now = int(time.time()); tb = now // 14400 * 14400
 V._DLM["scan"] = {"t": now, "bar": tb, "coins": 210, "cands": 300, "orders": 1, "near": [{"symbol": "SOL_USDT", "side": 1, "pct": 88}], "src": {"binance": 210, "gate": 0}}
 V._DLM["orders"] = [{"id": "o1", "symbol": "SOL_USDT", "side": 1, "lv": 148.2, "atr": 3.1, "score": 0.4, "t0": tb, "bs": 14400, "until": tb + 4 * 14400, "px": 155.4, "status": "OPEN", "real": None}]
+V.AUTOTRADE_ENABLED_DLM = True; V.AUTOTRADE_DRY_RUN = True   # v0.99.701 — a virtual open trade says why it is not on the exchange
 V._DLM["trades"] = [{"id": "t1", "symbol": "DOGE_USDT", "side": -1, "direction": "SHORT", "entry": 0.21, "lv": 0.21, "atr": 0.004, "sl": 0.218, "tp": 0.206, "score": 0.4, "t0": tb - 14400, "fbar": tb - 14400, "t_in": now - 6000, "until": tb + 30 * 14400, "bs": 14400, "hold": 32, "status": "OPEN", "result": None, "r": None, "real": None, "rv": 2},
                     {"id": "t2", "symbol": "ADA_USDT", "side": 1, "direction": "LONG", "entry": 0.5, "lv": 0.5, "atr": 0.01, "sl": 0.48, "tp": 0.51, "score": 0.4, "t0": tb - 8 * 14400, "fbar": tb - 7 * 14400, "t_in": now - 99000, "until": 0, "bs": 14400, "hold": 32, "status": "CLOSED", "result": "WIN", "r": 0.49, "exit": 0.51, "t_out": now - 30000, "real": None, "rv": 2},
                     {"id": "t3", "symbol": "XRP_USDT", "side": 1, "direction": "LONG", "entry": 2.0, "lv": 2.0, "atr": 0.01, "sl": 1.98, "tp": 2.005, "score": 0.1, "t0": tb - 99999, "fbar": tb - 99000, "t_in": now - 99000, "until": 0, "status": "CLOSED", "result": "WIN", "r": 0.22, "exit": 2.005, "t_out": now - 90000, "real": None, "rv": 1}]
@@ -84,6 +85,8 @@ with sync_playwright() as p:
     m50_ok = m50_ok and seq_ok
     if not seq_ok: print("SEQ", [(i, rows[i].strip()[:60], rows[i + 1].strip()[:60]) for i in range(len(rows) - 1) if abs(shown[i + 1] + usd[i] - shown[i]) > 1.01])
     print("rows with $:", len(rows), "· e.g.", rows[0].strip()[:120] if rows else "-", "· python final", bal[-1] if bal else None, m50_ok)
+    why_ok = "не на бирже: включена «Бумажная торговля (dry-run)»" in txt and "виртуально — включена бумажная торговля" in txt
+    print("virtual trade's reason shown", why_ok)
     gone = "setDlmSingle" not in html and "setDlmLadder" not in html and "Лесенка" not in txt
-    print("errors", errs, "· last 50 money", m50_ok, "· TLM exit / emergency stop", exit_ok and hs_ok, "· single/ladder gone", gone, "· 4h text", "4ч" in txt and "старый модуль 15м" in txt, "· 2h chart", "2ч" in t2)
+    print("errors", errs, "· why virtual", why_ok, "· last 50 money", m50_ok, "· TLM exit / emergency stop", exit_ok and hs_ok, "· single/ladder gone", gone, "· 4h text", "4ч" in txt and "старый модуль 15м" in txt, "· 2h chart", "2ч" in t2)
     b.close()

@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.700"
+APP_VERSION = "0.99.701"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -34507,6 +34507,20 @@ def dlm_scan(t_bar, st):
     dlm_save()   # v0.99.691 — the real limits: _dlm_arm (dlm_real_tick) places them as the price comes
 
 
+def _dlm_why_virtual(o):
+    """v0.99.701 — a virtual ⚡ trade: the reason its order did not go on the exchange"""
+    r = o.get("real") or {}
+    if not AUTOTRADE_ENABLED_DLM:
+        return "автоторговля ⚡ выключена"
+    if r.get("status") == "DRY_RUN" or AUTOTRADE_DRY_RUN:
+        return "включена «Бумажная торговля (dry-run)» в настройках — ордера на биржу не отправляются; выключите её, чтобы торговать"
+    if r.get("detail"):
+        return str(r["detail"])[:160]
+    if int(o.get("t0") or 0) < _PROC_START - 60:
+        return "лимитка поставлена до запуска бота / включения автоторговли"
+    return "цена прошла уровень между проверками бота — лимитка не успела встать на биржу"
+
+
 def _dlm_open_trade(o, t_fill_bar, fill, real=None, t1h=None):
     """an order filled: the trade (stop / take from the fill and the order bar's ATR). v0.99.692 — a stream with
     stop_mode "close1h": "sl" = the stop out at a 1h CLOSE beyond it (the risk unit), "hsl" = the emergency stop on the
@@ -34634,7 +34648,9 @@ def dlm_settle(now):
                 if taken:
                     o["status"] = "SKIP"
                 else:
-                    _dlm_open_trade(o, hit["time"], hit["fill"], t1h=hit.get("t1h"))
+                    tv = _dlm_open_trade(o, hit["time"], hit["fill"], t1h=hit.get("t1h"))
+                    if tv is not None:   # v0.99.701 — why this one is not on the exchange (the user: "открыта 1, но по факту 0")
+                        tv["why"] = _dlm_why_virtual(o)
             elif now >= o["until"]:
                 o["status"] = "EXPIRED"
         except Exception as e:
@@ -43780,9 +43796,10 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
     : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — на закрытии ближайшей 2ч свечи (00, 02, 04 … UTC)</div>`);
   const op = d.open || [];
   const row = (t, i) => `<div onclick="btLiveOpen('dlm', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
-      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim">${t.bs ? (t.bs === 7200 ? ' · 2ч' : (t.bs === 900 ? ' · 15м' : ' · 4ч')) : ''}${t.real ? ' · 💰' : ''}</span></span>
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim">${t.bs ? (t.bs === 7200 ? ' · 2ч' : (t.bs === 900 ? ' · 15м' : ' · 4ч')) : ''}${t.real ? ' · 💰 на бирже' : ' · виртуально'}</span>${!t.real && (t.why || d.dry || !d.auto) ? `<br><span class="dim" style="font-size:var(--fs-xs);">не на бирже: ${t.why || (!d.auto ? 'автоторговля ⚡ выключена' : 'включена «Бумажная торговля (dry-run)» в настройках — ордера на биржу не отправляются; выключите её, чтобы торговать')}</span>` : ''}</span>
       <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry)} · тейк ${fmtNum(t.tp)} · до ${hm(t.until)}</span></div>`;
-  h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, `из ${d.max_pos || 20} возможных`)}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_day != null ? `~${d.per_day} в день` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.real_n ? `реальных ${d.real_n}: ${sgR(d.real_sum)}` : 'виртуально')}</div>
+  const opReal = op.filter(t => t.real).length;   // v0.99.701 — the user: "открыта 1, но по факту 0": a virtual trade is not on the exchange
+  h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, op.length ? (opReal ? `на бирже ${opReal}${op.length > opReal ? ` · виртуально ${op.length - opReal}` : ''}` : (!d.auto ? 'виртуально — автоторговля ⚡ выключена' : (d.dry ? 'виртуально — включена бумажная торговля (dry-run)' : 'виртуально — причина под сделкой'))) : `из ${d.max_pos || 20} возможных`)}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_day != null ? `~${d.per_day} в день` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.real_n ? `реальных ${d.real_n}: ${sgR(d.real_sum)}` : 'виртуально')}</div>
     ${op.length ? `<div style="margin-top:8px;">${op.slice(-12).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
     ${liveCheckHtml(d.live_check)}
     ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromDlm(t), `btLiveOpen('dlm', ${Math.min(12, op.length) + i})`)).join('')}</details>` : ''}
