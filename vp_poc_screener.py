@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.706"
+APP_VERSION = "0.99.707"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28095,7 +28095,7 @@ _PROC_START = time.time()
 # account, the bot's leverage, the honest pools; tools/winrate port_expect.py): the worst 10% / the median / the best 10% of
 # the years, the median drawdown. "bundle" = ⚡ 4% + P/R 2% + SMC 1.5% + EMA 0.5% (on Binance together), "dlm" = ⚡ alone
 EXPECT_YEAR = {"dlm": {"p10": 1036, "p50": 6355, "p90": 15913, "dd": 59, "last12": 11663},   # v0.99.704: x the daily WaveTrend (port_osc3.py)
-               "bundle": {"p10": 1482, "p50": 16848, "p90": 44963, "dd": 62, "last12": 32937}}   # v0.99.706: SMC q 0.993 at 1.5%, only the touches in its reach (port_smcr.py)
+               "bundle": {"p10": 1502, "p50": 16849, "p90": 44963, "dd": 62, "last12": 33175}}   # v0.99.707: SMC q 0.993 at 1.5%; SMC and EMA only the touches in their reach (port_honest.py)
 
 
 @app.route("/api/boot")

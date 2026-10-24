@@ -20627,3 +20627,10 @@ v0.99.706 - 🧱 SMC: the model's threshold q 0.99 -> 0.993 and the risk on Bina
          risk (+ a stress test: the money falls fast when the trades are 0.10-0.15R worse than the backtest), the free
          margin share, stricter EMA thresholds, the GitHub indicators' own family models. Tests: t_smc_bot (the bot
          re-makes the list's 2026 trades), t_bn_others (SMC 1.5%), t_cstop_others, t_dlm_ui — OK.
+v0.99.707 - 📈 EMA backtest list with the bot's reach filter (as SMC in v0.99.706): 6% of the touches (18 of 302) were spikes
+         to an EMA more than 1.5 daily ATR from the price at the hour's start — emx_levels never arms those. The list now
+         284 trades, the same +0.71R, WR 78% (ema_export12.py); the model's research years updated (the model the same,
+         ver 12). The bundle a year from $100 (port_honest.py, both lists honest): the worst 10% ~$1.5k, the median
+         ~$16.8k, the best 10% ~$45k, the last 12 months ~$33.2k, drawdowns ~62% — the header's expectation. Also checked:
+         the bundle's risk split with the new SMC (port_w705.py) — the current one stays; SMC by level kind — nearly all
+         are 4h / daily bullish FVG longs, nothing to cut. Tests: t_cstop_others (EMA re-made from the new list), t_bn_others — OK.
