@@ -97,6 +97,8 @@ V.gate_signed_request = X_.req
 MARK = {"AAA_USDT": 1.0, "BBB_USDT": 2.0, "CCC_USDT": 3.0}
 V.get_open_positions = lambda: [{"contract": c, "size": v, "mark_price": str(MARK.get(c, 1))} for c, v in X_.pos.items() if v]
 KL = {}   # v0.99.690 — the 1m candles the take watcher reads
+H1K = {}   # v0.99.692 — the 1h candles of the close stop
+V._dlm_1h = lambda sym, start, now: [c for c in H1K.get(sym, []) if c["time"] >= start and c["time"] + 3600 <= now]
 V.binance_klines = lambda sym, iv, a, b: [c for c in KL.get(sym, []) if a <= c["time"] <= b]
 def trig(sym, d, px, rule, tick=None, price_type=0):
     X_.n += 1; X_.trig[str(X_.n)] = (sym, px); return {"id": X_.n}
@@ -124,29 +126,29 @@ mk = lambda sym, side, lv: {"id": f"dlm_{sym}_{side}_{tb}", "symbol": sym, "side
 a, b_, c = mk("AAA_USDT", 1, 1.0), mk("BBB_USDT", -1, 2.0), mk("CCC_USDT", 1, 3.0)
 V._DLM["orders"] += [a, b_, c]
 for o in (a, b_, c): V.dlm_real_place(o)
-placed = all((o.get("real") or {}).get("id") for o in (a, b_, c)) and risks and all(r == 4.0 for r in risks)
+placed = (all((o.get("real") or {}).get("id") for o in (a, b_, c)) and risks and all(r == 6.0 for r in risks)   # 4% x 3 / 2 at the emergency stop
+          and all(o["real"]["risk"] == 4.0 for o in (a, b_, c)))
 X_.fill(a["real"]["id"]); X_.fill(b_["real"]["id"])
 V.dlm_real_tick()
 ta = next(t for t in V._DLM["trades"] if t["symbol"] == "AAA_USDT"); tb_ = next(t for t in V._DLM["trades"] if t["symbol"] == "BBB_USDT")
 exits_ok = bool(ta["real"].get("sl_id") and ta["real"].get("tp_id") and ta["real"].get("tp_kind") == "limit") and ta["hold"] == 32 and ta["until"] - ta["fbar"] == 32 * 14400
-tp_order = X_.orders[ta["real"]["tp_id"]]   # v0.99.690 — the take starts at 2 ATR
-tp_ok = tp_order.get("reduce_only") and tp_order["size"] == -37 and abs(float(tp_order["price"]) - (ta["entry"] + 0.02)) < 1e-6 and ta["take"] == "far"
-# the short goes 0.5 ATR against before +1 ATR: its take comes back to 1 ATR (the old order cancelled, a new one)
-m_ = int(time.time()) // 60 * 60
-KL["BBB_USDT"] = [{"time": m_ - 60, "open": 2.0, "high": 2.0, "low": 1.97, "close": 2.0},   # before the fill's minute: ignored
-                  {"time": m_, "open": 2.0, "high": 2.005, "low": 1.999, "close": 2.003}]
-old_tp = tb_["real"]["tp_id"]; tb_["t_in"] = m_ - 30; tb_["mw"] = 0
-V.dlm_real_tick()
-pull_ok = (tb_["take"] == "near" and X_.orders[old_tp]["status"] == "finished" and tb_["real"]["tp_id"] != old_tp
-           and abs(float(X_.orders[tb_["real"]["tp_id"]]["price"]) - (tb_["entry"] - 0.01)) < 1e-6 and abs(tb_["tp"] - (tb_["entry"] - 0.01)) < 1e-9)
-# the long reaches +1 ATR with no dip: the take stays at 2 ATR for good
-KL["AAA_USDT"] = [{"time": m_ + 60, "open": 1.0, "high": 1.011, "low": 0.999, "close": 1.01}]
-ta["t_in"] = m_ - 30; ta["mw"] = 0; MARK["AAA_USDT"] = 1.01
-V.dlm_real_tick()
-lock_ok = ta["take"] == "locked" and abs(float(X_.orders[ta["real"]["tp_id"]]["price"]) - (ta["entry"] + 0.02)) < 1e-6
+tp_order = X_.orders[ta["real"]["tp_id"]]   # v0.99.692 — the take 1.1 ATR, the exchange's stop = the emergency 3 ATR
+tp_ok = (tp_order.get("reduce_only") and tp_order["size"] == -37 and abs(float(tp_order["price"]) - (ta["entry"] + 0.011)) < 1e-6
+         and abs(X_.trig[str(ta["real"]["sl_id"])][1] - (ta["entry"] - 0.03)) < 1e-6 and abs(ta["sl"] - (ta["entry"] - 0.02)) < 1e-9 and ta.get("smode") == "close1h")
 X_.fill(ta["real"]["tp_id"])           # the take fills: the position goes
 V.dlm_real_tick(); V.dlm_real_tick()
 win = ta["status"] == "CLOSED" and ta["result"] == "WIN" and ta["r"] > 0
+# a short whose 1h candle closes beyond the 2 ATR stop: out at the market, LOSS (a wick beyond it and back: nothing)
+i_ = mk("III_USDT", -1, 4.0); V._DLM["orders"].append(i_); V.dlm_real_place(i_); X_.fill(i_["real"]["id"]); V.dlm_real_tick()
+ti = next(t for t in V._DLM["trades"] if t["symbol"] == "III_USDT"); h0 = int(time.time()) // 3600 * 3600 - 7200
+ti["t1h"] = h0; ti["cs_bar"] = 0
+H1K["III_USDT"] = [{"time": h0, "open": 4.0, "high": 4.025, "low": 3.99, "close": 4.005}]   # a wick to 4.025 (> the stop 4.02), the close back
+V.dlm_real_tick()
+wick_ok = ti["status"] == "OPEN"
+H1K["III_USDT"].append({"time": h0 + 3600, "open": 4.005, "high": 4.026, "low": 4.0, "close": 4.022})   # the close beyond 4.02
+ti["cs_bar"] = h0 - 30   # due again: both hours looked at
+V.dlm_real_tick()
+cstop = wick_ok and ti["status"] == "CLOSED" and ti["result"] == "LOSS" and ti.get("close_stop") and "III_USDT" in closed
 tb_["until"] = time.time() - 1          # the second trade runs out of time
 V.dlm_real_tick()
 tx = tb_["status"] == "CLOSED" and tb_["result"] == "TIME_EXIT" and "BBB_USDT" in closed
@@ -172,6 +174,6 @@ arm_ok = arm_ok and (f_.get("real") or {}).get("status") == "SKIPPED" and not (f
 PX["EEE_USDT"] = 5.02   # 2 ATR away: the armed limit comes off, the order waits again
 V.dlm_real_tick()
 late_ok = arm_ok and e_.get("real") is None and e_["status"] == "OPEN"
-print(f"(4) placed at 4% {placed} · exits {exits_ok} · take = reduce-only limit at 2 ATR {bool(tp_ok)} · back to 1 ATR after a dip {pull_ok} · stays after +1 ATR {lock_ok} · WIN {win} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped} · armed near the price / waits far / no room at the touch -> none / off when far {late_ok}")
-ok &= placed and exits_ok and bool(tp_ok) and pull_ok and lock_ok and win and tx and cx and not left and capped and late_ok
+print(f"(4) placed at 4% {placed} · exits {exits_ok} · take 1.1 ATR + the emergency stop 3 ATR {bool(tp_ok)} · WIN {win} · a 1h close beyond the stop -> out (a wick: no) {cstop} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped} · armed near the price / waits far / no room at the touch -> none / off when far {late_ok}")
+ok &= placed and exits_ok and bool(tp_ok) and cstop and win and tx and cx and not left and capped and late_ok
 print("ALL OK" if ok else "FAILED"); sys.exit(0 if ok else 1)

@@ -20434,3 +20434,23 @@ v0.99.691 - ⚡ the audit (the user: "все ещё раз проверь, по 
          exits (every matched trade's R within 0.0005), the new labels (newlabel.py reproduces the old ones exactly,
          4 of 1.46M differ on one coin's changed candles). Tests: t_dlm_bot (the arming), t_dlm_binance (armed by the
          tickers on a fake Binance, a 4h-only cache), t_dlm_parity, t_dlm_coins, t_dlm_ui.
+v0.99.692 - ⚡ the exits for a high win rate (the user: "я просил с хорошим винрейтом, а сейчас при плохом среднем rr ещё и
+         винрейт упал"; "стопы почти все выбиваются фитилем"): 61% of the 2 ATR stops were wicks — the 1h candle closed
+         back inside; 45% of the stopped trades reached the take later (tools/winrate wickstat.py). Honest grids on the
+         1h candles, the pool in the honest order (wrfront.py, wrfront2.py — take 0.4..1.3 x stop 1.5..3.5,
+         wrfront3.py — the 1h-close stop): the take 1.1 ATR (a reduce-only limit); the stop when a 1h candle CLOSES
+         beyond 2 ATR (out at the market after that close); an emergency stop on the exchange at 3 ATR; the position
+         sized at the 2 ATR stop (the risk %), the leverage at the 3 ATR one (risk x 1.5 at the emergency stop). The pool
+         (dlm4_export8.py): WR 79% (was 68%), +0.187R; a year from $100 at 4%: the median $5 458, the worst 10% $1 780,
+         harsh $3 465, the last 12 months $4 503 (the deployed take 2 / 1 ATR on the same 1h walk: $2 674 / $716 / $965).
+         The take 2 / 1 ATR of v0.99.690 had won only on the 4h bars' coarse order (the stop first in a 4h bar); on the
+         1h candles its lower win rate costs more than its R. The take 0.5–0.75 with a 3 ATR stop: WR 88–91% but
+         +0.06–0.11R and a fifth of the money. A partial take (half at +1 ATR): worse. The honest tournament
+         (tournament.py): the 4h wick + 2h close pair stays the best of all the scored streams; the risk 4%.
+         The bot: virtual trades walked on the 1h candles from the touch hour (_dlm_walk_1h); real ones — the
+         STOP_MARKET / trigger at 3 ATR, the take limit, the hourly close check (_dlm_close_stop) -> out at the market
+         ("час закрылся за стопом"). Fill stats (fillstats.py, Jun–Oct 2026): a 4h order fills 28%, a 2h one 9%; a
+         setup (a coin & side's orders in a row) 33%, a trade in 17% (the side's 20 in the mass days). Tests:
+         t_dlm_bot (10/10 backtest trades re-made incl. an emergency stop; the real path: the stop at 3 ATR, the take
+         1.1, a wick — no exit, a 1h close beyond — out), t_dlm_binance (the same on a fake Binance), t_dlm_ui,
+         t_dlm_coins, t_dlm_parity — OK.

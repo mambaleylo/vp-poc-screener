@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.691"
+APP_VERSION = "0.99.692"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -34012,6 +34012,12 @@ def api_binance_check():
 # account would have taken 188 of 406 trades: now they wait in the bot and go on the exchange as the price comes;
 # (5) bn_map knew only the 15m / 1d candle caches — a ⚡ coin no other module had loaded: "монеты нет на Binance";
 # (6) a slow 4h scan could drop the 2h one of the same bar close.
+# v0.99.692 — the user wants a high win rate ("я просил с хорошим винрейтом") and saw the stops taken by wicks: 61% of the
+# 2 ATR stops were wicks (the 1h candle closed back), 45% of the stopped trades reached the take later (wickstat.py).
+# The honest grids on the 1h candles (wrfront*.py): the take 1.1 ATR, the stop at a 1h CLOSE beyond 2 ATR, an emergency
+# stop on the exchange at 3 ATR (the position sized at the 2 ATR, the leverage at the 3 ATR) — WR 79% (was 68%), the
+# median year ~$5 500, the worst 10% ~$1 800, the last 12 months ~$4 500 (was $2 700 / $700 / $1 000 on the same
+# candles). The take 2 / 1 ATR of v0.99.690 had won only on the 4h bars' coarse order; on the 1h ones it lost.
 DLM_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_dlm_model.json")
 DLM_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_dlm_model.json"
 DLM_MODEL_VER = 3   # v0.99.687 — the 4h model (ver 1 = the 15m one: not read any more); v0.99.689: 3 = the streams (4h + 2h)
@@ -34458,8 +34464,10 @@ def dlm_scan(t_bar, st):
     dlm_save()   # v0.99.691 — the real limits: _dlm_arm (dlm_real_tick) places them as the price comes
 
 
-def _dlm_open_trade(o, t_fill_bar, fill, real=None):
-    """an order filled: the trade (stop / take from the fill and the order bar's ATR)"""
+def _dlm_open_trade(o, t_fill_bar, fill, real=None, t1h=None):
+    """an order filled: the trade (stop / take from the fill and the order bar's ATR). v0.99.692 — a stream with
+    stop_mode "close1h": "sl" = the stop out at a 1h CLOSE beyond it (the risk unit), "hsl" = the emergency stop on the
+    exchange; t1h = the touch's 1h bar (the walk on the 1h candles starts there)"""
     st = _dlm_stream(o.get("st") or "wick4h") or {}   # v0.99.689 — the stream's rule (4h orders before it: the wick stream)
     s = o["side"]; a = o["atr"]; bs = int(o.get("bs") or 900)
     hold = int(st.get("hold_bars", 32)) if bs != 900 else 16   # v0.99.687 — the 15m module's last orders keep its 16 bars
@@ -34472,6 +34480,9 @@ def _dlm_open_trade(o, t_fill_bar, fill, real=None):
           "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": real, "rv": DLM_MODEL_VER if bs != 900 else 1}
     if far:
         tr.update({"tp1": tp1, "tp2": tr["tp"], "pull": float(st.get("pull_atr", 0.4)), "take": "far", "mae": 0.0})
+    if st.get("stop_mode") == "close1h" and bs != 900:   # v0.99.692
+        tr.update({"smode": "close1h", "hsl": fill - s * float(st.get("hard_stop_atr", 3.0)) * a,
+                   "t1h": int(t1h if t1h is not None else time.time() // 3600 * 3600)})
     with _dlm_lock:
         if any(t["id"] == tr["id"] for t in _DLM["trades"]):
             return None
@@ -34481,6 +34492,58 @@ def _dlm_open_trade(o, t_fill_bar, fill, real=None):
                 x["status"] = "SKIP"   # exchange tick cancels it — a position is on the coin now)
         o["status"] = "FILLED"
     return tr
+
+
+def _dlm_1h(sym, start, now):
+    """the closed 1h candles of a coin from `start` (Binance's when trading there, else Gate's)"""
+    if DLM_BINANCE:
+        b = bn_closed(sym, "1h", 3600, 200, now) or []
+    else:
+        b = [c for c in (get_candles_range(sym, "1h", int(start), int(now)) or []) if c["time"] + 3600 <= now]
+    return [c for c in b if c["time"] >= start]
+
+
+def _dlm_walk_1h(t, now):
+    """v0.99.692 — a virtual close1h trade on the 1h candles from its touch hour: the emergency stop first in an hour
+    (an hour opening through it: out at its open), the take not in the touch hour, out at an hour's close beyond the
+    stop, the time exit at the last close before `until` -> (result, exit, hours, t_out) or None (still open)"""
+    s, e, sl, hsl, tp = t["side"], t["entry"], t["sl"], t["hsl"], t["tp"]
+    b = [c for c in _dlm_1h(t["symbol"], t["t1h"], now) if c["time"] < t["until"]]
+    for q, c in enumerate(b):
+        if (c["low"] <= hsl) if s > 0 else (c["high"] >= hsl):
+            gap = q > 0 and ((c["open"] <= hsl) if s > 0 else (c["open"] >= hsl))
+            return "LOSS", (c["open"] if gap else hsl), q + 1, c["time"] + 3600
+        if q > 0 and ((c["high"] >= tp) if s > 0 else (c["low"] <= tp)):
+            return "WIN", tp, q + 1, c["time"] + 3600
+        if (c["close"] <= sl) if s > 0 else (c["close"] >= sl):
+            return "LOSS", c["close"], q + 1, c["time"] + 3600
+    if b and b[-1]["time"] + 3600 >= t["until"]:
+        return "TIME_EXIT", b[-1]["close"], len(b), b[-1]["time"] + 3600
+    return None
+
+
+def _dlm_r_h(t, ex, hours, kind):
+    """R per the stop "sl" with the funding by the hours held (the research's: 0.03% a day)"""
+    risk = abs(t["entry"] - t["sl"]) or 1e-12
+    fee = (DLM_FEE_IN + (DLM_FEE_TAKE if kind == "WIN" else DLM_FEE_OUT) + DLM_FUND * hours / 24) * t["entry"]
+    return round((t["side"] * (ex - t["entry"]) - fee) / risk, 4)
+
+
+def _dlm_close_stop(t, now):
+    """v0.99.692 — a real close1h trade: the last closed 1h candle since the fill closed beyond the stop -> its close"""
+    if t.get("smode") != "close1h":
+        return None
+    last = int(t.get("cs_bar") or 0)
+    if now - last < 3600 + 20:   # one look per hour, 20 s after the hour's close
+        return None
+    b = [c for c in _dlm_1h(t["symbol"], int(t.get("t1h") or t["t_in"] // 3600 * 3600), now) if c["time"] > last - 3600]
+    if not b:
+        return None
+    t["cs_bar"] = b[-1]["time"] + 3600
+    for c in b:
+        if (c["close"] <= t["sl"]) if t["side"] > 0 else (c["close"] >= t["sl"]):
+            return c["close"]
+    return None
 
 
 def _dlm_r(t, ex, k, kind):
@@ -34500,7 +34563,7 @@ def dlm_settle(now):
             if int(o.get("bs") or 900) > 3600:
                 h = _dlm_hit(o, now)   # v0.99.691 — on the 1h candles
                 if h is not None:   # None: no 1h candles — the chart's bars below
-                    hits.append((h[0], h[1], -o.get("score", 0), o, {"time": h[2], "fill": h[3]}) if h else (float("inf"), 0.0, -o.get("score", 0), o, None))
+                    hits.append((h[0], h[1], -o.get("score", 0), o, {"time": h[2], "fill": h[3], "t1h": h[0]}) if h else (float("inf"), 0.0, -o.get("score", 0), o, None))
                     continue
             cs = [c for c in _dlm_bars(o["symbol"], o["t0"], now, int(o.get("bs") or 900)) if c["time"] < o["until"]]
             hit = next((c for c in cs if ((c["low"] <= o["lv"]) if o["side"] > 0 else (c["high"] >= o["lv"]))), None)
@@ -34520,7 +34583,7 @@ def dlm_settle(now):
                 if taken:
                     o["status"] = "SKIP"
                 else:
-                    _dlm_open_trade(o, hit["time"], hit["fill"])
+                    _dlm_open_trade(o, hit["time"], hit["fill"], t1h=hit.get("t1h"))
             elif now >= o["until"]:
                 o["status"] = "EXPIRED"
         except Exception as e:
@@ -34529,6 +34592,13 @@ def dlm_settle(now):
         opn = [t for t in _DLM["trades"] if t["status"] == "OPEN" and not t.get("real")]
     for t in opn:
         try:
+            if t.get("smode") == "close1h":   # v0.99.692
+                res = _dlm_walk_1h(t, now)
+                if res:
+                    kind, ex, hrs, t_out = res
+                    with _dlm_lock:
+                        t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": t_out, "r": _dlm_r_h(t, ex, hrs, kind)})
+                continue
             bs = int(t.get("bs") or 900)
             hold = int(t.get("hold") or 16)
             cs = _dlm_bars(t["symbol"], t["fbar"], now, bs)
@@ -34691,6 +34761,18 @@ def _dlm_arm(now):
             o["real"] = {"status": "SKIPPED", "detail": "цена дошла до лимитки, когда места не было (монета занята / 20 сделок)"}
 
 
+def _dlm_size_stop(o, rule):
+    """the stop the position is computed at -> (price, risk factor): a close1h stream — the emergency stop (the exchange's;
+    the leverage must keep the liquidation beyond it) with the risk x hard / stop, so the loss at the 1h-close stop is
+    the risk %; else the stop with x1"""
+    st = _dlm_stream(o.get("st") or "wick4h") or rule
+    soft = float(st.get("stop_atr", 2.0))
+    if st.get("stop_mode") == "close1h":
+        hard = float(st.get("hard_stop_atr", 3.0))
+        return o["lv"] - o["side"] * hard * o["atr"], hard / soft
+    return o["lv"] - o["side"] * soft * o["atr"], 1.0
+
+
 def dlm_real_place(o):
     """the real limit of a ⚡ order, or nothing (no room: the order keeps waiting — _dlm_arm tries again)"""
     if AUTOTRADE_DRY_RUN:
@@ -34725,7 +34807,8 @@ def dlm_real_place(o):
         equity = get_futures_total_equity()
         risk = dlm_risk(equity)
         rule = ((_DLM.get("model") or {}).get("rule") or {})
-        sl = o["lv"] - s * float((_dlm_stream(o.get("st") or "wick4h") or rule).get("stop_atr", 2.0)) * o["atr"]
+        sl, kx = _dlm_size_stop(o, rule)   # v0.99.692 — at the emergency stop, the risk x its distance / the stop's
+        risk = round(risk * kx, 4)
         margin, lev, skip = compute_risk_based_position(direction, o["lv"], sl, cap, mmr, equity, risk_pct=risk, symbol=sym,
                                                         tiers_by_symbol={sym: tiers} if tiers else None)
         contracts = 0
@@ -34745,7 +34828,7 @@ def dlm_real_place(o):
         body = {"contract": sym, "size": int(contracts) if s > 0 else -int(contracts), "price": format_price_str(px, tick),
                 "tif": "gtc", "text": "t-vpdlm"}
         r = gate_signed_request("POST", "/futures/usdt/orders", body=body)
-        o["real"] = {"status": "LIMIT", "id": str(r.get("id")), "size": int(contracts), "price": px, "lev": lev, "tick": tick, "risk": risk}
+        o["real"] = {"status": "LIMIT", "id": str(r.get("id")), "size": int(contracts), "price": px, "lev": lev, "tick": tick, "risk": round(risk / kx, 2)}
 
 
 def _dlm_cancel_order(oid):
@@ -34765,7 +34848,7 @@ def _dlm_place_exits(t):
     r = t["real"]; sym, d, s = t["symbol"], t["direction"], t["side"]
     tick = r.get("tick")
     if not r.get("sl_id"):
-        o = place_close_trigger_order(sym, d, round_to_tick_directional(t["sl"], tick, round_up=(s < 0)), 2 if s > 0 else 1, tick)
+        o = place_close_trigger_order(sym, d, round_to_tick_directional(t.get("hsl") or t["sl"], tick, round_up=(s < 0)), 2 if s > 0 else 1, tick)
         r["sl_id"] = str((o or {}).get("id") or "") or None
     if not r.get("tp_id"):
         try:
@@ -34798,12 +34881,12 @@ def dlm_bn_place(o):
     dual = bnf_dual()
     rule = ((_DLM.get("model") or {}).get("rule") or {})
     lv = o["lv"] * scl
-    sl = (o["lv"] - s * float((_dlm_stream(o.get("st") or "wick4h") or rule).get("stop_atr", 2.0)) * o["atr"]) * scl
+    sl, kx = _dlm_size_stop(o, rule); sl *= scl   # v0.99.692 — the emergency stop for the leverage, the risk scaled
     tiers = bnf_tiers(bsym)
     cap = max((t_[2] for t_ in tiers), default=20)
     mmr = tiers[0][1] if tiers else SCALP_DEFAULT_MMR_PCT
     acct = bnf_account()
-    risk = dlm_risk(acct["equity"])
+    risk = round(dlm_risk(acct["equity"]) * kx, 4)
     tb = {bsym: tiers} if tiers else None
     margin, lev, skip = compute_risk_based_position(direction, lv, sl, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb)
     if not skip and margin > acct["free"] * 0.9:   # the free margin checked: the risk scaled down to what the account carries
@@ -34830,13 +34913,13 @@ def dlm_bn_place(o):
     r = bnf_req("POST", "/fapi/v1/order", dict(_bnf_side_params(s, False, dual), symbol=bsym, type="LIMIT", timeInForce="GTC", quantity=qty,
                                                price=px, newClientOrderId=f"vpdlm{int(time.time() * 1000)}"))
     o["real"] = {"status": "LIMIT", "ex": "binance", "id": str(r.get("orderId")), "bsym": bsym, "scl": scl, "qty": q, "price": float(px) / scl,
-                 "lev": int(lev), "risk": risk, "dual": dual, "tick": info["tick"], "step": info["step"]}
+                 "lev": int(lev), "risk": round(risk / kx, 2), "dual": dual, "tick": info["tick"], "step": info["step"]}
 
 
 def _dlm_bn_exits(t):
     r = t["real"]; s = t["side"]; bsym, scl = r["bsym"], r["scl"]
     if not r.get("sl_id"):
-        r["sl_kind"], r["sl_id"] = bnf_place_cond(bsym, s, "STOP_MARKET", bn_fmt(t["sl"] * scl, r["tick"], up=(s < 0)), r.get("dual"))
+        r["sl_kind"], r["sl_id"] = bnf_place_cond(bsym, s, "STOP_MARKET", bn_fmt((t.get("hsl") or t["sl"]) * scl, r["tick"], up=(s < 0)), r.get("dual"))
     if not r.get("tp_id"):
         tp = bn_fmt(t["tp"] * scl, r["tick"], up=(s > 0))
         try:
@@ -34934,7 +35017,8 @@ def dlm_bn_tick(orders, trades):
             nostop = not r.get("sl_id") and now - t["t_in"] > 30   # Binance refused the stop for 30 s: no position left without one
             if nostop:
                 send_telegram(f"⚠️ ⚡ {bsym}: Binance не принял стоп — позиция закрыта по рынку", category="dlm")
-            if now >= t["until"] or nostop:   # the time exit: the take / stop off, the rest at the market
+            cs = None if nostop or now >= t["until"] else _dlm_close_stop(t, now)   # v0.99.692 — a 1h close beyond the stop
+            if now >= t["until"] or nostop or cs is not None:   # the time exit: the take / stop off, the rest at the market
                 _dlm_bn_cancel_exits(t)
                 try:
                     res = bnf_req("POST", "/fapi/v1/order", dict(_bnf_side_params(s, True, r.get("dual")), symbol=bsym, type="MARKET",
@@ -34945,10 +35029,13 @@ def dlm_bn_tick(orders, trades):
                     send_telegram(f"⚠️ ⚡ {bsym}: выход по времени на Binance не прошёл ({bnf_err_ru(e)}) — закройте позицию вручную", category="dlm")
                     continue
                 px = (p["mark"] / r["scl"]) or t["entry"]
+                kind = "LOSS" if cs is not None else "TIME_EXIT"
                 with _dlm_lock:
-                    t.update({"status": "CLOSED", "result": "TIME_EXIT", "exit": px, "t_out": int(now), "r": _dlm_r(t, px, int(t.get("hold") or 16) - 1, "TIME_EXIT")})
+                    t.update({"status": "CLOSED", "result": kind, "exit": px, "t_out": int(now), "close_stop": cs is not None,
+                              "r": _dlm_r_h(t, px, (now - t["t_in"]) / 3600, kind) if t.get("smode") else _dlm_r(t, px, int(t.get("hold") or 16) - 1, kind)})
                 changed = True
-                notify_trade_result("dlm", t["symbol"], t["direction"], t["entry"], px, "TIME_EXIT", t["r"], real=True, note=f"⚡ лимитка {DLM_TF.get(t.get('bs'), '4h')} · Binance")
+                notify_trade_result("dlm", t["symbol"], t["direction"], t["entry"], px, kind, t["r"], real=True,
+                                    note=f"⚡ лимитка {DLM_TF.get(t.get('bs'), '4h')} · Binance" + (" · час закрылся за стопом" if cs is not None else ""))
             continue
         # no position: which exit took it (a just-filled position may not show yet — given a minute unless the take filled)
         win = False
@@ -34966,10 +35053,10 @@ def dlm_bn_tick(orders, trades):
         elif r.get("tp_id"):
             win = bool(bnf_cond_done(bsym, r.get("tp_kind"), r["tp_id"]))
         _dlm_bn_cancel_exits(t)
-        ex = t["tp"] if win else t["sl"]
+        ex = t["tp"] if win else (t.get("hsl") or t["sl"])
         kind = "WIN" if win else "LOSS"
         with _dlm_lock:
-            t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(now), "r": _dlm_r(t, ex, int((now - t["fbar"]) // int(t.get("bs") or 900)), kind)})
+            t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(now), "r": _dlm_r_h(t, ex, (now - t["t_in"]) / 3600, kind) if t.get("smode") else _dlm_r(t, ex, int((now - t["fbar"]) // int(t.get("bs") or 900)), kind)})
         changed = True
         notify_trade_result("dlm", t["symbol"], t["direction"], t["entry"], ex, kind, t["r"], real=True, note=f"⚡ лимитка {DLM_TF.get(t.get('bs'), '4h')} · Binance")
     return changed
@@ -35075,7 +35162,8 @@ def dlm_real_tick():
                             _dlm_place_exits(t)
                         except Exception as e:
                             log_error(f"dlm take 1 ATR {sym}: {e}")
-                if now >= t["until"]:   # the time exit: the take / stop off, the rest at the market
+                cs = None if now >= t["until"] else _dlm_close_stop(t, now)   # v0.99.692 — a 1h close beyond the stop
+                if now >= t["until"] or cs is not None:   # the time exit: the take / stop off, the rest at the market
                     if r.get("tp_kind") == "limit":
                         _dlm_cancel_order(r["tp_id"])
                     for oid in (r.get("sl_id"), r.get("tp_id") if r.get("tp_kind") == "trigger" else None):
@@ -35086,10 +35174,13 @@ def dlm_real_tick():
                                 pass
                     res = close_position_for_mode("dlm", sym, t["direction"])
                     px = float((p or {}).get("mark_price") or 0) or t["entry"]
+                    kind = "LOSS" if cs is not None else "TIME_EXIT"
                     with _dlm_lock:
-                        t.update({"status": "CLOSED", "result": "TIME_EXIT", "exit": px, "t_out": int(now), "r": _dlm_r(t, px, int(t.get("hold") or 16) - 1, "TIME_EXIT")})
+                        t.update({"status": "CLOSED", "result": kind, "exit": px, "t_out": int(now), "close_stop": cs is not None,
+                                  "r": _dlm_r_h(t, px, (now - t["t_in"]) / 3600, kind) if t.get("smode") else _dlm_r(t, px, int(t.get("hold") or 16) - 1, kind)})
                     r["close"] = str(res)[:120]; changed = True
-                    notify_trade_result("dlm", sym, t["direction"], t["entry"], px, "TIME_EXIT", t["r"], real=True, note=f"⚡ лимитка {DLM_TF.get(t.get('bs'), '4h')}")
+                    notify_trade_result("dlm", sym, t["direction"], t["entry"], px, kind, t["r"], real=True,
+                                        note=f"⚡ лимитка {DLM_TF.get(t.get('bs'), '4h')}" + (" · час закрылся за стопом" if cs is not None else ""))
                 continue
             # no position: which exit took it (a just-filled position may not show yet — given a minute unless the take filled)
             win = False
@@ -35119,10 +35210,10 @@ def dlm_real_tick():
                         cancel_price_order(oid)
                     except Exception:
                         pass
-            ex = t["tp"] if win else t["sl"]
+            ex = t["tp"] if win else (t.get("hsl") or t["sl"])
             kind = "WIN" if win else "LOSS"
             with _dlm_lock:
-                t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(now), "r": _dlm_r(t, ex, int((now - t["fbar"]) // int(t.get("bs") or 900)), kind)})
+                t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(now), "r": _dlm_r_h(t, ex, (now - t["t_in"]) / 3600, kind) if t.get("smode") else _dlm_r(t, ex, int((now - t["fbar"]) // int(t.get("bs") or 900)), kind)})
             changed = True
             notify_trade_result("dlm", sym, t["direction"], t["entry"], ex, kind, t["r"], real=True, note=f"⚡ лимитка {DLM_TF.get(t.get('bs'), '4h')}")
     if changed:
@@ -35178,7 +35269,7 @@ def dlm_stats():
             "more_coins": DLM_MORE_COINS, "coins_n": 210 if DLM_MORE_COINS else 127,   # v0.99.686
             "risk": dlm_risk(), "risk_set": MODULE_RISK_PCT.get("dlm"), "max_pos": DLM_MAX_POS,   # v0.99.687
             "model": dict({k: m.get(k) for k in ("ver", "q", "trained_to", "rule", "research", "side_cap")},
-                          streams=[{k: x.get(k) for k in ("name", "tf", "anchor", "depth_atr", "thr", "alive_bars", "take_atr", "stop_atr", "hold_bars", "far_take_atr", "pull_atr")} for x in m.get("streams") or []]) if m else None,
+                          streams=[{k: x.get(k) for k in ("name", "tf", "anchor", "depth_atr", "thr", "alive_bars", "take_atr", "stop_atr", "hold_bars", "far_take_atr", "pull_atr", "hard_stop_atr", "stop_mode")} for x in m.get("streams") or []]) if m else None,
             "err": err, "scan": scan, "orders": orders[:40], "orders_n": len(orders),
             "open": [t for t in trades if t["status"] == "OPEN"][-40:],
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for t in fin if t["result"] == "WIN") / len(fin), 1) if fin else None,
@@ -39411,7 +39502,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">Работа (4ч + 2ч — 210 монет)</div>
-          <div class="sub">на закрытии каждой 4ч и 2ч свечи: у каждого вида своя модель, лучший ~1% моментов — лимитка (4ч: на 1 ATR за тенью свечи, 2ч: на 2 ATR от закрытия), живёт 4 свечи; исполнилась — тейк 2 ATR (1 ATR, если цена сначала ушла против на 0.4 ATR), стоп 2 ATR, выход через 32 свечи. Винрейт ~70%, ~2 сделки в день; без реальных сделок — виртуальный учёт</div>
+          <div class="sub">на закрытии каждой 4ч и 2ч свечи: у каждого вида своя модель, лучший ~1% моментов — лимитка (4ч: на 1 ATR за тенью свечи, 2ч: на 2 ATR от закрытия), живёт 4 свечи; исполнилась — тейк 1.1 ATR, стоп: часовая свеча закрылась за 2 ATR (фитили не выбивают; аварийный стоп 3 ATR на бирже), выход через 32 свечи. Винрейт ~79%, ~3 сделки в день; без реальных сделок — виртуальный учёт</div>
         </div>
         <label class="switch"><input type="checkbox" id="setDlm"><span class="switchSlider"></span></label>
       </div>
@@ -43307,7 +43398,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? `<span class="pill pos">${d.dry ? 'торгует (dry-run)' : 'торгует'}</span>` : '<span class="pill">виртуально</span>');
   const sts = (m && m.streams) || [];
   const dur = (bars, h) => { const x = bars * h; return x >= 24 ? `${Math.floor(x / 24)} дн${x % 24 ? ' ' + x % 24 + ' ч' : ''}` : `${x} ч`; };
-  const stTxt = x => { const h = x.tf === '2h' ? 2 : 4; return `<b>${x.tf === '2h' ? '2ч' : '4ч'}</b> — лимитка на ${x.depth_atr} ATR ${x.anchor === 'wick' ? 'за тенью только что закрытой свечи (под минимумом для лонга, над максимумом для шорта)' : 'от цены закрытия свечи'}, живёт ${x.alive_bars || 4} свечи (${dur(x.alive_bars || 4, h)}); ${x.far_take_atr ? `тейк ${x.far_take_atr} ATR, но если цена сначала уйдёт против на ${x.pull_atr} ATR (раньше, чем дойдёт до +${x.take_atr || 1} ATR) — тейк ${x.take_atr || 1} ATR` : `тейк ${x.take_atr || 1} ATR`}, стоп ${x.stop_atr || 2} ATR, выход через ${dur(x.hold_bars || 32, h)}`; };
+  const stTxt = x => { const h = x.tf === '2h' ? 2 : 4; return `<b>${x.tf === '2h' ? '2ч' : '4ч'}</b> — лимитка на ${x.depth_atr} ATR ${x.anchor === 'wick' ? 'за тенью только что закрытой свечи (под минимумом для лонга, над максимумом для шорта)' : 'от цены закрытия свечи'}, живёт ${x.alive_bars || 4} свечи (${dur(x.alive_bars || 4, h)}); ${x.far_take_atr ? `тейк ${x.far_take_atr} ATR, но если цена сначала уйдёт против на ${x.pull_atr} ATR (раньше, чем дойдёт до +${x.take_atr || 1} ATR) — тейк ${x.take_atr || 1} ATR` : `тейк ${x.take_atr || 1} ATR`}, ${x.stop_mode === 'close1h' ? `стоп — если часовая свеча закрылась за ${x.stop_atr || 2} ATR (аварийный стоп на бирже — ${x.hard_stop_atr || 3} ATR)` : `стоп ${x.stop_atr || 2} ATR`}, выход через ${dur(x.hold_bars || 32, h)}`; };
   let top = `<div class="dim hintx">Модель смотрит все ${d.coins_n || 210} монет на закрытии каждой свечи и в лучшем ~${m && m.q ? +((1 - m.q) * 100).toFixed(0) : 1}% моментов ставит лимитку — ловит продолжение прострела. Два вида, у каждого своя модель:<br>${sts.length ? sts.map(stTxt).join(';<br>') : stTxt({tf: '4h', anchor: 'wick', depth_atr: 1})}.<br>Если по монете стоят обе — сделкой становится та, что исполнилась первой, вторая снимается. Сделок до ${d.max_pos || 20} сразу, каждая на ${d.risk}% счёта.</div>`;
   if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
   else {
@@ -43324,7 +43415,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
       ${zBars(rows, v => sgR(+(+v).toFixed(3)))}
       <div class="zstrip"><span>WR <b>~${un.wr || 70}%</b></span><span>в среднем <b>${sgR(un.avg || 0.235)}</b></span><span>последние 12 мес <b>${sgR(un.last12_avg || 0.24)}</b></span><span><b>~65</b> сделок в месяц</span></div>
       ${d.streams && (d.streams.wick4h.n || d.streams.close2h.n) ? `<div class="dim" style="font-size:var(--fs-xs);">живые: 4ч ${d.streams.wick4h.n} (${d.streams.wick4h.n ? sgR(d.streams.wick4h.avg) + ', WR ' + d.streams.wick4h.wr + '%' : '—'}) · 2ч ${d.streams.close2h.n} (${d.streams.close2h.n ? sgR(d.streams.close2h.avg) + ', WR ' + d.streams.close2h.wr + '%' : '—'})</div>` : ''}
-      <div class="zsub">По минутным свечам Binance (точный порядок стопа и тейка, лимитка исполняется только при проходе цены сквозь неё на 0.05%): WR ${m1.wr || 74}%, <b>+${m1.avg_through || 0.26}R</b>${rs.exit && rs.exit.m1 ? ` (с тейком 1 ATR было +${rs.exit.m1.base}R)` : ''}. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%, без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 4087)}</b>, худшие 10% ~${usd(mo.year_p10 || 644)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 2702)}); через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная. Тейк 2 ATR только у сделок, которые сразу пошли в плюс (идея из чата): если всегда ставить 2 ATR, денег меньше, чем с 1 ATR.</div>
+      <div class="zsub">Сделки посчитаны по часовым свечам Binance: стоп — только если часовая свеча закрылась за ним (61% прежних стопов были фитилями, которые закрывались обратно, и почти половина таких сделок потом шла в тейк). Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%, без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 5458)}</b>, худшие 10% ~${usd(mo.year_p10 || 1780)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 3465)}), последние 12 месяцев ~${usd(mo.last12 || 4503)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
       <div class="zbanner warn">Просадка: при обвале рынка счёт может временно упасть на 60–70% от пика — 24–25 мая 2025 за два дня стопы закрыли 19 сделок 4ч (−19R, при 4% на сделку это около −50%), с 2ч сделками просадки ещё глубже. Потом счёт восстанавливался, но к такому надо быть готовым и не повышать риск после серии стопов.</div>
       ${d.risk_set && d.risk_set > 6 ? `<div class="zbanner warn">Риск ${d.risk}% на сделку при до ${d.max_pos || 20} сделок сразу — это до ${Math.round(d.risk * (d.max_pos || 20))}% счёта под стопами одновременно. Лучше всего по деньгам — 4–6%: выше денег не прибавляется (не хватает маржи), а просадки глубже.</div>` : ''}
       ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} (бот держит их у себя и выставляет на бирже, когда цена подошла на 0.3 ATR — так места и маржа не заняты далёкими лимитками) — переключатель «↳ ⚡ Лимитки 4ч+2ч» в автоторговле; риск — поле «⚡» (пусто = 4%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;

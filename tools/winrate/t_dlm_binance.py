@@ -215,6 +215,30 @@ tp_b.update(status="FILLED", executedQty=tp_b["quantity"]); X["pos"]["AAAUSDT"] 
 V.dlm_real_tick()
 res["take 2 ATR -> 1 ATR after a dip"] &= tf_["result"] == "WIN" and abs(tf_["exit"] - 10.1) < 1e-9
 V._DLM["model"] = m0
+# (7b2) v0.99.692 — a close1h stream on Binance: the STOP_MARKET at the emergency 3 ATR, the take 1.1 ATR, the risk % at
+# the 2 ATR stop; a 1h close beyond the stop -> out at the market, LOSS
+V._DLM["model"] = {"rule": m0["rule"], "streams": [{"name": "wick4h", "tf": "4h", "bar_sec": 14400, "take_atr": 1.1, "stop_atr": 2.0, "hard_stop_atr": 3.0,
+                                                    "stop_mode": "close1h", "hold_bars": 32, "alive_bars": 4}]}
+j = mk("AAA_USDT", 1, 10.0, 0.1); j["id"] += "j"; j["st"] = "wick4h"; V._DLM["orders"].append(j)
+V.dlm_real_place(j); oj = X["orders"][int(j["real"]["id"])]
+oj.update(status="FILLED", executedQty=oj["quantity"], avgPrice="10"); X["pos"]["AAAUSDT"] = float(oj["quantity"]); X["mark"] = {"AAAUSDT": 9.9}
+H1J = []
+V._dlm_1h = lambda sym, start, now: [c for c in H1J if c["time"] >= start and c["time"] + 3600 <= now] if sym == "AAA_USDT" else []
+V.dlm_real_tick()
+tj = next(t for t in V._DLM["trades"] if t["id"] == j["id"]); rj = tj["real"]
+slj = X["algos"].get(int(rj.get("sl_id") or 0)) or {}; tpj = X["orders"].get(int(rj.get("tp_id") or 0)) or {}
+loss_at_stop = float(oj["quantity"]) * 0.2   # the 2 ATR stop
+ok_j = (abs(float(slj.get("triggerPrice", 0)) - 9.7) < 1e-9 and abs(float(tpj.get("price", 0)) - 10.11) < 1e-9 and j["real"]["risk"] == V.dlm_risk()
+        and 0.8 * V.dlm_risk() * 10 <= loss_at_stop <= 1.01 * V.dlm_risk() * 10)   # the risk % of the $1000 at the 2 ATR stop
+h0 = int(time.time()) // 3600 * 3600 - 7200; tj["t1h"] = h0; tj["cs_bar"] = 0
+H1J += [{"time": h0, "open": 10.0, "high": 10.02, "low": 9.75, "close": 9.85}]   # a wick to 9.75 (below the stop 9.8), closed back
+V.dlm_real_tick(); ok_j = ok_j and tj["status"] == "OPEN"
+H1J += [{"time": h0 + 3600, "open": 9.85, "high": 9.86, "low": 9.74, "close": 9.78}]; tj["cs_bar"] = h0 - 30
+V.dlm_real_tick()
+mk_ = [x for x in X["orders"].values() if x["type"] == "MARKET"]
+res["close1h: emergency stop 3 ATR, take 1.1, out at a 1h close"] = (ok_j and tj["status"] == "CLOSED" and tj["result"] == "LOSS" and tj.get("close_stop")
+                                                                       and mk_ and mk_[-1]["side"] == "SELL" and slj.get("algoStatus") == "CANCELED")
+V._DLM["model"] = m0
 # (7c) v0.99.691 — a waiting order goes on Binance when the price comes within 0.3 ATR (the tickers), not at the scan
 g = mk("BBB_USDT", 1, 5.0, 0.05); g["id"] += "g"; V._DLM["orders"].append(g)
 X["px"] = {"BBBUSDT": 5.5}   # 10 ATR away: waits
