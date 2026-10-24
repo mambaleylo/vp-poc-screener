@@ -20505,3 +20505,22 @@ v0.99.697 - ⚡ the backtest list's money readable (the user: "идёт сдел
          (23.09: 17 longs at 14:00 — the margin ran out after ~10); a position under Binance's $5 is not opened
          ("нет маржи"; it was counted with ~$0). One order for the same fill hour (the fill, the order's time, the
          coin). Test: t_dlm_ui (the rows' $ == a python replica; row by row the account adds up).
+v0.99.698 - P/R, SMC, EMA on Binance (the user: "торговать ещё вместе p/r, smc, ema плюс к лимиткам ... для бинанса тоже
+         настрой"). The portfolio first (tools/winrate port697.py: one account from $100, the cautious -0.025R, the bot's
+         leverage — ⚡ at the emergency stop with 1.25x, the others at their stop with 1.5x —, one position a coin over all,
+         the margin shared, under $5 not opened; 12-month windows from each week of 2023-02..2025-10): ⚡ 4% alone — the
+         median $3 590, the worst 10% $944, the last 12 months $6 105; ⚡ 4% + P/R, SMC, EMA at 2% — $12 540 / $3 454 /
+         $14 809, the same drawdown 66% (SMC adds the most, ~180 trades a year; P/R the least). The three alone are weak
+         lately (the last 12 months $922). The setting "bn_others" (Настройки, under ⚡ на Binance): their real trades go to
+         the ⚡ Binance account instead of Gate — execute_autotrade -> bno_open: the market entry, isolated, the leverage
+         by the stop (compute_risk_based_position), the size by the risk (the module's field, empty = 2%), the STOP_MARKET
+         and TAKE_PROFIT_MARKET (closePosition) on the exchange; a position or an armed ⚡ limit on the coin -> skipped
+         (Binance one-way; ⚡ itself skips a coin with a position). close_position_for_mode / part_take_on_exchange of a
+         coin this bot holds on Binance -> bno_close (the triggers off, the rest at the market) / bno_part (reduce-only,
+         the stop to the entry); bno_loop drops a record the exchange's stop / take closed (the other trigger off). The
+         records in vp_bn_others.json. Also checked today (no change): the risk 3.5–4% best for ⚡ (risk695.py); a larger
+         deposit scales the money linearly (dep697.py); the early tight stop (early695.py, early695_1m.py) worse on 1m;
+         s28 (retrained on the 692 labels, eval28b.py) worse than s26; the 2h stream kept (policy695.py on the bot's own
+         2026 replays: both $4 244 vs 4h only $2 781). Tests: t_bn_others (new: the entry, 2% at the stop, the triggers,
+         one position a coin, an armed ⚡ limit, EMA's partial, the time exit, the cleanup, a 1000-coin, dry run / off ->
+         Gate, the setting), t_dlm_binance, t_dlm_bot, t_dlm_ui, t_smc_bot, t_prx_lim — OK (t_prx_cs 13/16 as before).

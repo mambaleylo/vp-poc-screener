@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.697"
+APP_VERSION = "0.99.698"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1156,7 +1156,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones", "risk_pct_zm", "risk_pct_rbx", "rbx_enabled", "autotrade_rbx", "telegram_alerts_rbx", "rbx_part",
                   "cas_enabled", "autotrade_cas", "telegram_alerts_cas", "risk_pct_cas",   # v0.99.653
                   "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
-                  "dlm_enabled", "autotrade_dlm2", "telegram_alerts_dlm", "risk_pct_dlm2", "dlm_binance", "dlm_more_coins",   # v0.99.679, v0.99.684, v0.99.686 (v0.99.687: the single mode and the ladder dropped; the 4h module's own autotrade / risk keys: it starts virtual at 4% (v0.99.688), the 15m one held up to 50%)
+                  "dlm_enabled", "autotrade_dlm2", "telegram_alerts_dlm", "risk_pct_dlm2", "dlm_binance", "dlm_more_coins", "bn_others",   # v0.99.679, v0.99.684, v0.99.686 (v0.99.687: the single mode and the ladder dropped; the 4h module's own autotrade / risk keys: it starts virtual at 4% (v0.99.688), the 15m one held up to 50%)
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
@@ -1241,6 +1241,7 @@ def get_settings():
         "smc_enabled": SMC_ENABLED, "autotrade_smc": AUTOTRADE_ENABLED_SMC, "telegram_alerts_smc": TELEGRAM_ALERTS_SMC, "risk_pct_smc": MODULE_RISK_PCT.get("smc"),   # v0.99.678
         "dlm_enabled": DLM_ENABLED, "autotrade_dlm2": AUTOTRADE_ENABLED_DLM, "telegram_alerts_dlm": TELEGRAM_ALERTS_DLM, "risk_pct_dlm2": MODULE_RISK_PCT.get("dlm"),   # v0.99.679, v0.99.687
         "dlm_binance": DLM_BINANCE,   # v0.99.684
+        "bn_others": BN_OTHERS,   # v0.99.698
         "dlm_more_coins": DLM_MORE_COINS,   # v0.99.686
         "autotrade_zones": AUTOTRADE_ENABLED_ZONES,
         "autotrade_zones_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
@@ -1529,7 +1530,7 @@ def apply_settings(updates):
                    ("cas_enabled", "CAS_ENABLED"), ("autotrade_cas", "AUTOTRADE_ENABLED_CAS"), ("telegram_alerts_cas", "TELEGRAM_ALERTS_CAS"),
                    ("smc_enabled", "SMC_ENABLED"), ("autotrade_smc", "AUTOTRADE_ENABLED_SMC"), ("telegram_alerts_smc", "TELEGRAM_ALERTS_SMC"),
                    ("dlm_enabled", "DLM_ENABLED"), ("autotrade_dlm2", "AUTOTRADE_ENABLED_DLM"), ("telegram_alerts_dlm", "TELEGRAM_ALERTS_DLM"),
-                   ("dlm_binance", "DLM_BINANCE"), ("dlm_more_coins", "DLM_MORE_COINS")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
+                   ("dlm_binance", "DLM_BINANCE"), ("dlm_more_coins", "DLM_MORE_COINS"), ("bn_others", "BN_OTHERS")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
         if _k in updates:
             globals()[_g] = bool(updates[_k])
     if "zones_zm_enabled" in updates:   # v0.99.616
@@ -4873,6 +4874,9 @@ def reconcile_positions_and_orders():
 def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_pct_override=None, allow_stack=False, all_in_margin_pct=None):
     """v0.99.331 — runs the real implementation inside this module's own
     account context (sub-account keys if configured, else main)."""
+    if bn_routed(mode):   # v0.99.698 — P/R, SMC, EMA on the ⚡ Binance account
+        with live_http():
+            return bno_open(mode, symbol, direction, entry, sl, tp)
     with using_account(mode), live_http():   # v0.99.598 — a trade being opened never waits for the backtests
         return _execute_autotrade_impl(mode, symbol, direction, entry, sl, tp, extra=extra,
                                        risk_pct_override=risk_pct_override, allow_stack=allow_stack,
@@ -14685,6 +14689,13 @@ def close_position_for_mode(mode, symbol, direction):
     """v0.99.398 — max-holding-time exit: close the REAL position of this
     module's account on `symbol`, only if it is open in the signal's own
     direction (never touches anything else)."""
+    if symbol in _BNO["pos"]:   # v0.99.698 — this bot's Binance position (P/R, SMC, EMA)
+        try:
+            with live_http():
+                return bno_close(mode, symbol, direction)
+        except Exception as e:
+            log_error(f"close_position_for_mode binance {mode} {symbol}: {e}")
+            return {"ok": False, "reason": str(e)}
     try:
         with using_account(mode):
             pos = next((p for p in (get_open_positions() or []) if p.get("contract") == symbol), None)
@@ -34881,6 +34892,205 @@ def _dlm_place_exits(t):
 
 
 # ---- v0.99.684 — the same on Binance: the limit, then the stop (STOP_MARKET, the whole position) and the take ----
+# v0.99.698 — P/R, SMC, EMA on Binance (the user: "торговать ещё вместе p/r, smc, ema плюс к лимиткам ... для бинанса тоже
+# настрой"): with the switch their real trades go to the ⚡ Binance account instead of Gate — the market entry at the touch,
+# the stop and the take on the exchange (closePosition triggers), isolated margin, the leverage by the stop (the bot's
+# 1.5x buffer); one position a coin on the whole account (a position or an armed ⚡ limit on the coin -> no trade); the
+# time exit / P/R's close stop at the market; EMA's partial take reduce-only + the stop to the entry. The risk: the
+# module's own field, empty -> BN_OTHERS_RISK (2%: tools/winrate port697.py — ⚡ 4% + the three at 2% the best together)
+BN_OTHERS = os.environ.get("VP_BN_OTHERS", "0") == "1"
+BN_OTHERS_MODES = ("prv", "smc", "emw")
+BN_OTHERS_RISK = 2.0
+BNO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_bn_others.json")
+_BNO = {"pos": {}}   # Gate contract -> the Binance position this bot opened for P/R / SMC / EMA
+_bno_lock = threading.Lock()
+
+
+def bno_load():
+    try:
+        with open(BNO_FILE) as f:
+            d = json.load(f)
+        with _bno_lock:
+            _BNO["pos"] = dict(d.get("pos") or {})
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log_error(f"bn others load: {e}")
+
+
+def bno_save():
+    try:
+        with _bno_lock:
+            d = {"pos": dict(_BNO["pos"])}
+        tmp = BNO_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(d, f)
+        os.replace(tmp, BNO_FILE)
+    except Exception as e:
+        log_error(f"bn others save: {e}")
+
+
+def bn_routed(mode):
+    """a new real trade of this module goes to Binance"""
+    return bool(BN_OTHERS and mode in BN_OTHERS_MODES and BINANCE_API_KEY and BINANCE_API_SECRET)
+
+
+def bn_map_any(sym):
+    """bn_map, else by Binance's own list (XXX_USDT -> XXXUSDT, or 1000XXXUSDT at the price x1000)"""
+    mp = bn_map(sym)
+    if mp:
+        return mp
+    base = sym.replace("_USDT", "")
+    info = bnf_symbols()
+    for b, scl in ((base + "USDT", 1.0), ("1000" + base + "USDT", 1000.0)):
+        if b in info:
+            return b, scl
+    return None
+
+
+def bno_open(mode, symbol, direction, entry, sl, tp):
+    """the real trade of P/R / SMC / EMA on Binance -> {"status": OPENED | OPENED_TP_SL_FAILED | SKIPPED | DRY_RUN, "detail"}"""
+    if AUTOTRADE_DRY_RUN:
+        return {"status": "DRY_RUN", "detail": "dry-run: на Binance не отправлено"}
+    s = 1 if direction == "LONG" else -1
+    mp = bn_map_any(symbol)
+    if not mp:
+        return {"status": "SKIPPED", "detail": "монеты нет на Binance"}
+    bsym, scl = mp
+    info = bnf_symbols().get(bsym)
+    if not info or not info["ok"]:
+        return {"status": "SKIPPED", "detail": f"{bsym} сейчас не торгуется на Binance"}
+    if bnf_positions().get(bsym):
+        return {"status": "SKIPPED", "detail": "по монете уже есть позиция на Binance"}
+    with _dlm_lock:
+        armed = any(o["symbol"] == symbol and o["status"] == "OPEN" and (o.get("real") or {}).get("id") and (o.get("real") or {}).get("ex") == "binance"
+                    for o in _DLM["orders"])
+    if armed:
+        return {"status": "SKIPPED", "detail": "по монете на Binance стоит лимитка ⚡"}
+    dual = bnf_dual()
+    e, slp, tpp = entry * scl, sl * scl, tp * scl
+    tiers = bnf_tiers(bsym)
+    cap = max((t_[2] for t_ in tiers), default=20)
+    mmr = tiers[0][1] if tiers else SCALP_DEFAULT_MMR_PCT
+    tb = {bsym: tiers} if tiers else None
+    acct = bnf_account()
+    risk = float(MODULE_RISK_PCT.get(mode) or BN_OTHERS_RISK)
+    margin, lev, skip = compute_risk_based_position(direction, e, slp, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb)
+    if not skip and margin > acct["free"] * 0.9:   # the free margin: the risk scaled down to what the account carries
+        if acct["free"] <= 1:
+            skip = f"нет свободной маржи (свободно {acct['free']:.2f}$)"
+        else:
+            risk = round(risk * acct["free"] * 0.9 / margin, 2)
+            margin, lev, skip = compute_risk_based_position(direction, e, slp, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb)
+    if skip:
+        return {"status": "SKIPPED", "detail": str(skip)[:160]}
+    qty = bn_fmt(margin * lev / e, info["step"])
+    q = float(qty)
+    if q < info["min_qty"] or q * e < info["min_notional"]:
+        return {"status": "SKIPPED", "detail": f"позиция {q * e:.2f}$ меньше минимума Binance ({info['min_notional']:g}$)"}
+    try:
+        bnf_req("POST", "/fapi/v1/marginType", {"symbol": bsym, "marginType": "ISOLATED"})
+    except BinanceError as ex:
+        if ex.code != -4046:   # -4046 = already isolated
+            log_error(f"binance isolated {bsym}: {ex}")
+    bnf_req("POST", "/fapi/v1/leverage", {"symbol": bsym, "leverage": int(lev)})
+    r = bnf_req("POST", "/fapi/v1/order", dict(_bnf_side_params(s, False, dual), symbol=bsym, type="MARKET", quantity=qty,
+                                               newClientOrderId=f"vp{mode}{int(time.time() * 1000)}"))
+    filled = float(r.get("executedQty") or 0) or q
+    avg = float(r.get("avgPrice") or 0) or e
+    rec = {"mode": mode, "bsym": bsym, "scl": scl, "side": s, "qty": filled, "entry": avg, "lev": int(lev), "risk": risk, "dual": dual,
+           "tick": info["tick"], "step": info["step"], "min_qty": info["min_qty"], "t": int(time.time())}
+    status = "OPENED"
+    for kind, px, up, kk in (("STOP_MARKET", slp, s < 0, "sl"), ("TAKE_PROFIT_MARKET", tpp, s > 0, "tp")):
+        try:
+            rec[kk + "_kind"], rec[kk + "_id"] = bnf_place_cond(bsym, s, kind, bn_fmt(px, info["tick"], up=up), dual)
+        except BinanceError as ex:
+            log_error(f"binance {mode} {kind} {bsym}: {ex}")
+            status = "OPENED_TP_SL_FAILED"
+    with _bno_lock:
+        _BNO["pos"][symbol] = rec
+    bno_save()
+    return {"status": status, "detail": f"Binance {bsym}: {filled:g} по ~{avg / scl:.6g}, плечо {int(lev)}x, риск {risk:g}%"
+                                        + ("" if status == "OPENED" else " · стоп / тейк не поставились — проверьте позицию")}
+
+
+def _bno_cancel(rec, which=("sl", "tp")):
+    for kk in which:
+        if rec.get(kk + "_id"):
+            bnf_cancel(rec["bsym"], rec.get(kk + "_kind") or "algo", rec[kk + "_id"])
+            rec[kk + "_id"] = None
+
+
+def bno_close(mode, symbol, direction):
+    """the time exit / a close stop of a P/R / SMC / EMA position on Binance: its stop and take off, the rest at the market"""
+    with _bno_lock:
+        rec = _BNO["pos"].get(symbol)
+    if not rec or rec.get("mode") != mode or ("LONG" if rec["side"] > 0 else "SHORT") != direction:
+        return {"ok": False, "reason": "no Binance position of this module in this direction"}
+    _bno_cancel(rec)
+    amt = sum(x["amt"] for x in bnf_positions().get(rec["bsym"]) or [])
+    if amt and (amt > 0) == (rec["side"] > 0):
+        bnf_req("POST", "/fapi/v1/order", dict(_bnf_side_params(rec["side"], True, rec.get("dual")), symbol=rec["bsym"], type="MARKET",
+                                               quantity=bn_fmt(abs(amt), rec["step"])))
+    with _bno_lock:
+        _BNO["pos"].pop(symbol, None)
+    bno_save()
+    return {"ok": True, "ex": "binance"}
+
+
+def bno_part(mode, t, frac):
+    """EMA's partial take on Binance: `frac` of the position off reduce-only at the market, the stop moved to the entry"""
+    with _bno_lock:
+        rec = _BNO["pos"].get(t["symbol"])
+    if not rec or rec.get("mode") != mode:
+        return "no position"
+    amt = sum(x["amt"] for x in bnf_positions().get(rec["bsym"]) or [])
+    if not amt or (amt > 0) != (rec["side"] > 0):
+        return "no position"
+    n = bn_fmt(abs(amt) * frac, rec["step"])
+    if float(n) >= rec.get("min_qty", 0) and float(n) > 0:
+        bnf_req("POST", "/fapi/v1/order", dict(_bnf_side_params(rec["side"], True, rec.get("dual")), symbol=rec["bsym"], type="MARKET", quantity=n))
+    _bno_cancel(rec, ("sl",))
+    rec["sl_kind"], rec["sl_id"] = bnf_place_cond(rec["bsym"], rec["side"], "STOP_MARKET", bn_fmt(rec["entry"], rec["tick"], up=(rec["side"] < 0)), rec.get("dual"))
+    with _bno_lock:
+        _BNO["pos"][t["symbol"]] = rec
+    bno_save()
+    return f"Binance: {n} of {abs(amt):g} off, the stop at the entry {rec['entry']:g}"
+
+
+def bno_tick():
+    """a position the exchange's stop / take closed: the other trigger off, the record dropped"""
+    with _bno_lock:
+        recs = dict(_BNO["pos"])
+    if not recs:
+        return
+    pos = bnf_positions()
+    gone = [k for k, rec in recs.items() if not pos.get(rec["bsym"]) and time.time() - rec.get("t", 0) > 60]
+    for k in gone:
+        try:
+            _bno_cancel(recs[k])
+        except Exception as e:
+            log_error(f"bn others cleanup {k}: {e}")
+        with _bno_lock:
+            _BNO["pos"].pop(k, None)
+    if gone:
+        bno_save()
+
+
+def bno_loop():
+    time.sleep(60)
+    bno_load()
+    while True:
+        heartbeat("bno_loop")
+        try:
+            if _BNO["pos"] and BINANCE_API_KEY and BINANCE_API_SECRET:
+                with live_http():
+                    bno_tick()
+        except Exception as e:
+            log_error(f"bn others loop: {e}")
+        time.sleep(60)
+
+
 def dlm_bn_place(o):
     sym, s = o["symbol"], o["side"]
     direction = "LONG" if s > 0 else "SHORT"
@@ -35676,6 +35886,9 @@ def part_take_on_exchange(mode, t, frac):
     """v0.99.654 — the partial take of a real trade: `frac` of the position off at market (none when the position is a
     single contract), the stop moved to the entry; the take order, if any, stays for the rest. -> a note for the log"""
     s, e0 = t["side"], t["px"]
+    if t["symbol"] in _BNO["pos"]:   # v0.99.698 — on Binance
+        with live_http():
+            return bno_part(mode, t, frac)
     with using_account(mode), live_http():
         pos = next((q for q in (get_open_positions() or []) if q.get("contract") == t["symbol"]), None)
         size = float((pos or {}).get("size", 0) or 0)
@@ -39537,6 +39750,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">реальные лимитки, стоп и тейк — на Binance USDⓈ-M (модель училась на его свечах), сигналы и виртуальные сделки — тоже по свечам Binance; выключено — на Gate. Ключи и баланс — во вкладке ⚡</div>
         </div>
         <label class="switch"><input type="checkbox" id="setDlmBinance"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ 🔄 P/R, 🧱 SMC, 📐 EMA — тоже на Binance</div>
+          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, изолированная маржа; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто = 2%: на истории ⚡ 4% + эти три по 2% вместе дают в ~3 раза больше, чем один ⚡, при той же просадке. Включается вместе с автоторговлей самих модулей</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setBnOthers"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow subRow">
         <div>
@@ -44875,6 +45095,7 @@ const setInputs = {
   autotrade_dlm2: document.getElementById('setAutotradeDlm'),   // v0.99.687 — the 4h module's own keys (starts virtual, 4% since v0.99.688)
   telegram_alerts_dlm: document.getElementById('setTgDlm'),
   dlm_binance: document.getElementById('setDlmBinance'),   // v0.99.684
+  bn_others: document.getElementById('setBnOthers'),   // v0.99.698
   dlm_more_coins: document.getElementById('setDlmMoreCoins'),   // v0.99.686
   autotrade_smc: document.getElementById('setAutotradeSmc'),
   telegram_alerts_smc: document.getElementById('setTgSmc'),
@@ -46382,6 +46603,7 @@ if __name__ == "__main__":
     threading.Thread(target=cas_loop, daemon=True).start()   # v0.99.653 — 🌊 EMA cascade
     threading.Thread(target=smc_loop, daemon=True).start()   # v0.99.678 — 🧱 SMC levels
     threading.Thread(target=dlm_loop, daemon=True).start()   # v0.99.679 — ⚡ 15m deep limits
+    threading.Thread(target=bno_loop, daemon=True).start()   # v0.99.698 — P/R, SMC, EMA positions on Binance
     threading.Thread(target=hdg_loop, daemon=True).start()   # v0.99.628 — 🪞 hedge mirror
     threading.Thread(target=model_refresh_loop, daemon=True).start()   # v0.99.636 — retrained models from the repo, daily
     threading.Thread(target=auto_update_loop, daemon=True).start()   # v0.99.637 — a new version on GitHub -> /update by itself
