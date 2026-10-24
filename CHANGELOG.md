@@ -20498,3 +20498,10 @@ v0.99.696 - ⚡ the backtest list in money (the user: "на последних 5
          it: "нет места"), the margin by the bot's leverage (the liquidation liq_buf x the emergency stop, up to 20x,
          90% of the free equity — less: the trade smaller, none: "нет маржи"). dlmMoney50 (JS); the status passes the
          model's liq_buf. Test: t_dlm_ui (the $ of the rows == an independent python replica).
+v0.99.697 - ⚡ the backtest list's money readable (the user: "идёт сделка минусовая после 104 долларов и становится денег
+         больше"): the account was the one at each trade's close, the list by the order's time — the trades closed
+         between two rows were elsewhere. Now the ⚡ list by the close (the date — the close's; the same hour in the
+         sim's order): a row's account = the row below's + its $. A trade the margin made smaller says "N% размера"
+         (23.09: 17 longs at 14:00 — the margin ran out after ~10); a position under Binance's $5 is not opened
+         ("нет маржи"; it was counted with ~$0). One order for the same fill hour (the fill, the order's time, the
+         coin). Test: t_dlm_ui (the rows' $ == a python replica; row by row the account adds up).

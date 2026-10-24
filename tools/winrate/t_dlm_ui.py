@@ -60,7 +60,7 @@ with sync_playwright() as p:
     import re as _re
     shown = [int(_re.sub(r"\D", "", l.split("→ $")[1].split("·")[0])) for l in rows]
     rk, mp, buf = V.dlm_risk(), V.DLM_MAX_POS, float(V.dlm_model().get("liq_buf") or 1.5)
-    tr = sorted([t for t in _BTD["dlm"] if t.get("r") is not None], key=lambda t: t["f"])[-50:]
+    tr = sorted([t for t in _BTD["dlm"] if t.get("r") is not None], key=lambda t: (t["f"], t["t"], t["s"]))[-50:]
     eq, op, bal = 100.0, [], []
     def _settle(upto):
         global eq
@@ -73,11 +73,16 @@ with sync_playwright() as p:
         if lev < 1: continue
         ru = eq * rk / 100; mg = ru / st / lev; free = (eq - sum(p_[3] for p_ in op)) * 0.9
         if mg > free:
-            if free <= 0: continue
-            ru *= free / mg; mg = free
+            ru *= max(0.0, free) / mg; mg = max(0.0, free)
+        if ru / st < 5: continue   # v0.99.697 — under Binance's $5 position: not placed
         op.append((t["x"], t["r"], ru, mg))
     _settle(float("inf"))
-    m50_ok = len(rows) >= 20 and all(any(abs(x - b_) <= 1 for b_ in bal) for x in shown) and max(shown) == max(bal)
+    m50_ok = len(rows) >= 20 and all(any(abs(x - b_) <= 1 for b_ in bal) for x in shown) and max(shown) == max(bal) and len(bal) == len(pg.evaluate("() => (window._btData.dlm || []).filter(t => t._usd != null).length") * [0])
+    # by the close: the account of a row = the one of the row below (the earlier close) + this row's $
+    usd = [float(l.split("$")[1].split("→")[0].strip().replace(",", ".").replace("\u00a0", "")) * (-1 if "−$" in l else 1) for l in rows]
+    seq_ok = all(abs(shown[i + 1] + usd[i] - shown[i]) <= 1.01 for i in range(len(rows) - 1))
+    m50_ok = m50_ok and seq_ok
+    if not seq_ok: print("SEQ", [(i, rows[i].strip()[:60], rows[i + 1].strip()[:60]) for i in range(len(rows) - 1) if abs(shown[i + 1] + usd[i] - shown[i]) > 1.01])
     print("rows with $:", len(rows), "· e.g.", rows[0].strip()[:120] if rows else "-", "· python final", bal[-1] if bal else None, m50_ok)
     gone = "setDlmSingle" not in html and "setDlmLadder" not in html and "Лесенка" not in txt
     print("errors", errs, "· last 50 money", m50_ok, "· TLM exit / emergency stop", exit_ok and hs_ok, "· single/ladder gone", gone, "· 4h text", "4ч" in txt and "старый модуль 15м" in txt, "· 2h chart", "2ч" in t2)

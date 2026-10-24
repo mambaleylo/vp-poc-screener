@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.696"
+APP_VERSION = "0.99.697"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -43059,9 +43059,13 @@ function btListHtml(mod) {
   const idx = all.map((t, i) => i).filter(i => st.f === 'all' || btKey(all[i]) === st.f);
   const rs = idx.map(i => all[i].r), avg = rs.reduce((a, b) => a + b, 0) / (rs.length || 1), wr = rs.filter(r => r > 0).length / (rs.length || 1) * 100;
   const m50 = mod === 'dlm' ? dlmMoney50(idx.map(i => all[i]), window._dlmCfg || {risk: 4, max_pos: 20, buf: 1.5}) : null;   // v0.99.696
+  if (mod === 'dlm') {   // v0.99.697 — by the close (the account after each trade then reads row by row), the close's date
+    idx.sort((a, b) => (all[b].x || 0) - (all[a].x || 0) || (all[b]._seq || 0) - (all[a]._seq || 0) || all[b].t - all[a].t);   // the same hour: the sim's order
+    idx.forEach(i => { all[i]._byClose = true; });
+  }
   const chip = (k, lbl, n) => `<span onclick="btSet('${mod}', 'f', '${k}')" style="display:inline-block;padding:3px 9px;margin:0 6px 6px 0;border-radius:999px;cursor:pointer;border:1px solid var(--line);${st.f === k ? 'background:var(--card);color:var(--tx);' : 'color:var(--tx-3);'}">${lbl} · ${n}</span>`;
   let h = `<div>${chip('all', 'все', all.length)}${charts.length > 1 ? charts.map(c => chip(c, BT_SMC_GRP[c] || BT_EMA_TF[c] || BT_CH[c] || c, all.filter(t => btKey(t) === c).length)).join('') : ''}</div>
-    <div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">${idx.length} сделок · в среднем ${avg > 0 ? '+' : ''}${avg.toFixed(2)}R · WR ${wr.toFixed(0)}% · тап по сделке — график${m50 ? ` · у последних ${m50.n} рядом с R — $ сделки и счёт после неё, со $100 при риске ${(window._dlmCfg || {}).risk || 4}% из настроек, до ${(window._dlmCfg || {}).max_pos || 20} сделок сразу (пачки сигналов, маржа)` : ''}</div>
+    <div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">${idx.length} сделок · в среднем ${avg > 0 ? '+' : ''}${avg.toFixed(2)}R · WR ${wr.toFixed(0)}% · тап по сделке — график${m50 ? ` · сделки по времени закрытия (дата — закрытия) · у последних ${m50.n} рядом с R — $ сделки и счёт после неё, со $100 при риске ${(window._dlmCfg || {}).risk || 4}% из настроек, до ${(window._dlmCfg || {}).max_pos || 20} сделок сразу; в пачке сигналов маржа кончается — следующие меньше («N% размера») или не открываются («нет маржи», позиция меньше $5)` : ''}</div>
     <div id="btg_${mod}" style="font-size:var(--fs-xs);margin-bottom:6px;">${btGateHtml(mod)}</div>`;
   h += idx.slice(0, st.n).map(i => btRowHtml(all[i], `btOpen('${mod}', ${i})`)).join('');
   if (idx.length > st.n) h += `<div style="text-align:center;margin-top:6px;"><button class="btnNeutral" onclick="btSet('${mod}', 'n', ${st.n + 60})">ещё ${Math.min(60, idx.length - st.n)}</button></div>`;
@@ -43071,15 +43075,16 @@ function dlmMoney50(list, cfg, n = 50) {   // v0.99.696 — the user: "на по
   // денег со 100$ с учётом пачек сигналов и риском из настроек": the last n trades (by the fill), $100, the risk % of the
   // equity a trade at the 2 ATR stop, at most max_pos at once, the margin with the bot's leverage (the liquidation buf x
   // the emergency stop, isolated, up to 20x) — a trade without a free slot is skipped, without the margin it is smaller
-  list.forEach(t => { delete t._usd; delete t._bal; delete t._skip; });
-  const tr = list.filter(t => t.r != null && t.f && t.x && t.e && t.sl).sort((a, b) => a.f - b.f).slice(-n);
+  list.forEach(t => { delete t._usd; delete t._bal; delete t._skip; delete t._cut; delete t._seq; });
+  let seq = 0;
+  const tr = list.filter(t => t.r != null && t.f && t.x && t.e && t.sl).sort((a, b) => a.f - b.f || a.t - b.t || (a.s < b.s ? -1 : a.s > b.s ? 1 : 0)).slice(-n);   // one order for the same hour
   if (!tr.length) return null;
   let eq = 100, peak = 100, mdd = 0, skipped = 0, cut = 0;
   const open = [];
   const settle = upto => {
     open.sort((a, b) => a.x - b.x);
     while (open.length && open[0].x <= upto) {
-      const p = open.shift(); eq += p.ru * p.r; p.t._usd = p.ru * p.r; p.t._bal = eq;
+      const p = open.shift(); eq += p.ru * p.r; p.t._usd = p.ru * p.r; p.t._bal = eq; p.t._seq = ++seq;
       peak = Math.max(peak, eq); mdd = Math.max(mdd, 1 - eq / peak);
     }
   };
@@ -43089,9 +43094,10 @@ function dlmMoney50(list, cfg, n = 50) {   // v0.99.696 — the user: "на по
     const st = Math.max(0.002, Math.abs(t.e - t.sl) / t.e), sth = t.sl2 ? Math.abs(t.e - t.sl2) / t.e : st * 1.5;
     const lev = Math.min(20, Math.floor(1 / (cfg.buf * sth + 0.0105)));
     if (lev < 1 || eq <= 0) { skipped++; t._skip = 'нет места'; continue; }
-    let ru = eq * cfg.risk / 100, mg = ru / st / lev;
+    const full = eq * cfg.risk / 100; let ru = full, mg = ru / st / lev;
     const free = (eq - open.reduce((a, p) => a + p.mg, 0)) * 0.9;
-    if (mg > free) { if (free <= 0) { skipped++; t._skip = 'нет маржи'; continue; } ru *= free / mg; mg = free; cut++; }
+    if (mg > free) { ru *= Math.max(0, free) / mg; mg = Math.max(0, free); cut++; t._cut = ru / full; }
+    if (ru / st < 5) { skipped++; t._skip = 'нет маржи'; delete t._cut; continue; }   // Binance: a position under $5 is not placed
     open.push({x: t.x, r: t.r, ru, mg, t});
   }
   settle(Infinity);
@@ -43129,11 +43135,11 @@ async function btGateStart(mod) {
   poll();
 }
 function btRowHtml(t, onclick) {
-  const d = new Date(t.t * 1000).toLocaleDateString('ru-RU', {day: '2-digit', month: '2-digit', year: '2-digit'});
+  const d = new Date(((t._byClose && t.x) || t.t) * 1000).toLocaleDateString('ru-RU', {day: '2-digit', month: '2-digit', year: '2-digit'});
   const r = t.r == null ? '<span class="dim">открыта</span>' : `<span class="${t.r > 0 ? 'win' : (t.r < 0 ? 'loss' : '')}">${t.r > 0 ? '+' : ''}${(+t.r).toFixed(2)}R</span>`;
   return `<div onclick="${onclick}" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
     <span><span class="dim">${d}</span> <b>${(t.s || '').replace('_USDT', '')}</b> <span class="${t.d > 0 ? 'win' : 'loss'}">${t.d > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${btLabel(t)}${t.k ? ' · ' + (BT_KIND[t.k] || t.k) : ''}</span></span>
-    <span style="white-space:nowrap;">${t._usd != null ? `<span class="${t._usd > 0 ? 'win' : (t._usd < 0 ? 'loss' : '')}">${t._usd >= 0 ? '+' : '−'}$${Math.abs(t._usd).toFixed(t._bal < 1000 ? 2 : 0)}</span> <span class="dim">→ $${Math.round(t._bal).toLocaleString('ru-RU')}</span> · ` : (t._skip ? `<span class="dim">${t._skip}</span> · ` : '')}${r} ›</span></div>`;
+    <span style="white-space:nowrap;">${t._usd != null ? `${t._cut != null && t._cut < 0.95 ? `<span class="dim">${Math.round(t._cut * 100)}% размера · </span>` : ''}<span class="${t._usd > 0 ? 'win' : (t._usd < 0 ? 'loss' : '')}">${t._usd >= 0 ? '+' : '−'}$${Math.abs(t._usd).toFixed(t._bal < 1000 ? 2 : 0)}</span> <span class="dim">→ $${Math.round(t._bal).toLocaleString('ru-RU')}</span> · ` : (t._skip ? `<span class="dim">${t._skip}</span> · ` : '')}${r} ›</span></div>`;
 }
 function btOpen(mod, i) { const t = (window._btData[mod] || [])[i]; if (t) btChart(Object.assign({mod}, t, mod === 'dlm' && t.sl2 != null && t.hs == null ? {hs: t.sl2} : {})); }   // v0.99.693 — ⚡ the 3 ATR emergency stop of the list drawn
 function btLiveOpen(mod, i) { const t = (window._btLive[mod] || [])[i]; if (t) btChart(t); }
