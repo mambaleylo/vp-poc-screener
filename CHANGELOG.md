@@ -20540,3 +20540,24 @@ v0.99.699 - the other modules re-checked like ⚡ (the user: "перепрове
          "one level a coin & hour, the farthest" looked +27–39% but was tested on the touched levels only (a look-ahead) —
          needs the engines' untouched armed levels. Tests: t_bn_others (the new defaults), t_smc_bot, t_smc_ui,
          t_gatefill_ui, t_btgate — OK.
+v0.99.700 - SMC and EMA: the stop at a 4h close (as ⚡). On the honest pools (smc_cstop.py, ema_cstop.py; the stop by the close
+         of a 1h / 4h / 1d candle with the emergency stop 1.5 / 2x by a touch, the size by the stop): every variant
+         better than the touch stop — SMC +0.42 -> +0.53R, WR 53 -> 61% (4h close beyond 1 dATR, the emergency 2 dATR);
+         EMA +0.55 -> +0.71R, WR 69 -> 78% (4h close beyond 0.75 dATR, the emergency 1.5 dATR; after the partial the
+         stops at the entry as before). On 1m (m1_cstop.py): SMC +0.94 -> +1.07R, EMA +0.69 -> +0.94R. The portfolio
+         (port_cs.py: ⚡ 4 + P/R 2 + SMC 1 + EMA 0.5, the leverage by the emergency stops): the median $7 257 -> $7 674,
+         the worst 10% $1 072 -> $1 275, the drawdown 67 -> 63%, the last 12 months $10 142 -> $9 810. The bot: the
+         models' rule "stop_close_h" 4, "hard_x" 2 (_close_stop_rule); smc_fire / emx_fire put the trade's "ch" / "hs",
+         the real order's stop = the emergency one with the risk x2 (Gate: risk_pct_override; Binance: extra "kx" ->
+         bno_open), smc_settle / emx_settle walk by _cs_walk (the emergency stop by a touch, the 4h close, the partial,
+         the take) and a close stop of a real trade -> close_position_for_mode. The lists (smc_export3.py,
+         ema_export11.py: with "hs") and the research numbers. The model versions: EMA 12 (v0.99.699 had written 11
+         while the bot wanted 10 — the EMA model would not load: fixed), SMC 2. FIX: the backtest lists of v0.99.699 had
+         not been committed — the bot's bt_trades() refetches vp_bt_trades.json from the repo when the file is older
+         than the bot (the tests ran the bot from the repo and put the old file back); now in. The header: the yearly
+         expectation from $100 (EXPECT_YEAR, /api/boot "expect"; the user: "ожидания по доходу ... тонкой строкой под
+         шапку ... худшее и лучшее"): the bundle ⚡ + P/R + SMC + EMA when they trade together on Binance — the worst
+         10% of the years ~$1.3k, the median ~$7.7k, the best 10% ~$28k, the drawdowns ~63%; ⚡ alone ~$0.9k / $3.6k /
+         $11k, 66%. Tests: t_cstop_others (new: the bot re-makes 8/8 SMC and 10/10 EMA list trades of every exit kind;
+         the real order at the emergency stop with x2, a 4h close -> out at the market), t_bn_others (+ the header's
+         expectation), t_smc_bot, t_dlm_bot, t_dlm_ui — OK.

@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.699"
+APP_VERSION = "0.99.700"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4876,7 +4876,7 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
     account context (sub-account keys if configured, else main)."""
     if bn_routed(mode):   # v0.99.698 — P/R, SMC, EMA on the ⚡ Binance account
         with live_http():
-            return bno_open(mode, symbol, direction, entry, sl, tp)
+            return bno_open(mode, symbol, direction, entry, sl, tp, kx=float((extra or {}).get("kx") or 1.0))
     with using_account(mode), live_http():   # v0.99.598 — a trade being opened never waits for the backtests
         return _execute_autotrade_impl(mode, symbol, direction, entry, sl, tp, extra=extra,
                                        risk_pct_override=risk_pct_override, allow_stack=allow_stack,
@@ -28090,10 +28090,20 @@ RESTART_NOTE_FILE = os.environ.get("VP_RESTART_NOTE_FILE", "vp_restart_note.json
 _PROC_START = time.time()
 
 
+# v0.99.700 — the user: "ожидания по доходу добавь тоже куда нибудь тонкой строкой, может под шапку, типа связка индикаторов
+# худшее ожидание и лучшее": a year from $100 on the history (the 12-month windows from each week of 2023-02..2025-10, one
+# account, the bot's leverage, the honest pools; tools/winrate port_expect.py): the worst 10% / the median / the best 10% of
+# the years, the median drawdown. "bundle" = ⚡ 4% + P/R 2% + SMC 1% + EMA 0.5% (on Binance together), "dlm" = ⚡ alone
+EXPECT_YEAR = {"dlm": {"p10": 943, "p50": 3590, "p90": 11266, "dd": 66, "last12": 6105},
+               "bundle": {"p10": 1275, "p50": 7673, "p90": 28135, "dd": 63, "last12": 9809}}
+
+
 @app.route("/api/boot")
 def api_boot():
-    """v0.99.469 — the page reloads itself when this changes (a restart / update)"""
-    return jsonify({"boot": _PROC_START, "version": APP_VERSION})
+    """v0.99.469 — the page reloads itself when this changes (a restart / update); v0.99.700 — the yearly expectation
+    for the header (the bundle when P/R, SMC, EMA trade with ⚡ on Binance)"""
+    k = "bundle" if BN_OTHERS else "dlm"
+    return jsonify({"boot": _PROC_START, "version": APP_VERSION, "expect": dict(EXPECT_YEAR[k], kind=k)})
 
 
 def self_update_download(only_if_newer=False):
@@ -30364,7 +30374,7 @@ def zm_stats():
 # the price is watched every 30 s; the virtual record follows the 1h candles exactly as the research did.
 EMX_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_ema_model.json")
 EMX_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_ema_model.json"
-EMX_MODEL_VER = 10   # v0.99.671 — 10: the top 4% (thr at q 0.96), +31% trades; v0.99.667 — 9: + the crowd filter (ls_min_d24); v0.99.665 — 8: no 4h touches; v0.99.664 — 7: the entry limit 0.2 daily ATR past the EMA; v0.99.661 — 6: a third off at +1R (the stop to the fill), take 4R; v0.99.645 — 5: + the BTC EMA50 filter (the research stats and the backtest list with it); v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
+EMX_MODEL_VER = 12   # v0.99.700 — 12: the stop at a 4h close (0.75 dATR), the emergency one 1.5 dATR, the honest touch order (v0.99.699 wrote 11 by mistake: the bot wanted 10 and dropped the model); v0.99.671 — 10: the top 4% (thr at q 0.96), +31% trades; v0.99.667 — 9: + the crowd filter (ls_min_d24); v0.99.665 — 8: no 4h touches; v0.99.664 — 7: the entry limit 0.2 daily ATR past the EMA; v0.99.661 — 6: a third off at +1R (the stop to the fill), take 4R; v0.99.645 — 5: + the BTC EMA50 filter (the research stats and the backtest list with it); v0.99.619 — 2: + the per-coin tallies of the coin auto-selection; v0.99.621 — 3: the far take (stop 0.75 daily ATR, take 4R, 72 h)
 # v0.99.644 — 4: the same model, a new trading rule from the hypothesis study (tools/ema_model/ema_hyp*.py), better than
 # the old one on the bot's top 3% and on the top 10% check set at an equal drawdown: longs only (on shorts the score does
 # not rank: ~0R at every score), no entry when the price is >= 10 daily ATR above the daily EMA200 (those lost on both
@@ -30752,6 +30762,36 @@ def emx_coin_ok(sym):
     return n >= int(rule.get("min_n", 10)) and sm / n >= float(rule.get("min_avg", 0.1))
 
 
+def _close_stop_rule(m):
+    """v0.99.700 — (close hours, hard stop as a multiple of the stop) of a module's rule: the stop at the close of a
+    candle of that many hours (UTC), the exchange holding only the emergency stop further; (0, 1) = the stop by a touch"""
+    r = (m or {}).get("rule") or {}
+    ch = int(r.get("stop_close_h") or 0)
+    return (ch, float(r.get("hard_x") or 1.0)) if ch > 0 else (0, 1.0)
+
+
+def _cs_walk(cs, s, fill, sl, tp, hold, ch, hx, pr=0.0):
+    """v0.99.700 — a trade on its 1h candles: the emergency stop (hx x the stop) by a touch, the stop by the close of a
+    ch-hour candle (ch 0: the stop by a touch), the partial (pr R: the stops to the entry), no take in the entry hour,
+    out at `hold` -> (kind, exit, k, took) or None"""
+    risk = abs(fill - sl) or 1e-12
+    hs = fill - s * hx * risk if ch else sl
+    took = False
+    for k, c in enumerate(cs[:hold]):
+        if (c["low"] <= hs) if s > 0 else (c["high"] >= hs):
+            gap = (c["open"] <= hs) if s > 0 else (c["open"] >= hs)
+            return ("BREAKEVEN" if took else "LOSS", c["open"] if (gap and k > 0) else hs, k, took)
+        if pr and k > 0 and not took and ((c["high"] - fill) if s > 0 else (fill - c["low"])) >= pr * risk:
+            took, hs = True, fill
+        if k > 0 and ((c["high"] >= tp) if s > 0 else (c["low"] <= tp)):
+            return ("WIN", tp, k, took)
+        if ch and not took and (c["time"] + 3600) % (ch * 3600) == 0 and ((c["close"] <= sl) if s > 0 else (c["close"] >= sl)):
+            return ("LOSS", c["close"], k, took)
+    if len(cs) >= hold:
+        return ("TIME_EXIT", cs[hold - 1]["close"], hold - 1, took)
+    return None
+
+
 def _emx_can_open(sym, side):
     m = _EMX.get("model") or {}
     with _emx_lock:
@@ -30777,10 +30817,13 @@ def emx_fire(a, t_touch, live_px=None, how=None):
     risk_plan = abs(a["lv"] - a["sl"]) or 1e-12
     if live_px and a["side"] * (live_px - a["lv"]) > risk_plan:   # v0.99.669 — Gate's price a whole R worse than the limit: no real trade
         tr["late"] = round(a["side"] * (live_px - a["lv"]) / risk_plan, 2)
+    ch, hx = _close_stop_rule(m)   # v0.99.700 — the stop at a 4h close, the exchange's at the emergency one
+    if ch:
+        tr.update({"ch": ch, "hs": a["lv"] - a["side"] * hx * abs(a["lv"] - a["sl"])})
     if AUTOTRADE_ENABLED_EMW and live_px and tr["sel"] and not tr.get("late"):
         try:
-            risk = MODULE_RISK_PCT.get("emw") or EMX_RISK_DEFAULT
-            res = execute_autotrade("emw", a["symbol"], direction, live_px, a["sl"], a["tp"], extra={"ema": f"{a['tf']} {a['n']}"},
+            risk = (MODULE_RISK_PCT.get("emw") or EMX_RISK_DEFAULT) * hx   # the loss at the stop = the risk %
+            res = execute_autotrade("emw", a["symbol"], direction, live_px, tr.get("hs", a["sl"]), a["tp"], extra={"ema": f"{a['tf']} {a['n']}", "kx": hx},
                                     risk_pct_override=risk)
             tr["real"] = (res or {}).get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
             tr["autotrade"] = {"status": (res or {}).get("status"), "detail": str((res or {}).get("detail") or "")[:200]}
@@ -30849,25 +30892,16 @@ def emx_settle(now=None):
                 continue
             s, fill, sl, tp = t["side"], t["entry"], t["sl"], t["tp"]
             risk = abs(fill - sl) or 1e-12
-            res = None
             hold = int(t.get("hold") or 24)   # v0.99.621 — the rule's hold (72 h since the far take), kept per trade
             pr, pf = float(t.get("part_r") or 0), float(t.get("part_f") or 0)   # v0.99.661: the partial take
-            st, took = sl, False
-            for k, c in enumerate(cs[:hold]):
-                if (c["low"] <= st) if s > 0 else (c["high"] >= st):
-                    gap = (c["open"] <= st) if s > 0 else (c["open"] >= st)
-                    res = ("BREAKEVEN" if took else "LOSS", c["open"] if (gap and k > 0) else st, k)
-                    break
-                if pr and k > 0 and not took and ((c["high"] - fill) if s > 0 else (fill - c["low"])) >= pr * risk:
-                    took, st = True, fill
-                if k > 0 and ((c["high"] >= tp) if s > 0 else (c["low"] <= tp)):
-                    res = ("WIN", tp, k)
-                    break
-            if not res and len(cs) >= hold:
-                res = ("TIME_EXIT", cs[hold - 1]["close"], hold - 1)
+            ch = int(t.get("ch") or 0)   # v0.99.700 — the stop at a 4h close, the emergency one by a touch
+            hx = abs(fill - t["hs"]) / risk if ch and t.get("hs") is not None else 1.0
+            res = _cs_walk(cs, s, fill, sl, tp, hold, ch, hx, pr)
             if not res:
                 continue
-            kind, ex, k = res
+            kind, ex, k, took = res
+            if kind == "LOSS" and ch and ex != t.get("hs") and t.get("real") and AUTOTRADE_ENABLED_EMW:   # the close stop: out at the market
+                log_error(f"ema close stop {t['symbol']}: {close_position_for_mode('emw', t['symbol'], t['direction'])}")
             rest = s * (ex - fill) / risk
             r = ((pf * pr + (1 - pf) * rest) if took else rest) - (EMX_FEE + EMX_FUND * (k + 1) / 24) * fill / risk
             if kind == "TIME_EXIT" and t.get("real") and AUTOTRADE_ENABLED_EMW:
@@ -33027,7 +33061,7 @@ def api_cas_status():
 # stop 1 daily ATR past it, take 3R, out after 72 h.
 SMC_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_smc_model.json")
 SMC_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_smc_model.json"
-SMC_MODEL_VER = 1
+SMC_MODEL_VER = 2   # v0.99.700 — 2: the stop at a 4h close (1 dATR), the emergency one 2 dATR, the honest touch order
 SMC_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_smc_state.json")
 SMC_ENABLED = os.environ.get("VP_SMC", "1") == "1"
 AUTOTRADE_ENABLED_SMC = os.environ.get("VP_AUTOTRADE_SMC", "0") == "1"
@@ -33478,10 +33512,13 @@ def smc_fire(a, t_touch, live_px=None, how=None):
     risk_plan = abs(a["lv"] - a["sl"]) or 1e-12
     if live_px and a["side"] * (live_px - a["lv"]) > risk_plan:   # Gate's price a whole R worse than the limit: no real trade
         tr["late"] = round(a["side"] * (live_px - a["lv"]) / risk_plan, 2)
+    ch, hx = _close_stop_rule(m)   # v0.99.700 — the stop at a 4h close, the exchange's at the emergency one
+    if ch:
+        tr.update({"ch": ch, "hs": a["lv"] - a["side"] * hx * abs(a["lv"] - a["sl"])})
     if AUTOTRADE_ENABLED_SMC and live_px and not tr.get("late"):
         try:
-            res = execute_autotrade("smc", a["symbol"], direction, live_px, a["sl"], a["tp"], extra={"smc": SMC_NAME.get(a["fam"], a["fam"])},
-                                    risk_pct_override=MODULE_RISK_PCT.get("smc") or SMC_RISK_DEFAULT)
+            res = execute_autotrade("smc", a["symbol"], direction, live_px, tr.get("hs", a["sl"]), a["tp"], extra={"smc": SMC_NAME.get(a["fam"], a["fam"]), "kx": hx},
+                                    risk_pct_override=(MODULE_RISK_PCT.get("smc") or SMC_RISK_DEFAULT) * hx)
             tr["real"] = (res or {}).get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
             tr["autotrade"] = {"status": (res or {}).get("status"), "detail": str((res or {}).get("detail") or "")[:200]}
         except Exception as e:
@@ -33548,20 +33585,14 @@ def smc_settle(now=None):
             s, fill, sl, tp = t["side"], t["entry"], t["sl"], t["tp"]
             risk = abs(fill - sl) or 1e-12
             hold = int(t.get("hold") or 72)
-            res = None
-            for k, c in enumerate(cs[:hold]):
-                if (c["low"] <= sl) if s > 0 else (c["high"] >= sl):
-                    gap = (c["open"] <= sl) if s > 0 else (c["open"] >= sl)
-                    res = ("LOSS", c["open"] if (gap and k > 0) else sl, k)
-                    break
-                if k > 0 and ((c["high"] >= tp) if s > 0 else (c["low"] <= tp)):
-                    res = ("WIN", tp, k)
-                    break
-            if not res and len(cs) >= hold:
-                res = ("TIME_EXIT", cs[hold - 1]["close"], hold - 1)
+            ch = int(t.get("ch") or 0)   # v0.99.700 — the stop at a 4h close, the emergency one by a touch
+            hx = abs(fill - t["hs"]) / risk if ch and t.get("hs") is not None else 1.0
+            res = _cs_walk(cs, s, fill, sl, tp, hold, ch, hx)
             if not res:
                 continue
-            kind, ex, k = res
+            kind, ex, k, _took = res
+            if kind == "LOSS" and ch and ex != t.get("hs") and t.get("real") and AUTOTRADE_ENABLED_SMC:   # the close stop: out at the market
+                log_error(f"smc close stop {t['symbol']}: {close_position_for_mode('smc', t['symbol'], t['direction'])}")
             r = s * (ex - fill) / risk - (SMC_FEE + SMC_FUND * (k + 1) / 24) * fill / risk
             if kind == "TIME_EXIT" and t.get("real") and AUTOTRADE_ENABLED_SMC:
                 log_error(f"smc time exit {t['symbol']}: {close_position_for_mode('smc', t['symbol'], t['direction'])}")
@@ -34948,7 +34979,7 @@ def bn_map_any(sym):
     return None
 
 
-def bno_open(mode, symbol, direction, entry, sl, tp):
+def bno_open(mode, symbol, direction, entry, sl, tp, kx=1.0):
     """the real trade of P/R / SMC / EMA on Binance -> {"status": OPENED | OPENED_TP_SL_FAILED | SKIPPED | DRY_RUN, "detail"}"""
     if AUTOTRADE_DRY_RUN:
         return {"status": "DRY_RUN", "detail": "dry-run: на Binance не отправлено"}
@@ -34974,7 +35005,7 @@ def bno_open(mode, symbol, direction, entry, sl, tp):
     mmr = tiers[0][1] if tiers else SCALP_DEFAULT_MMR_PCT
     tb = {bsym: tiers} if tiers else None
     acct = bnf_account()
-    risk = float(MODULE_RISK_PCT.get(mode) or BN_OTHERS_RISK.get(mode, 1.0))
+    risk = float(MODULE_RISK_PCT.get(mode) or BN_OTHERS_RISK.get(mode, 1.0)) * kx   # v0.99.700: kx — the stop sl is the emergency one
     margin, lev, skip = compute_risk_based_position(direction, e, slp, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb)
     if not skip and margin > acct["free"] * 0.9:   # the free margin: the risk scaled down to what the account carries
         if acct["free"] <= 1:
@@ -34998,7 +35029,7 @@ def bno_open(mode, symbol, direction, entry, sl, tp):
                                                newClientOrderId=f"vp{mode}{int(time.time() * 1000)}"))
     filled = float(r.get("executedQty") or 0) or q
     avg = float(r.get("avgPrice") or 0) or e
-    rec = {"mode": mode, "bsym": bsym, "scl": scl, "side": s, "qty": filled, "entry": avg, "lev": int(lev), "risk": risk, "dual": dual,
+    rec = {"mode": mode, "bsym": bsym, "scl": scl, "side": s, "qty": filled, "entry": avg, "lev": int(lev), "risk": round(risk / kx, 4), "dual": dual,
            "tick": info["tick"], "step": info["step"], "min_qty": info["min_qty"], "t": int(time.time())}
     status = "OPENED"
     for kind, px, up, kk in (("STOP_MARKET", slp, s < 0, "sl"), ("TAKE_PROFIT_MARKET", tpp, s > 0, "tp")):
@@ -39486,6 +39517,7 @@ INDEX_HTML = """<!doctype html>
   </div>
   <div id="status"></div>
   <div id="overview" class="dim" style="margin-top:4px;"></div>
+  <div id="hdrExpect" class="dim" style="margin-top:2px;font-size:var(--fs-xs);"></div>
   <div id="hdrChips">
     <span id="autotradeBanner"></span>
     <span id="healthPill"></span>
@@ -42494,6 +42526,15 @@ if ('serviceWorker' in navigator) { try { navigator.serviceWorker.register('/sw.
 // v0.99.469 — the bot restarted (/update, /restart, the button, by hand): the
 // page reloads itself with the new code; the open tab and a running
 // screensaver come back. Not while a dialog or the settings are open.
+(async function hdrExpect() {   // v0.99.700 — the yearly expectation under the header
+  try {
+    const r = await (await fetch('/api/boot', {cache: 'no-store'})).json(), e = r.expect;
+    if (!e) return;
+    const k = v => v >= 1000 ? '$' + (v / 1000).toFixed(v >= 10000 ? 0 : 1).replace('.', ',') + 'k' : '$' + v;
+    document.getElementById('hdrExpect').innerHTML = `📈 ${e.kind === 'bundle' ? '⚡ + P/R + SMC + EMA' : '⚡'} за год со $100 по истории: плохой год ~${k(e.p10)} · обычный ~${k(e.p50)} · хороший ~${k(e.p90)} · просадки ~${e.dd}% · вживую ждите меньше`;
+  } catch (err) {}
+})();
+
 (function autoReloadOnRestart() {
   let boot = null;
   const busy = () => (Date.now() - (window._zUp || 0) < 120000)
@@ -43083,7 +43124,7 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
     top += `<div class="zsub">Проверка на истории — каждый год модель не видела. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>сделка до <b>${Math.round((rule.hold_h || 24))} ч</b></span><span>просадка до <b>${dd}R</b></span></div>
-      <div class="zsub">Вход — ${rule.deep_datr ? `лимиткой на <b>${rule.deep_datr} дневного хода за EMA</b> (не дошла за час касания — сделки нет; касание ловится и по минутным свечам Binance, на которых считан бэктест, — сделка на Gate по рынку)` : 'на EMA'}, стоп — <b>${rule.stop_datr} дневного хода</b> монеты за входом${rule.part_r ? `, на <b>+${rule.part_r}R закрыть ${Math.round(rule.part_f * 100)}%</b> и стоп в безубыток` : ''}, тейк — <b>${rule.take_r} риска</b>. Не больше ${m.side_cap || 12} сделок в одну сторону.
+      <div class="zsub">Вход — ${rule.deep_datr ? `лимиткой на <b>${rule.deep_datr} дневного хода за EMA</b> (не дошла за час касания — сделки нет; касание ловится и по минутным свечам Binance, на которых считан бэктест, — сделка на Gate по рынку)` : 'на EMA'}, стоп — <b>${rule.stop_datr} дневного хода</b> монеты за входом${rule.stop_close_h ? ` — если ${rule.stop_close_h}-часовая свеча закрылась за ним (фитили не выбивают; аварийный стоп на бирже — ${+(rule.stop_datr * (rule.hard_x || 2)).toFixed(2)} дневного хода)` : ""}${rule.part_r ? `, на <b>+${rule.part_r}R закрыть ${Math.round(rule.part_f * 100)}%</b> и стоп в безубыток` : ''}, тейк — <b>${rule.take_r} риска</b>. Не больше ${m.side_cap || 12} сделок в одну сторону.
         ${m.sides ? `${m.sides.length === 1 && m.sides[0] === 1 ? 'Только лонги (на шортах модель не различает хорошие касания от плохих). ' : ''}Не входит, если цена уже дальше ${m.max_d_ema200} дневных ATR над EMA200 дня${m.tfs && !m.tfs.includes('4h') ? '; касания на 4ч не берёт (с входом за EMA они слабее)' : '; касания на 4ч — только самые уверенные'}.${m.btc_ema50 ? ' Лонги — только пока BTC выше своей дневной EMA50.' : ''}${m.ls_min_d24 != null ? ' Не входит, если толпа (все счета Binance) за сутки не прибавила в лонгах — на истории такие касания заметно хуже.' : ''}` : ''}</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «EMA» в настройках риска (пусто = ${d.risk}%). Сделок много одновременно: просадка на истории до ${dd}R — держите риск маленьким.</div>`}`;
     const sl = d.sel || {}, cr = sl.rule || {}, rsl = sl.research || {};
@@ -43598,7 +43639,7 @@ async function refreshSmc() {   // v0.99.678 — 🧱 SMC: the model on the firs
       <div class="zsub">Проверка на истории ${rs.coins || 127} монет — каждый год модель не видела. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2026'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${rs.per_month || '—'}</b> сделок в месяц</span><span>WR <b>${rs.wr || '—'}%</b></span><span>просадка до <b>${dd}R</b></span></div>
-      <div class="zsub">Вход — лимиткой на уровне, стоп — <b>${rule.stop_datr || 1} дневной ATR</b> за уровнем, тейк — <b>${rule.take_r || 3} риска</b>, через ${rule.hold_h || 72} ч выход. Не больше ${m.side_cap || 12} сделок в одну сторону, по монете и стороне — одна.${rs.max_losing_streak ? ` Самая длинная серия минусов на истории — ${rs.max_losing_streak}: убытки, как и сигналы, приходят пачками, поэтому риск — четверть от EMA.` : ''}${rs.check ? ` На ${rs.check_coins || 84} монетах, на которых модель не училась: ${sgR(rs.check.avg)} на сделку, WR ${rs.check.wr}%.` : ''}</div>
+      <div class="zsub">Вход — лимиткой на уровне, стоп — <b>${rule.stop_datr || 1} дневной ATR</b> за уровнем${rule.stop_close_h ? ` — если ${rule.stop_close_h}-часовая свеча закрылась за ним (аварийный стоп на бирже — ${(rule.stop_datr || 1) * (rule.hard_x || 2)} ATR)` : ""}, тейк — <b>${rule.take_r || 3} риска</b>, через ${rule.hold_h || 72} ч выход. Не больше ${m.side_cap || 12} сделок в одну сторону, по монете и стороне — одна.${rs.max_losing_streak ? ` Самая длинная серия минусов на истории — ${rs.max_losing_streak}: убытки, как и сигналы, приходят пачками, поэтому риск — четверть от EMA.` : ''}${rs.check ? ` На ${rs.check_coins || 84} монетах, на которых модель не училась: ${sgR(rs.check.avg)} на сделку, WR ${rs.check.wr}%.` : ''}</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «🧱» в настройках риска (пусто = ${d.risk}%).</div>`}`;
   }
   h += card(`🧱 SMC ${pill}`, top);

@@ -194,6 +194,10 @@ res["dry run / off -> Gate"] = r8["status"] == "DRY_RUN" and r9["detail"] == "ga
 # (10) the setting row in the page
 html = V.app.test_client().get("/").get_data(as_text=True)
 res["setting in the page"] = 'id="setBnOthers"' in html and "bn_others: document.getElementById('setBnOthers')" in html
+# (11) v0.99.700 — the header's yearly expectation: the bundle when on, ⚡ alone when off
+c_ = V.app.test_client(); V.apply_settings({"bn_others": True}); e1 = c_.get("/api/boot").get_json()["expect"]
+V.apply_settings({"bn_others": False}); e0 = c_.get("/api/boot").get_json()["expect"]
+res["header expectation (bundle / ⚡)"] = e1["kind"] == "bundle" and e0["kind"] == "dlm" and e1["p10"] < e1["p50"] < e1["p90"] and 'id="hdrExpect"' in html
 print(" · ".join(f"{k} {v}" for k, v in res.items()))
 ok = all(res.values())
 print("ALL OK" if ok else "FAILED"); sys.exit(0 if ok else 1)
