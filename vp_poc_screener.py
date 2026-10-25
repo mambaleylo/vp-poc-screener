@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.714"
+APP_VERSION = "0.99.715"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30999,11 +30999,12 @@ def emx_stats():
             "risk": MODULE_RISK_PCT.get("emw") or EMX_RISK_DEFAULT,
             "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap", "sides", "max_d_ema200", "tf_margin", "btc_ema50", "tfs", "ls_min_d24")} if m else None,
             "err": err, "scan": scan, "armed": armed[:40], "armed_n": len(armed),
-            "open": [t for t in trades if t["status"] == "OPEN"][-30:],
+            "open": [dict(t, why=mod_why_virtual(t, AUTOTRADE_ENABLED_EMW)) for t in trades if t["status"] == "OPEN"][-30:],   # v0.99.715 — the reason of a virtual one
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
             "live_check": live_vs_bt("emx", [t["r"] for t in fin_all if t.get("rv") == EMX_MODEL_VER]),
             "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "n", "t_in", "hour", "r", "result", "real", "sel", "entry", "sl", "tp", "exit", "t_out", "part", "part_r")}
+                     | {"why": mod_why_virtual(t, AUTOTRADE_ENABLED_EMW)}   # v0.99.715
                      for t in sorted(fin_all, key=lambda t: -t["t_in"])[:30]]}
 
 
@@ -32645,12 +32646,13 @@ def prx_stats():
             "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "label_rule", "research", "side_cap", "train")} | {"btc_filter": m.get("btc_filter") or PRX_BTC_FILTER, "btc_filter_1h": m.get("btc_filter_1h") or PRX_BTC_FILTER_1H,
                                                          "tfs": m.get("tfs") or list(PRX_TFS)} if m else None,
             "err": err, "scan": scan, "near": last,
-            "open": [t for t in trades if t["status"] in ("OPEN", "PENDING")][-30:],
+            "open": [dict(t, why=mod_why_virtual(t, AUTOTRADE_ENABLED_PRV)) for t in trades if t["status"] in ("OPEN", "PENDING")][-30:],   # v0.99.715 — the reason of a virtual one
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
             "no_fill": sum(1 for t in trades if t.get("result") == "NO_FILL"),
             "live_check": live_vs_bt("prv", [t["r"] for t in fin if t.get("rv") == PRX_MODEL_VER]),
-            "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "hour", "r", "result", "real", "entry", "px", "sl", "tp", "hs", "exit", "t_out")} for t in sorted(fin, key=lambda t: -t["hour"])[:30]]}
+            "last": [{k: t.get(k) for k in ("symbol", "side", "tf", "hour", "r", "result", "real", "entry", "px", "sl", "tp", "hs", "exit", "t_out")}
+                     | {"why": mod_why_virtual(t, AUTOTRADE_ENABLED_PRV)} for t in sorted(fin, key=lambda t: -t["hour"])[:30]]}   # v0.99.715
 
 
 @app.route("/api/prx/status")
@@ -33648,11 +33650,12 @@ def smc_stats():
             "risk": MODULE_RISK_PCT.get("smc") or SMC_RISK_DEFAULT,
             "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap", "smc_fams")} if m else None,
             "names": SMC_NAME, "err": err, "scan": scan, "armed": armed[:40], "armed_n": len(armed),
-            "open": [t for t in trades if t["status"] == "OPEN"][-30:],
+            "open": [dict(t, why=mod_why_virtual(t, AUTOTRADE_ENABLED_SMC)) for t in trades if t["status"] == "OPEN"][-30:],   # v0.99.715 — the reason of a virtual one
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
             "live_check": live_vs_bt("smc", [t["r"] for t in fin if t.get("rv") == SMC_MODEL_VER]),
             "last": [{k: t.get(k) for k in ("symbol", "side", "fam", "t_in", "hour", "r", "result", "real", "entry", "sl", "tp", "exit", "t_out")}
+                     | {"why": mod_why_virtual(t, AUTOTRADE_ENABLED_SMC)}   # v0.99.715
                      for t in sorted(fin, key=lambda t: -t["t_in"])[:30]]}
 
 
@@ -34439,6 +34442,28 @@ def _dlm_closed_gate(sym, tf, sec, n, now):
     return [c for c in cs if c["time"] + sec <= now][-n:]
 
 
+def mod_why_virtual(t, auto):
+    """v0.99.715 — a P/R / SMC / EMA trade not on the exchange: why (the user: "сделка закрылась тейком, но её нигде нет")"""
+    if t.get("real"):
+        return None
+    at = t.get("autotrade") or {}
+    if at.get("status") in ("SKIPPED", "ERROR", "FAILED", "BLOCKED", "REJECTED") or (at.get("status") and at.get("detail")):
+        return (str(at.get("detail") or at.get("status")))[:200]
+    if not auto:
+        return "автоторговля модуля выключена — сделка только для статистики"
+    if AUTOTRADE_DRY_RUN or at.get("status") == "DRY_RUN":
+        return "включена «Бумажная торговля (dry-run)» — ордера на биржу не отправляются"
+    if t.get("sel") is False:
+        return "монета вне отбора модели — сделка только для статистики"
+    if t.get("late") or t.get("rt"):
+        return "цена ушла от уровня дальше, чем на 1R, пока бот увидел сигнал (или бот был выключен) — сделка только для статистики"
+    if float(t.get("t_in") or t.get("hour") or 0) and float(t.get("t_in") or t.get("hour") or 0) + 3600 <= _PROC_START:
+        return "сигнал был, когда бот был выключен — сделка только для статистики"
+    if t.get("status") == "PENDING":
+        return "ждёт отката к лимитке — на бирже пока нет"
+    return "в момент сигнала не было живой цены монеты — на биржу не отправлялась"
+
+
 def dlm_coins():
     """the coins ⚡ scans: the 127 (+ 83 more with DLM_MORE_COINS); on Binance all of them (its own bars), on Gate the ones
     Gate trades among its top 300"""
@@ -34519,7 +34544,7 @@ def dlm_osc_mult(sym, side, now=None):
     return 1.0
 
 
-def dlm_scan(t_bar, st):
+def dlm_scan(t_bar, st, cu=False):
     """at the close of a bar of the stream's chart (4h / 2h) that started at t_bar - its bar: the coins' limits of the
     stream scored by its models; the ones above its threshold become orders alive for its next 4 bars — one per coin &
     side a bar; another stream's order of the coin & side may stand too (the first to fill is the trade, the other one
@@ -34557,7 +34582,7 @@ def dlm_scan(t_bar, st):
                     continue
                 new.append({"id": f"dlm_{sym}_{s}_{t_bar}" + ("" if st["name"] == "wick4h" else "_" + st["name"]), "symbol": sym, "side": s, "lv": lv,
                             "atr": a, "score": round(sc, 4), "bs": bs, "st": st["name"], "t0": t_bar, "until": t_bar + int(st.get("alive_bars", 4)) * bs,
-                            "px": bars[-1]["close"], "status": "OPEN", "real": None})
+                            "px": bars[-1]["close"], "status": "OPEN", "real": None, **({"cu": True} if cu else {})})
         except Exception as e:
             log_error(f"dlm scan {sym} {tf}: {e}")
     new.sort(key=lambda o: -o["score"])
@@ -34568,8 +34593,12 @@ def dlm_scan(t_bar, st):
         new = [o for o in new if o["id"] not in have]
         _DLM["orders"].extend(new)
         sc_all = dict(_DLM.get("scan") or {})
-        sc_all.update({"t": int(time.time()), "bar": t_bar, "coins": coins, "src": src})
-        sc_all.setdefault("by", {})[st["name"]] = {"t": int(time.time()), "bar": t_bar, "coins": coins, "cands": cands, "orders": len(new), "near": near}
+        prev = (sc_all.get("by") or {}).get(st["name"]) or {}
+        if int(prev.get("bar") or 0) > t_bar:   # v0.99.715 — a catch-up scan of an older bar (its own thread) keeps the newer one shown
+            prev = None
+        if prev is not None:
+            sc_all.update({"t": int(time.time()), "bar": max(t_bar, int(sc_all.get("bar") or 0)), "coins": coins, "src": src})
+            sc_all.setdefault("by", {})[st["name"]] = {"t": int(time.time()), "bar": t_bar, "coins": coins, "cands": cands, "orders": len(new), "near": near}
         sc_all["near"] = sorted([x for v in sc_all["by"].values() for x in v.get("near") or []], key=lambda x: -x["pct"])[:8]
         _DLM["scan"] = sc_all
     # v0.99.705 — no Telegram for the new orders (the user: "набор лимиток для меня бесполезен"): only a filled one (_dlm_fill_msg)
@@ -34594,7 +34623,9 @@ def _dlm_why_virtual(o, t=None):
     if not o:
         return "причина не сохранилась (лимитки уже нет в памяти бота)"
     if r.get("detail"):
-        return str(r["detail"])[:160]
+        return str(r["detail"])[:200]
+    if o.get("hold"):   # v0.99.715 — why the bot did not put it on the exchange (the coin / the places / the side taken)
+        return str(o["hold"])[:200]
     if int(o.get("t0") or 0) < _PROC_START - 60:
         return "лимитка поставлена до запуска бота / включения автоторговли"
     return "цена проскочила уровень прострелом между проверками бота — лимитка не успела встать на биржу"
@@ -34848,6 +34879,7 @@ def _dlm_take_watch(t, mark=None, now=None):
 
 # ---- the exchange side: a real GTC limit, then the stop (trigger) and the take (a reduce-only limit = maker) ----
 DLM_ARM_ATR = float(os.environ.get("VP_DLM_ARM_ATR", "1.0"))   # v0.99.691 — a real limit goes on the exchange when the price is this close (v0.99.702: 0.3 -> 1.0 ATR — at 0.3 a fast spike through the level beat the 5 s polls: ~20% of the backtest's fills missed live, arm_miss.py on 1m; at 1.0 ~2%)
+DLM_SWAP_ATR = 0.25   # v0.99.715 — the parallel stream's limit takes the coin's place on the exchange when this much nearer
 DLM_DISARM_ATR = 1.6   # ... and comes off again (back to waiting) when the price goes this far from it (v0.99.702: 1.0 -> 1.6)
 DLM_THROUGH_ATR = 0.3   # v0.99.702 — the price already this far through a waiting order's level: no trade (another entry than the research's)
 
@@ -34901,7 +34933,8 @@ def _dlm_arm(now):
     away again comes off; the price through a waiting order's level: placed now if there is room (it fills at once, at
     the price or better), else no trade — the coin was busy / the side full when the price came, as in the research."""
     with _dlm_lock:
-        wait = [o for o in _DLM["orders"] if o["status"] == "OPEN" and o.get("real") is None and int(o.get("bs") or 900) != 900 and now < o["until"]]
+        wait = [o for o in _DLM["orders"] if o["status"] == "OPEN" and o.get("real") is None and int(o.get("bs") or 900) != 900 and now < o["until"]
+                and not o.get("cu")]   # v0.99.715 — a catch-up order waits for the loop's settle
         armed = [o for o in _DLM["orders"] if o["status"] == "OPEN" and (o.get("real") or {}).get("id") and int(o.get("bs") or 900) != 900]
     if not wait and not armed:
         return
@@ -34920,14 +34953,29 @@ def _dlm_arm(now):
         if d < -DLM_THROUGH_ATR:   # far through the level (the bot was down / no prices): a fill now would be another trade
             o["real"] = {"status": "SKIPPED", "detail": "цена проскочила лимитку раньше, чем бот выставил её на биржу (резкий прострел, бот был занят пересчётом или не работал)"}
             continue
+        # v0.99.715 — the user ("особенно параллельный поток"): the coin's limit of the other stream on the exchange, this one
+        # nearer the price -> that one off (back to waiting), this one on: the nearer level fills first, as in the research
+        # (the first filled is the trade); DLM_SWAP_ATR keeps the two from swapping back and forth
+        rival = next((a for a in armed if a is not o and a["symbol"] == o["symbol"] and a["status"] == "OPEN" and (a.get("real") or {}).get("id")
+                      and a["symbol"] in px and dist(a) > d + DLM_SWAP_ATR), None)
+        if rival is not None:
+            try:
+                if _dlm_cancel_back(rival):
+                    rival["hold"] = (f"снята с биржи: цена ближе к лимитке другого потока ({DLM_STREAM_RU.get(o.get('st') or 'wick4h', o.get('st'))}) — "
+                                     f"на бирже одна лимитка на монету")
+                    armed.remove(rival)
+            except Exception as e:
+                log_error(f"dlm swap {o['symbol']}: {e}")
         try:
             dlm_real_place(o)
         except Exception as e:
             log_error(f"dlm place {o['symbol']}: {e}")
             o["real"] = {"status": "SKIPPED", "detail": str(e)[:160]}
             continue
+        if (o.get("real") or {}).get("id"):
+            armed.append(o)
         if o.get("real") is None and d <= 0:
-            o["real"] = {"status": "SKIPPED", "detail": "цена дошла до лимитки, когда места не было (монета занята / 20 сделок)"}
+            o["real"] = {"status": "SKIPPED", "detail": "цена дошла до лимитки, когда места не было: " + (o.get("hold") or "монета занята / 20 сделок")}
 
 
 def _dlm_liq_buf():
@@ -34965,10 +35013,24 @@ def dlm_real_place(o):
     # v0.99.682 — the cap counts the open positions too; v0.99.687: at most DLM_MAX_POS positions (the research's 20 at
     # 3–4%), limits + positions at most DLM_MAX_LIVE_ORDERS (a limit holds its margin on the exchange)
     side_cap = int((_DLM.get("model") or {}).get("side_cap") or 20)   # v0.99.691 — the room counts the armed limits as positions:
-    if (mine or any(x["symbol"] == sym for x in live)   # one position or limit a coin (Binance one-way), positions + limits
-            or len(held) + len(live) >= DLM_MAX_POS or len(live) + len(held) >= DLM_MAX_LIVE_ORDERS   # < 20, < 20 a side
-            or sum(1 for t in held if t["side"] == s) + sum(1 for x in live if x["side"] == s) >= side_cap):
+    # one position or limit a coin (Binance one-way), positions + limits < 20, < 20 a side. v0.99.715 — the reason kept
+    # (o["hold"]): a virtual trade of it says exactly why (the user: "сделка закрылась тейком, но её нигде нет")
+    other = next((x for x in live if x["symbol"] == sym), None)
+    n_side = sum(1 for t in held if t["side"] == s) + sum(1 for x in live if x["side"] == s)
+    hold = None
+    if mine:
+        hold = "по монете уже открыта сделка ⚡ на бирже (Binance — одна позиция на монету)"
+    elif other is not None:
+        hold = (f"по монете на бирже уже стоит лимитка другого потока ({DLM_STREAM_RU.get(other.get('st') or 'wick4h', other.get('st'))}, "
+                f"{'лонг' if other['side'] > 0 else 'шорт'} {other['lv']:.6g}) — на бирже одна лимитка на монету, ставится та, к которой цена ближе")
+    elif len(held) + len(live) >= min(DLM_MAX_POS, DLM_MAX_LIVE_ORDERS):
+        hold = f"заняты все {min(DLM_MAX_POS, DLM_MAX_LIVE_ORDERS)} мест: сделок ⚡ на бирже {len(held)}, лимиток {len(live)}"
+    elif n_side >= side_cap:
+        hold = f"в {'лонг' if s > 0 else 'шорт'} уже {n_side} из {side_cap} (сделки + лимитки ⚡ на бирже)"
+    if hold:
+        o["hold"] = hold
         return
+    o.pop("hold", None)
     if DLM_BINANCE:   # v0.99.684
         return dlm_bn_place(o)
     with using_account("dlm"):
@@ -35277,8 +35339,12 @@ def dlm_bn_place(o):
     if not info or not info["ok"]:
         o["real"] = {"status": "SKIPPED", "ex": "binance", "detail": f"{bsym} сейчас не торгуется на Binance"}
         return
-    if bnf_positions().get(bsym):
-        o["real"] = {"status": "SKIPPED", "ex": "binance", "detail": "по монете уже есть позиция"}
+    if bnf_positions().get(bsym):   # v0.99.715 — waits (the position may close before the price comes), the reason by whose it is
+        with _bno_lock:
+            m_ = (_BNO["pos"].get(sym) or {}).get("mode")
+        o["hold"] = (f"по монете открыта сделка {({'prv': 'P/R', 'smc': '🧱 SMC', 'emw': '📈 EMA'}).get(m_, m_)} на Binance — одна позиция на монету" if m_
+                     else "по монете на Binance уже есть позиция (не этого бота или открытая вручную) — одна позиция на монету")
+        o["real"] = None
         return
     dual = bnf_dual()
     rule = ((_DLM.get("model") or {}).get("rule") or {})
@@ -35894,11 +35960,12 @@ def dlm_catch_up(now=None):
     _DLM["catchup"] = {"run": True, "done": 0, "of": len(jobs), "t": int(now)}
     for st, t_close in jobs:
         try:
-            dlm_scan(t_close, st)
+            dlm_scan(t_close, st, cu=True)   # v0.99.715 — "cu": not armed until the loop's settle checked its past bars
         except Exception as e:
             log_error(f"dlm catch-up {st.get('name')} {t_close}: {e}")
         _DLM["catchup"]["done"] += 1
     _DLM["catchup"].update(run=False, end=int(time.time()))
+    _DLM["cu_settle"] = True   # v0.99.715 — the loop settles them (its own thread: no two settles at once), then they may be armed
     dlm_save()
 
 
@@ -35916,16 +35983,27 @@ def dlm_loop():
                     dlm_real_tick()
             except Exception as e:
                 log_error(f"dlm first tick: {e}")
-        try:
-            dlm_catch_up()   # v0.99.710
-        except Exception as e:
-            log_error(f"dlm catch-up: {e}")
+        def _cu():
+            try:
+                dlm_catch_up()   # v0.99.710
+            except Exception as e:
+                log_error(f"dlm catch-up: {e}")
+                _DLM["catchup"] = dict(_DLM.get("catchup") or {}, run=False, end=int(time.time()))
+                _DLM["cu_settle"] = True
+        # v0.99.715 — the user: "пока считаются свечи, чтобы это не влияло": the catch-up (5–15 min on a phone) in its own
+        # thread — the loop goes on meanwhile: the fills, the stops / takes / time exits, the arming of the limits
+        threading.Thread(target=_cu, daemon=True, name="dlm_catchup").start()
     while True:
         heartbeat("dlm_loop")
         try:
             if DLM_ENABLED:
                 now = time.time()
                 t_bar = int(now // 900 * 900)
+                if _DLM.pop("cu_settle", None):   # v0.99.715 — the catch-up's orders: their past bars first (a touch while the bot was
+                    dlm_settle(now)                 # off -> the virtual trade, never a real limit on a signal already traded)
+                    with _dlm_lock:
+                        for o in _DLM["orders"]:
+                            o.pop("cu", None)
                 if _DLM.get("bar_done") != t_bar and now - t_bar >= 15:   # every 15 min: settle; a stream's bar closed: its scan
                     dlm_settle(now)
                     for st in _dlm_streams(dlm_model()):   # v0.99.689 — 4h and 2h
@@ -41735,7 +41813,7 @@ async function refreshNeuro() {   // v0.99.619 — Neuro v3: the model, the year
       <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry != null ? t.entry : t.px)} · до ${hm(t.until)}</span></div>`;
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
     ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map(row).join('')}</div>` : ''}
-    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${zBars(d.last.map(t => ({label: `${coin(t.symbol)} ${t.side > 0 ? '↑' : '↓'}`, sub: hm(t.hour), v: t.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}`);
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length}${lastSplit(d.last)})</summary>${zBars(d.last.map(t => ({label: `${coin(t.symbol)} ${t.side > 0 ? '↑' : '↓'}`, sub: hm(t.hour), v: t.r})), v => sgR(+(+v).toFixed(2)))}</details>` : ''}`);
   h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на 6 годах часовых свечей 127 монет Binance: для каждого часа — чем кончилась бы сделка со стопом ${rule.stop_atr || 1} ATR и тейком ${rule.take_r || 2}R за ${rule.hold_h || 12} ч. Порог выбран честно: модель учили на прошлых годах и проверяли на следующем, которого она не видела; 2025–26 — финальная проверка. В начале каждого часа бот считает те же параметры тем же кодом, что и в исследовании, и открывает сделки у часов с оценкой выше порога (по монете и стороне — одна сделка). Учёт сделок — по часовым свечам, как в исследовании: вход по открытию часа, стоп раньше тейка, выход по закрытию ${rule.hold_h || 12}-го часа; комиссии и фандинг учтены. Отбор монет по прошлой доходности Нейро не помогает (проверено) — модель сама учитывает, что за монета и какой рынок.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
@@ -43591,15 +43669,15 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
     : `<div class="dim" style="font-size:var(--fs-sm);">сейчас подходящих уровней нет — пересчёт каждый час${d.scan ? ` (последний ${hm(d.scan.t)}, ${d.scan.coins} монет)` : ''}</div>`);
   // 3. the trades
   const op = d.open || [];
-  const row = (t, i) => `<div onclick="btLiveOpen('emx', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
-      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">EMA ${t.n} · ${tfN[t.tf]}${t.real ? ' · 💰' : ''}${t.sel === false ? ' · вне отбора' : ''}</span></span>
-      <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry)} · до ${hm(t.until)}</span></div>`;
+  const row = (t, i) => `<div onclick="btLiveOpen('emx', ${i})" style="padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;">
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">EMA ${t.n} · ${tfN[t.tf]}${t.real ? ' · 💰 на бирже' : ' · виртуально'}${t.sel === false ? ' · вне отбора' : ''}</span></span>
+      <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry)} · до ${hm(t.until)}</span></div>${!t.real && t.why ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:2px;">не на бирже: ${t.why}</div>` : ''}</div>`;   // v0.99.715
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
     ${d.sel && d.sel.n_all > (d.n || 0) ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">выше — монеты в отборе; все монеты вместе: ${d.sel.n_all} сделок, ${sgR(d.sel.avg_all)} в среднем</div>` : ''}
-    ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map(row).join('')}</div>` : ''}
+    ${op.length ? `<div style="margin-top:8px;">${op.slice(-30).reverse().map(row).join('')}</div>` : ''}
     ${liveCheckHtml(d.live_check)}
-    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromEmx(t), `btLiveOpen('emx', ${Math.min(10, op.length) + i})`)).join('')}</details>` : ''}`);
-  window._btLive.emx = op.slice(-10).reverse().map(btFromEmx).concat((d.last || []).map(btFromEmx));
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length}${lastSplit(d.last)})</summary>${d.last.map((t, i) => btRowHtml(btFromEmx(t), `btLiveOpen('emx', ${Math.min(30, op.length) + i})`)).join('')}</details>` : ''}`);
+  window._btLive.emx = op.slice(-30).reverse().map(btFromEmx).concat((d.last || []).map(btFromEmx));
   h += btSection('emx', 'Сделки бэктеста — 2022–2026 (модель каждый год учится только на прошлых)');
   h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Каждый час бот считает уровни EMA формирующихся свечей (их значение известно с открытия свечи и не меняется) и оценивает, каким было бы касание в этот час: график и EMA, разгон к уровню, EMA вокруг, RSI трёх графиков, тренд дня и недели, BTC, сила монеты, другие EMA рядом. Уровни с оценкой выше порога «на прицеле»: цена проверяется каждые 30 с, при касании уровня входа — сигнал в Telegram${d.auto ? ' и сделка' : ''}. Считается только первое касание EMA за свечу. Учёт сделок — по часовым свечам, как в исследовании: стоп раньше тейка, в час входа тейк не считается, выход через ${rule.hold_h || 24} ч; комиссии и фандинг учтены.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
@@ -43861,7 +43939,7 @@ function btFromRbx(t) {   // a live 📈 trade -> the chart's trade
           pt: t.part && t.risk ? e + t.side * (t.part_r || 1) * t.risk : null};
 }
 function btFromEmx(t) {   // v0.99.644 — a live EMA trade -> the chart's trade (shown on 1h candles)
-  return {mod: 'emx', s: t.symbol, d: t.side, c: '1h', tf: t.tf, n: t.n, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true,
+  return {mod: 'emx', s: t.symbol, d: t.side, c: '1h', tf: t.tf, n: t.n, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true, vnote: btVnote(t),
           pt: t.part_r && t.entry != null && t.sl != null ? t.entry + t.side * t.part_r * Math.abs(t.entry - t.sl) : null};
 }
 function btFromCas(t) {   // v0.99.653 — a live 🌊 trade -> the chart's trade
@@ -43870,14 +43948,21 @@ function btFromCas(t) {   // v0.99.653 — a live 🌊 trade -> the chart's trad
           pt: t.part_r && t.risk ? e + t.side * t.part_r * t.risk : null};
 }
 function btFromSmc(t) {   // v0.99.678 — a live 🧱 trade -> the chart's trade (1h candles)
-  return {mod: 'smc', s: t.symbol, d: t.side, c: '1h', lvl: t.fam, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+  return {mod: 'smc', s: t.symbol, d: t.side, c: '1h', lvl: t.fam, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true, vnote: btVnote(t)};
+}
+function lastSplit(l) {   // v0.99.715 — how many of the last results were on the exchange
+  const k = (l || []).filter(t => t.real).length;
+  return (l || []).length ? ` · на бирже ${k}, виртуально ${l.length - k}` : '';
+}
+function btVnote(t) {   // v0.99.715 — a closed live trade: on the exchange or not, and why not
+  return t.t_out ? (t.real ? '💰 была на бирже' : 'виртуально — на бирже её не было' + (t.why ? ': ' + t.why : '')) : null;
 }
 function btFromDlm(t) {   // v0.99.679 — a live ⚡ trade -> the chart's trade (v0.99.687: 4h candles; the 15m module's own on 15m)
   return {mod: 'dlm', st: t.bs === 900 ? null : (t.st || 'wick4h'), s: t.symbol, d: t.side, c: t.bs === 900 ? '15m' : (t.bs === 7200 ? '2h' : '4h'), t: t.t0, lv: t.lv, e: t.entry, sl: t.sl, hs: t.hsl, tp: t.tp, f: t.fbar, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true,
-    vnote: t.t_out ? (t.real ? '💰 была на бирже' : 'виртуально — на бирже её не было' + (t.why ? ': ' + t.why : '')) : null};   // v0.99.714 — the user: "закрылась тейком, но на бирже её нет"
+    vnote: btVnote(t)};   // v0.99.714 — the user: "закрылась тейком, но на бирже её нет"
 }
 function btFromPrx(t) {
-  return {mod: 'prv', s: t.symbol, d: t.side, c: (t.tf || 1) + 'h', t: t.hour, e: t.entry != null ? t.entry : t.px, sl: t.sl, tp: t.tp, hs: t.hs, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+  return {mod: 'prv', s: t.symbol, d: t.side, c: (t.tf || 1) + 'h', t: t.hour, e: t.entry != null ? t.entry : t.px, sl: t.sl, tp: t.tp, hs: t.hs, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true, vnote: btVnote(t)};
 }
 async function btChart(o) {
   const coin = (o.s || '').replace('_USDT', ''), side = o.d > 0 ? 'ЛОНГ' : 'ШОРТ';
@@ -44005,7 +44090,7 @@ async function refreshRbx() {   // v0.99.626 — 📈 range breakout: day + 12h,
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, `из ${cap} мест`)}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : '')}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
     ${op.length ? `<div style="margin-top:8px;">${op.slice().reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
     ${liveCheckHtml(d.live_check)}
-    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromRbx(t), `btLiveOpen('rbx', ${op.length + i})`)).join('')}</details>` : ''}`);
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length}${lastSplit(d.last)})</summary>${d.last.map((t, i) => btRowHtml(btFromRbx(t), `btLiveOpen('rbx', ${op.length + i})`)).join('')}</details>` : ''}`);
   window._btLive.rbx = op.slice().reverse().map(btFromRbx).concat((d.last || []).map(btFromRbx));
   h += btSection('rbx', 'Сделки бэктеста — день и 12ч, 2021–2026');
   const M = d.months || {};
@@ -44060,7 +44145,7 @@ async function refreshCas() {   // v0.99.653 — 🌊 EMA cascade: the model on 
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
     ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
     ${liveCheckHtml(d.live_check)}
-    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromCas(t), `btLiveOpen('cas', ${Math.min(10, op.length) + i})`)).join('')}</details>` : ''}`);
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length}${lastSplit(d.last)})</summary>${d.last.map((t, i) => btRowHtml(btFromCas(t), `btLiveOpen('cas', ${Math.min(10, op.length) + i})`)).join('')}</details>` : ''}`);
   window._btLive.cas = op.slice(-10).reverse().map(btFromCas).concat((d.last || []).map(btFromCas));
   h += btSection('cas', 'Сделки бэктеста — 2022–2026 (каждый год модель не видела)');
   h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Пять EMA (5, 10, 14, 20, 28) на часовом графике. Событие — свеча закрылась выше всех пяти (лонг) или ниже всех пяти (шорт). Таких пробоев много — на 127 монетах Binance за 6 лет почти миллион, и в среднем они убыточны. Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на них: для каждого — чем кончилась бы сделка со стопом за экстремумом 24 свечей и тейком 2R за 48 ч. Торгуется с частичной фиксацией: треть на +0.7R и стоп в безубыток, остаток до 2.5R — так винрейт ~70% вместо ~53%, а серии минусов вдвое короче. Она учитывает и твои картинки: «памп → затухание → пробой вниз» и «пробой вверх → отбой обратно» — последний у модели лучший (шорты после недавнего пробоя вверх: +0.74R, WR 66%). Порог честный: модель учили на прошлых годах и проверяли на следующем. В начале каждого часа бот считает то же самое по только что закрытой свече и открывает сделку, если оценка выше порога (по монете и стороне — одна сделка). Учёт — по свечам 1ч, как в исследовании: вход по открытию следующей свечи, стоп раньше тейка; комиссии и фандинг учтены. Вместе с P/R: месяцы почти независимы (корреляция +0.26), поэтому каскад с риском 1% рядом с P/R 4% на истории растил депозит заметно быстрее при той же просадке.</div></details>`;
@@ -44104,14 +44189,14 @@ async function refreshSmc() {   // v0.99.678 — 🧱 SMC: the model on the firs
     <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 3700 ? '⏳ скан старше часа — бот был выключен; после старта он сканирует сразу' : 'следующий пересчёт в начале часа'}</div>`
     : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
   const op = d.open || [];
-  const row = (t, i) => `<div onclick="btLiveOpen('smc', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
-      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim"> · ${nm(t.fam)}${t.real ? ' · 💰' : ''}</span></span>
-      <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry)} · до ${hm(t.until)}</span></div>`;
+  const row = (t, i) => `<div onclick="btLiveOpen('smc', ${i})" style="padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;">
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim"> · ${nm(t.fam)}${t.real ? ' · 💰 на бирже' : ' · виртуально'}</span></span>
+      <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry)} · до ${hm(t.until)}</span></div>${!t.real && t.why ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:2px;">не на бирже: ${t.why}</div>` : ''}</div>`;   // v0.99.715
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
-    ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
+    ${op.length ? `<div style="margin-top:8px;">${op.slice(-30).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
     ${liveCheckHtml(d.live_check)}
-    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromSmc(t), `btLiveOpen('smc', ${Math.min(10, op.length) + i})`)).join('')}</details>` : ''}`);
-  window._btLive.smc = op.slice(-10).reverse().map(btFromSmc).concat((d.last || []).map(btFromSmc));
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length}${lastSplit(d.last)})</summary>${d.last.map((t, i) => btRowHtml(btFromSmc(t), `btLiveOpen('smc', ${Math.min(30, op.length) + i})`)).join('')}</details>` : ''}`);
+  window._btLive.smc = op.slice(-30).reverse().map(btFromSmc).concat((d.last || []).map(btFromSmc));
   h += btSection('smc', 'Сделки бэктеста — 2022–2026 (каждый год модель не видела)');
   h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как нашёлся</summary><div class="zsub">Задача была — сделки регулярнее, не редкими пачками. Проверены (честно: модель каждого года училась только на прошлых годах, ещё 84 монеты в обучение не входили вовсе): максимумы / минимумы / середины прошлого дня, недели и месяца, открытия недели, месяца и года, SMA и полосы Боллинджера на дне и неделе; сигналы по открытому интересу, фандингу, перекосу лонгов / шортов толпы и тейкеров, отрыву монеты от BTC, объёмным всплескам; 12 классических индикаторов на 4ч и дне (Supertrend, Parabolic SAR, Ichimoku, MACD, дивергенции RSI, Stochastic, ADX, Heikin-Ashi, NR7, CCI, Боллинджер, Келтнер) и уровни SMC. Сами по себе почти все около нуля; после отбора моделью устойчиво держатся только уровни SMC — плюс в каждом году и на чужих монетах. В одиночку они слабее 📐 EMA, но сделки идут почти вдвое чаще и в большем числе недель. Вывод по «пачкам»: сильные сигналы у всех индикаторов бывают в моменты больших движений всего рынка; если брать лучшие сигналы каждого дня, результат падает до +0.1–0.2R. Поэтому SMC — добавка к EMA и P/R с небольшим риском: вместе ~22 сделки в месяц, сделка в ~55% недель, рост при той же просадке не хуже.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
@@ -44252,11 +44337,11 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
       <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry)} · тейк ${fmtNum(t.tp)} · до ${hm(t.until)}</span></div>${!t.real && (t.why || d.dry || !d.auto) ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:2px;">не на бирже: ${t.why || (!d.auto ? 'автоторговля ⚡ выключена' : 'включена «Бумажная торговля (dry-run)» в настройках — ордера на биржу не отправляются; выключите её, чтобы торговать')}</div>` : ''}</div>`;
   const opReal = op.filter(t => t.real).length;   // v0.99.701 — the user: "открыта 1, но по факту 0": a virtual trade is not on the exchange
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, op.length ? (opReal ? `на бирже ${opReal}${op.length > opReal ? ` · виртуально ${op.length - opReal}` : ''}` : (!d.auto ? 'виртуально — автоторговля ⚡ выключена' : (d.dry ? 'виртуально — включена бумажная торговля (dry-run)' : 'виртуально — причина под сделкой'))) : `из ${d.max_pos || 20} возможных`)}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_day != null ? `~${d.per_day} в день` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.real_n ? `реальных ${d.real_n}: ${sgR(d.real_sum)}` : 'виртуально')}</div>
-    ${op.length ? `<div style="margin-top:8px;">${op.slice(-12).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
+    ${op.length ? `<div style="margin-top:8px;">${op.slice(-40).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
     ${liveCheckHtml(d.live_check)}
-    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromDlm(t), `btLiveOpen('dlm', ${Math.min(12, op.length) + i})`)).join('')}</details>` : ''}
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length}${lastSplit(d.last)})</summary>${d.last.map((t, i) => btRowHtml(btFromDlm(t), `btLiveOpen('dlm', ${Math.min(40, op.length) + i})`)).join('')}</details>` : ''}
     ${d.old_n ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:6px;">старый модуль 15м (до замены): ${d.old_n} сделок, итого ${sgR(d.old_sum)} — в статистику выше не входят</div>` : ''}`);
-  window._btLive.dlm = op.slice(-12).reverse().map(btFromDlm).concat((d.last || []).map(btFromDlm));
+  window._btLive.dlm = op.slice(-40).reverse().map(btFromDlm).concat((d.last || []).map(btFromDlm));
   h += btSection('dlm', 'Сделки бэктеста — 2025–2026 (каждый год модель не видела; 210 монет)');
   h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как нашёлся</summary><div class="zsub">v0.99.689: добавлен второй вид — лимитка на 2 ATR от закрытия 2ч свечи (тот же рецепт: 20 моделей с дневным контекстом). Сам по себе на монетах, которых модель не видела, WR 77%, +0.15R, каждый год в плюсе, по минуткам WR 78%, +0.16R; вместе с 4ч — вдвое больше сделок и за год со $100 медиана ~$5 200 вместо ~$1 900 (посчитано так, как торгует бот: обе лимитки стоят, сделка — первая исполненная). Цена — просадки глубже (до 65–70% от пика). Потоки 1ч и 30м, оживлённые тем же рецептом, остались около нуля. Прошлая ⚡ (лимитки 15м) показывала в бэктесте WR 84% и +0.045R, но бэктест был завышен: исследование ставило лимитку каждую свечу и оставляло только моменты, где прошлые лимитки не исполнились, — то есть наличие сделки зависело от будущего. Честно (каждая лимитка сама по себе, признаки — как их видит бот) 15м — около 0R. Заново, честно, проверены 15м, 30м, 1ч, 2ч, 4ч, 6ч, 8ч и 12ч: лимитки на 0.5–2 ATR в прострел и за тень свечи, тейки 0.5–2 ATR, стопы 1–3 ATR; модель каждый год училась только на прошлых годах и на 85 монетах, проверка — на 42 монетах, которых она не видела, и ещё на 83 монетах Binance. Весь период в плюсе 30м, 1ч, 2ч и 4ч, но с 2025 года держится только 4ч (6ч, 8ч, 12ч — слабее): лимитка на 1 ATR за тенью — одна модель WR 78%, +0.16R. Среднее 20 моделей, половина из которых видит ещё дневной контекст (дневные EMA20 / EMA50 / RSI монеты, её место в 20-дневном диапазоне, дневная EMA50 у BTC), — WR 82%, +0.235R на монетах, которых модель не видела, последние 12 месяцев +0.24R; по минутным свечам Binance WR 86%, +0.31R. Обучение на большем числе монет и лимитки на 0.5–1.5 ATR не улучшили. Тейк 0.5–0.75 ATR и частичные тейки поднимают винрейт до 82–87%, но денег дают в 2–5 раз меньше; стопы 1–1.5 ATR дают больше R на сделку, но хуже по деньгам в последний год. Одна крупная сделка за раз (лесенка 50%) в ~45% лет уходит в минус — убрана. Бот считает признаки так же, как исследование (совпадают до 6-го знака); виртуальные сделки — по 4ч свечам, стоп раньше тейка.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
@@ -44301,14 +44386,14 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
     : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
   // 3. the trades
   const op = d.open || [];
-  const row = (t, i) => `<div onclick="btLiveOpen('prv', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
-      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim"> · ${t.tf}ч${t.status === 'PENDING' ? ' · ⏳ лимитка ' + fmtNum(t.lv) : ''}${t.real ? ' · 💰' : ''}</span></span>
-      <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry != null ? t.entry : t.px)} · до ${hm(t.until)}</span></div>`;
+  const row = (t, i) => `<div onclick="btLiveOpen('prv', ${i})" style="padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;">
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim"> · ${t.tf}ч${t.status === 'PENDING' ? ' · ⏳ лимитка ' + fmtNum(t.lv) : ''}${t.real ? ' · 💰 на бирже' : ' · виртуально'}</span></span>
+      <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry != null ? t.entry : t.px)} · до ${hm(t.until)}</span></div>${!t.real && t.why ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:2px;">не на бирже: ${t.why}</div>` : ''}</div>`;   // v0.99.715
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
-    ${op.length ? `<div style="margin-top:8px;">${op.slice(-10).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
+    ${op.length ? `<div style="margin-top:8px;">${op.slice(-30).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
     ${liveCheckHtml(d.live_check)}
-    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length})</summary>${d.last.map((t, i) => btRowHtml(btFromPrx(t), `btLiveOpen('prv', ${Math.min(10, op.length) + i})`)).join('')}</details>` : ''}`);
-  window._btLive.prv = op.slice(-10).reverse().map(btFromPrx).concat((d.last || []).map(btFromPrx));
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length}${lastSplit(d.last)})</summary>${d.last.map((t, i) => btRowHtml(btFromPrx(t), `btLiveOpen('prv', ${Math.min(30, op.length) + i})`)).join('')}</details>` : ''}`);
+  window._btLive.prv = op.slice(-30).reverse().map(btFromPrx).concat((d.last || []).map(btFromPrx));
   h += btSection('prv', 'Сделки бэктеста — 2023–2026 (окно 24 мес, раз в квартал)');
   h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как работает</summary><div class="zsub">Индикатор — канал Кельтнера: средняя EMA20 и полосы ±ATR. Событие — свеча с тенью дальше 1.5 ATR от средней или закрытие, вернувшееся внутрь после закрытия за полосой. Модель (градиентный бустинг, отдельно для лонга и шорта) обучена на 2.4 млн таких событий 127 монет Binance за 6 лет: для каждого — чем кончилась бы сделка со стопом ${((m && m.label_rule) || rule).stop_atr || 1.5} ATR и тейком ${((m && m.label_rule) || rule).take_r || 3}R за ${rule.hold_bars || 48} свечей.${m && m.label_rule ? ` Торгуется со стопом шире — ${rule.stop_atr} ATR${rule.stop_close ? ' по закрытию свечи (аварийный ' + rule.hard_atr + ' ATR)' : ''}, тейк на том же месте: прибыльных сделок больше и просадка меньше.` : ''} Порог выбран честно: модель учили на прошлых годах и проверяли на следующем; 2025–26 — финальная проверка. В начале каждого часа бот считает то же самое тем же кодом по только что закрытой свече 1ч${(m && m.tfs && !m.tfs.includes(4)) ? '' : ' (и 4ч, когда она закрылась)'} и открывает сделку, если оценка выше порога (по монете и стороне — одна сделка). Учёт — по свечам своего графика, как в исследовании: вход по открытию следующей свечи, стоп раньше тейка; комиссии и фандинг учтены. Прежний подбор параметров под каждую монету убран: на истории он был в минусе каждый год.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);

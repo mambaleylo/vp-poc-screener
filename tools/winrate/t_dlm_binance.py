@@ -10,7 +10,7 @@ from common import V
 KEY, SEC = "k" * 64, "s" * 64
 X = {"orders": {}, "algos": {}, "pos": {}, "next": 100, "calls": [], "wallet": 1000.0, "free": 1000.0, "dual": False, "dual_lock": False,
      "algo_api": True, "mtype": {}, "lev": {}}
-INFO = {"AAAUSDT": (0.001, 0.1, 0.1, 5.0), "1000PEPEUSDT": (0.0000001, 1.0, 1.0, 5.0), "BBBUSDT": (0.01, 1.0, 1.0, 5.0), "CCCUSDT": (0.001, 1.0, 1.0, 5.0)}
+INFO = {"AAAUSDT": (0.001, 0.1, 0.1, 5.0), "1000PEPEUSDT": (0.0000001, 1.0, 1.0, 5.0), "BBBUSDT": (0.01, 1.0, 1.0, 5.0), "CCCUSDT": (0.001, 1.0, 1.0, 5.0), "EEEUSDT": (0.001, 0.1, 0.1, 5.0), "FFFUSDT": (0.001, 0.1, 0.1, 5.0)}
 
 
 class R:
@@ -130,6 +130,7 @@ V.log_error = lambda m: print("   log:", m) if "binance algo" not in m and "bina
 V._BNC[("AAA_USDT", "4h")] = {"bsym": "AAAUSDT", "scl": 1.0, "cols": [[]] * 6}
 V._BNC[("PEPE_USDT", "2h")] = {"bsym": "1000PEPEUSDT", "scl": 1000.0, "cols": [[]] * 6}
 V._BNC[("BBB_USDT", "4h")] = {"bsym": "BBBUSDT", "scl": 1.0, "cols": [[]] * 6}
+V._BNC[("EEE_USDT", "4h")] = {"bsym": "EEEUSDT", "scl": 1.0, "cols": [[]] * 6}; V._BNC[("FFF_USDT", "4h")] = {"bsym": "FFFUSDT", "scl": 1.0, "cols": [[]] * 6}   # v0.99.715
 V._DLM["model"] = {"rule": {"stop_atr": 2.0, "take_atr": 1.0, "hold_bars": 32, "alive_bars": 4, "bar_sec": 14400}}   # v0.99.687 — the 4h rule
 res = {}
 
@@ -298,6 +299,33 @@ res["new account: leverage capped at 20x, the order made"] = (q4["real"] or {}).
 X["lev_cap"] = None; V._BNF.pop("lev_cap", None); X["wallet"], X["free"] = w0
 for i_ in [int(q4["real"].get("id") or 0)] + [int((q4["real"].get(k) or [0, 0])[1]) for k in ("pre_sl", "pre_tp")]:   # its limit gone
     X["orders"].pop(i_, None); X["algos"].pop(i_, None)
+# v0.99.715 — the user ("сделка закрылась тейком, но её нигде нет", "особенно параллельный поток"): (a) the coin's limit of
+# the other stream on the exchange, this one nearer the price -> swapped; (b) farther -> waits with the reason; (c) the coin
+# held by a P/R / SMC / EMA position -> waits (not skipped for good) and says by whom; (d) a virtual trade gives that reason
+X["algo_api"] = True; X["dual"] = False; X["dual_lock"] = False; V._BNF["dual"] = None; X["pos"].clear()
+V._DLM.update({"orders": [], "trades": []}); V._BNO["pos"].clear()
+A4 = mk("EEE_USDT", 1, 10.0, 0.1); A4["id"] += "w4"; V._DLM["orders"].append(A4)
+X["px"] = {"EEEUSDT": 10.09}; V.dlm_real_tick(); a_id = (A4.get("real") or {}).get("id")   # the 4h one armed (0.9 ATR away)
+B2 = mk("EEE_USDT", 1, 9.995, 0.1); B2.update(id=B2["id"] + "c2", st="close2h", bs=7200); V._DLM["orders"].append(B2)
+V.dlm_real_tick()   # the 2h one 0.95 ATR away, farther than the 4h one: waits, says why
+far_hold = B2.get("real") is None and "другого потока" in (B2.get("hold") or "") and (A4.get("real") or {}).get("id") == a_id
+B3 = mk("EEE_USDT", 1, 10.06, 0.1); B3.update(id=B3["id"] + "c3", st="close2h", bs=7200); V._DLM["orders"].append(B3)
+V.dlm_real_tick()   # another 2h one 0.3 ATR away — nearer than the 4h one by more than 0.25 ATR: swapped
+sw = (X["orders"][int(a_id)]["status"] == "CANCELED" and A4.get("real") is None and "снята с биржи" in (A4.get("hold") or "")
+      and (B3.get("real") or {}).get("status") == "LIMIT" and B2.get("real") is None)
+V.dlm_real_tick(); sw = sw and A4.get("real") is None and (B3.get("real") or {}).get("status") == "LIMIT"   # no swap back
+res["parallel stream: the nearer limit on the exchange, the other waits with the reason"] = bool(a_id) and far_hold and sw
+print("   swap:", bool(a_id), far_hold, sw, A4.get("hold"), "|", B2.get("hold"))
+for o_ in (A4, B2, B3):
+    if (o_.get("real") or {}).get("id"): V._dlm_cancel_back(o_)
+V._DLM["orders"] = []
+C3 = mk("FFF_USDT", -1, 7.0, 0.07); V._DLM["orders"].append(C3); X["pos"]["FFFUSDT"] = 3.0
+V._BNO["pos"]["FFF_USDT"] = {"mode": "smc", "bsym": "FFFUSDT", "side": 1}
+V.dlm_real_place(C3)
+held_ok = C3.get("real") is None and "SMC" in (C3.get("hold") or "")
+why = V._dlm_why_virtual(C3, {"t1h": int(time.time())})
+res["coin held by SMC: waits, the reason in the virtual trade"] = held_ok and "SMC" in why
+X["pos"].pop("FFFUSDT", None); V._BNO["pos"].clear(); V._DLM["orders"] = []
 # v0.99.708 — (a) the limit goes with its stop + take (closePosition triggers) and a GTD; (b) "another phone": the state lost ->
 # the bot takes over its limit (with its triggers), a ⚡ position (stop + take limit) and an SMC-like one (stop + take
 # triggers: take / stop = 1.5), nothing placed or cancelled on the exchange

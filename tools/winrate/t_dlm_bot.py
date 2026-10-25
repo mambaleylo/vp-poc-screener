@@ -85,6 +85,11 @@ n1 = len(V._DLM["orders"]); got = [x for x in V._DLM["orders"] if x["side"] == t
 V.dlm_catch_up(now=t["t"] + bs + 600)
 cu_ok = bool(got) and got[0]["until"] == t["t"] + 4 * bs and len(V._DLM["orders"]) == n1
 print(f"(3b) catch-up at the start: the order of a bar closed before {bool(got)} · no copies on a second run {len(V._DLM['orders']) == n1} {cu_ok}")
+# v0.99.715 — the catch-up's orders not armed before the loop's settle checked their past bars ("cu"), then the flag off
+w = [x for x in V._DLM["orders"] if x["status"] == "OPEN"]
+cu2 = bool(w) and all(x.get("cu") for x in w) and V._DLM.get("cu_settle") is True
+V._DLM.pop("cu_settle", None)
+print(f"(3c) catch-up orders wait for the settle: {cu2}"); cu_ok = cu_ok and cu2
 ok &= cu_ok
 # (4) the real path on a fake exchange (Gate)
 class X:

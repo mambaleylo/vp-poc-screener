@@ -20708,3 +20708,24 @@ v0.99.714 - ⚡: a closed trade says whether it was on the exchange; the stale s
          the same days); the GitHub states as P/R / SMC / EMA risk weights — noise. Tests: t_dlm_binance (an orphan stop
          cancelled, the live ones kept), t_dlm_ui (a closed virtual trade marked), t_dlm_bot, t_bn_others,
          t_cstop_others — OK.
+
+v0.99.715 - every trade findable, the parallel ⚡ stream, the start's catch-up off the trading path. The user: "по поводу сделки,
+         которой не видно, исправь ситуацию, рассмотри все возможные ситуации", "особенно параллельный поток", "пока
+         считаются свечи, чтобы это не влияло". (1) The parallel stream: the coin's limit of the other stream (4h wick /
+         2h close) on the exchange made the second one wait silently, and its fill went virtual with a wrong reason
+         ("цена проскочила") — now the limit nearer the price is the one on the exchange (_dlm_arm swaps when the waiting
+         one is DLM_SWAP_ATR = 0.25 ATR nearer: the nearer level fills first, as the research's "the first filled is the
+         trade"), the other waits saying why. (2) dlm_real_place keeps the reason it waits (o["hold"]): the coin's ⚡
+         position, the other stream's limit, all the places taken (counts), the side full; a virtual trade of it gives that
+         reason. (3) A coin held by a P/R / SMC / EMA position: the ⚡ limit no longer SKIPPED for good — it waits (the
+         position may close before the price comes) and says whose position it is. (4) The start's catch-up (5–15 min on
+         a phone) in its own thread: the fills, the stops / takes / time exits and the arming go on meanwhile; its orders
+         ("cu") are not armed until the loop's settle checked their past bars (a touch while the bot was off -> the virtual
+         trade, never a real limit on a signal already traded); an older bar's scan no longer replaces the newer one shown.
+         (5) The open lists show all the open trades (⚡ 40, P/R / SMC / EMA 30; were the last 12 / 10). (6) P/R / SMC /
+         EMA: "💰 на бирже" / "виртуально" on the open ones with "не на бирже: <why>" (mod_why_virtual: the exchange's
+         answer, the autotrade off, dry-run, not in the selection, the price gone >1R, the bot off, waiting for the limit);
+         the closed ones of all four say "💰 была на бирже" / "виртуально — на бирже её не было: <why>"; "последние итоги"
+         counts the real / virtual ones. Tests: t_dlm_binance (the swap, the reasons, the coin held by SMC), t_dlm_bot (the
+         catch-up orders wait for the settle), t_mod_ui (new: the three tabs, 14 open + a closed virtual one), t_dlm_ui,
+         t_bn_others, t_cstop_others, t_smc_bot, t_bn_source, t_dlm_coins — OK.
