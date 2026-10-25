@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.724"
+APP_VERSION = "0.99.725"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28341,6 +28341,7 @@ LAB_BRANCH = "lab-data"
 LAB_PATH = "lab/vp_lab.json.gz"
 _LAB_DROP = re.compile(r"^(qty|size|risk|filled|pnl|pnl_total|real_pnl|loss_at_stop|account|min_qty|step|executedQty|origQty|cumQuote)$"
                        r"|usd|balance|wallet|equity|margin|notional|amount|income|commission", re.I)
+_LAB_MONEY_TXT = re.compile(r"\$\s?-?\d[\d.,]*|-?\d[\d.,]*\s?(?:\$|USDT\b|USD\b)")   # v0.99.725 — "$29.53" in a reason's text
 _LAB = {"last": None}
 
 
@@ -28372,6 +28373,8 @@ def lab_sanitize(x):
         return {k: lab_sanitize(v) for k, v in x.items() if str(k).isupper() or not _LAB_DROP.search(str(k))}   # a coin (ETHUSDT) is no money field
     if isinstance(x, list):
         return [lab_sanitize(v) for v in x]
+    if isinstance(x, str):   # v0.99.725 — the money in the texts too: "маржа $29.53 … баланс $1.62" was uploaded once
+        return _LAB_MONEY_TXT.sub("$…", x)
     return x
 
 

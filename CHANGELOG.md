@@ -20834,3 +20834,8 @@ v0.99.724 - 📤 the trades for the lab, by a button. The user: "добавь к
          kept, the branch made once then the file updated by sha, never main, 401 / 403 in words, the token file 600 and
          removed by an empty one, set only from 127.0.0.1, the page's dialog with no errors), t_autostart_ui.py,
          t_mod_ui.py — OK.
+v0.99.725 - 📤 the lab upload: the money in the TEXTS cut too. The first real upload showed a P/R skip reason holding the sums
+         ("маржа $29.53 превышает доступный баланс $1.62") — the field filter cut the money fields only. Every string now
+         has its "$12.3" / "12.3$" / "12 USDT" replaced by "$…" (coins like BTC_USDT and dates untouched). The file already
+         on lab-data was replaced by a cleaned one (a normal commit; the first version stays in the branch's history).
+         Tests: t_lab_export.py (+ the money in texts cut) — OK.

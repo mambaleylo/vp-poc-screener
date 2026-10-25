@@ -8,12 +8,13 @@ V.GITHUB_CREDENTIALS_FILE = os.path.join(D, "gh.json")
 V.DLM_STATE_FILE = os.path.join(D, "vp_dlm_state.json"); V.PRX_STATE_FILE = os.path.join(D, "vp_prx_state.json")
 V.SMC_STATE_FILE = os.path.join(D, "vp_smc_state.json"); V.EMX_STATE_FILE = os.path.join(D, "vp_emx_state.json"); V.BNO_FILE = os.path.join(D, "vp_bn_others.json")
 json.dump({"orders": [{"symbol": "BTC_USDT", "lv": 100.0, "real": {"status": "LIMIT", "id": "7", "size": 12, "price": 100.0, "risk": 4.5, "lev": 10}}],
-           "trades": [{"symbol": "BTC_USDT", "entry": 100.0, "sl": 98.0, "pnl_r": 0.55, "pnl": 3.21, "risk_pct": 4.5, "balance_after": 512.3,
+           "trades": [{"symbol": "BTC_USDT", "entry": 100.0, "sl": 98.0, "pnl_r": 0.55, "pnl": 3.21, "risk_pct": 4.5, "balance_after": 512.3, "why": "маржа $29.53 превышает доступный баланс $1.62", "note": "5 USDT мало",
                        "real": {"status": "FILLED", "price": 100.01, "size": 12, "risk": 4.5, "margin": 50.0}}], "scan": {}}, open(V.DLM_STATE_FILE, "w"))
 json.dump({"pos": {"ETHUSDT": {"mode": "smc", "qty": 0.5, "entry": 2000.0, "risk": 3.0, "margin": 100.0, "sl_px": 1950.0, "notional": 1000}}}, open(V.BNO_FILE, "w"))
-dat = V.lab_export_build(); s = json.dumps(dat)
+dat = V.lab_export_build(); s = json.dumps(dat, ensure_ascii=False)
 res["money cut"] = all(k not in s for k in ('"size"', '"risk"', '"margin"', '"balance_after"', '"pnl"', '"qty"', '"notional"'))
 res["prices / R kept"] = '"pnl_r": 0.55' in s and '"risk_pct": 4.5' in s and '"sl_px": 1950.0' in s and '"price": 100.01' in s and '"lev": 10' in s
+res["money in texts cut"] = "29.53" not in s and "1.62" not in s and "5 USDT" not in s and "маржа $… превышает доступный баланс $…" in s and "BTC_USDT" in s
 res["coin keys kept"] = '"ETHUSDT"' in s and '"BTC_USDT"' in s
 res["missing files skipped"] = set(dat["files"]) == {"vp_dlm_state.json", "vp_bn_others.json"}
 try: V.lab_upload(); res["no token -> error"] = False
