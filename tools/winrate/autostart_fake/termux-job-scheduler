@@ -1,0 +1,7 @@
+#!/bin/sh
+F="$(dirname "$0")/jobs.txt"
+case "$1" in
+  --pending) [ -f "$F" ] && while read id; do echo "Pending Job $id: script"; done < "$F"; exit 0;;
+  --cancel) [ -f "$F" ] && grep -v "^$3$" "$F" > "$F.n"; mv -f "$F.n" "$F" 2>/dev/null; exit 0;;
+  --job-id) echo "$2" >> "$F"; echo "Scheduling job $2"; exit 0;;
+esac

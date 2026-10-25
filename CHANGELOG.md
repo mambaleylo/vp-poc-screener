@@ -20803,3 +20803,9 @@ v0.99.721 - 🔁 the autostart (the user: "автозапуск после пе�
          scripts valid sh; the check starts the loop, the loop restarts a crashing bot every 10 s, no second loop, off ends
          it, a bot answering -> nothing started), t_autostart_ui.py (no page errors, the status dialog), t_dlm_ui, t_mod_ui,
          t_dlm_bot — OK.
+
+v0.99.722 - 🔁 the autostart's 15-min check (the user's screen: ❌ on it). Its status was a flag the bot kept, set only when the
+         autostart was switched on — Termux:API installed later stayed ❌ until off / on. Now the status asks Android itself
+         (termux-job-scheduler --pending) and, the autostart on and the job missing, registers it then: install Termux:API +
+         pkg install termux-api, open «🔁 Автозапуск» again — ✅. Tests: t_autostart_job.py (a fake termux-job-scheduler: none
+         -> appears -> registered once, off -> cancelled), t_autostart.py, t_autostart_ui.py — OK.

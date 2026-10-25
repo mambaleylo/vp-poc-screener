@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.721"
+APP_VERSION = "0.99.722"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28126,12 +28126,41 @@ def _under_keepalive():
         return False
 
 
+def _autostart_job_pending():
+    """the 15-min job really registered in Android (termux-job-scheduler --pending) -> True / False / None (no Termux:API)"""
+    if not shutil.which("termux-job-scheduler"):
+        return None
+    try:
+        r = subprocess.run(["termux-job-scheduler", "--pending"], capture_output=True, text=True, timeout=15)
+        return str(AUTOSTART_JOB_ID) in (r.stdout or "")
+    except Exception as e:
+        log_error(f"autostart job check: {e}")
+        return False
+
+
+def _autostart_job_register(p):
+    try:
+        r = subprocess.run(["termux-job-scheduler", "--job-id", str(AUTOSTART_JOB_ID), "--period-ms", "900000", "--persisted", "true",
+                            "--script", p["check"]], capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            log_error(f"autostart job: {(r.stderr or r.stdout)[:200]}")
+        return r.returncode == 0
+    except Exception as e:
+        log_error(f"autostart job: {e}")
+        return False
+
+
 def autostart_status():
+    """v0.99.722 — the 15-min job asked from Android itself, and registered here when the autostart is on and Termux:API
+    appeared later (the user: ❌ on it — Termux:API installed after the autostart was switched on)"""
     p = _autostart_paths()
-    return {"on": os.path.exists(p["keep"]) and not os.path.exists(p["off"]), "boot": os.path.exists(p["boot"]),
-            "boot_dir": os.path.isdir(os.path.dirname(p["boot"])), "job": bool(shutil.which("termux-job-scheduler")),
-            "wake": bool(shutil.which("termux-wake-lock")), "under_loop": _under_keepalive(), "termux": "com.termux" in sys.executable,
-            "job_set": bool(STATE.get("autostart_job"))}
+    on = os.path.exists(p["keep"]) and not os.path.exists(p["off"])
+    job = _autostart_job_pending()
+    if on and job is False:
+        job = _autostart_job_register(p) and bool(_autostart_job_pending())
+    return {"on": on, "boot": os.path.exists(p["boot"]), "boot_dir": os.path.isdir(os.path.dirname(p["boot"])),
+            "job": job is not None, "wake": bool(shutil.which("termux-wake-lock")), "under_loop": _under_keepalive(),
+            "termux": "com.termux" in sys.executable, "job_set": bool(job)}
 
 
 def autostart_set(on):
@@ -28155,14 +28184,7 @@ def autostart_set(on):
         except OSError:
             pass
         if shutil.which("termux-job-scheduler"):
-            try:
-                r = subprocess.run(["termux-job-scheduler", "--job-id", str(AUTOSTART_JOB_ID), "--period-ms", "900000", "--persisted", "true",
-                                    "--script", p["check"]], capture_output=True, text=True, timeout=20)
-                STATE["autostart_job"] = r.returncode == 0
-                if r.returncode != 0:
-                    log_error(f"autostart job: {(r.stderr or r.stdout)[:200]}")
-            except Exception as e:
-                log_error(f"autostart job: {e}")
+            _autostart_job_register(p)
         if shutil.which("termux-wake-lock"):
             try:
                 subprocess.Popen(["termux-wake-lock"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -28190,7 +28212,6 @@ def autostart_set(on):
             subprocess.run(["termux-job-scheduler", "--cancel", "--job-id", str(AUTOSTART_JOB_ID)], capture_output=True, timeout=20)
         except Exception as e:
             log_error(f"autostart job cancel: {e}")
-    STATE["autostart_job"] = False
     return autostart_status()
 
 
