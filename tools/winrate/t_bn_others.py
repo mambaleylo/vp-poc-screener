@@ -132,7 +132,7 @@ res = {}
 V.BINANCE_API_KEY, V.BINANCE_API_SECRET = KEY, SEC
 V.BNO_FILE = os.path.join(tempfile.mkdtemp(), "bno.json")
 V.AUTOTRADE_DRY_RUN = False
-for m_ in ("prv", "smc", "emw"): V.MODULE_RISK_PCT[m_] = None   # empty: the per-module defaults (v0.99.699: P/R 2, SMC 1, EMA 0.5)
+for m_ in ("prv", "smc", "emw"): V.MODULE_RISK_PCT[m_] = None   # empty: the per-module defaults (v0.99.712: P/R 2, SMC 1.5, EMA 1)
 V.apply_settings({"bn_others": True})
 res["setting on"] = V.BN_OTHERS is True and V.get_settings().get("bn_others") is True if hasattr(V, "get_settings") else V.BN_OTHERS is True
 gate = []
@@ -158,7 +158,7 @@ V._DLM["orders"] = [{"id": "o1", "symbol": "BBB_USDT", "side": 1, "lv": 4.0, "st
 r3 = V.execute_autotrade("emw", "BBB_USDT", "LONG", 5.0, 4.8, 5.4)
 res["an armed ⚡ limit blocks the coin"] = r3["status"] == "SKIPPED" and "лимитка" in r3["detail"]
 V._DLM["orders"] = []
-# (4) EMA long BBB: its 0.5% at a 4% stop -> $125, 25 coins; the partial take: half off reduce-only, the stop to the entry
+# (4) EMA long BBB: its 1% at a 4% stop -> $250, 50 coins; the partial take: half off reduce-only, the stop to the entry
 r4 = V.execute_autotrade("emw", "BBB_USDT", "LONG", 5.0, 4.8, 5.4)
 qb = float(V._BNO["pos"]["BBB_USDT"]["qty"]); X["pos"]["BBBUSDT"] = qb
 old_sl = V._BNO["pos"]["BBB_USDT"]["sl_id"]

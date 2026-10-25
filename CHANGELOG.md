@@ -20676,3 +20676,9 @@ v0.99.711 - ⚡ the start visible; the long texts under the 💡. The user: "л�
          before the catch-up; a take-over that failed shows its error (it read "всё уже в записях"). The user ("весь этот
          длинный текст должен скрываться лампочкой"): the ⚡ tab's money paragraph, the drawdown banner and the models line
          under the 💡 button (hintx). Tests: t_dlm_bot, t_dlm_binance, t_dlm_ui — OK.
+v0.99.712 - 📈 EMA on Binance 1% (was 0.5%): the bundle's risk split re-checked with SMC held 96 h (port_w709.py) — EMA 1% better
+         in every number: the worst 10% $1.48k -> $1.63k, the median $17.4k -> $17.7k, the best 10% $50k -> $55k, the last 12
+         months $36.6k -> $37.2k, the drawdown the same 62% (SMC 2%: the median +10% but the worst 10% -9% — left). The
+         header's expectation, the risk field's placeholder and texts. Also rejected: EMA shorts (14 trades in 4 years,
+         -0.04R), the SMC stop at 0.75 dATR (the same as more risk), ⚡ hold 24-64 bars (32 best), P/R take / hold (current
+         best), EMA hold 96-120 h (±1%). Tests: t_bn_others — OK.

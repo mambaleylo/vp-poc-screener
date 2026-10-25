@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.711"
+APP_VERSION = "0.99.712"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28093,9 +28093,9 @@ _PROC_START = time.time()
 # v0.99.700 — the user: "ожидания по доходу добавь тоже куда нибудь тонкой строкой, может под шапку, типа связка индикаторов
 # худшее ожидание и лучшее": a year from $100 on the history (the 12-month windows from each week of 2023-02..2025-10, one
 # account, the bot's leverage, the honest pools; tools/winrate port_expect.py): the worst 10% / the median / the best 10% of
-# the years, the median drawdown. "bundle" = ⚡ 4% + P/R 2% + SMC 1.5% + EMA 0.5% (on Binance together), "dlm" = ⚡ alone
+# the years, the median drawdown. "bundle" = ⚡ 4% + P/R 2% + SMC 1.5% + EMA 1% (on Binance together), "dlm" = ⚡ alone
 EXPECT_YEAR = {"dlm": {"p10": 1036, "p50": 6355, "p90": 15913, "dd": 59, "last12": 11663},   # v0.99.704: x the daily WaveTrend (port_osc3.py)
-               "bundle": {"p10": 1483, "p50": 17417, "p90": 49818, "dd": 62, "last12": 36587}}   # v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
+               "bundle": {"p10": 1631, "p50": 17743, "p90": 55095, "dd": 62, "last12": 37206}}   # v0.99.712: EMA 1% (port_w709.py); v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
 
 
 @app.route("/api/boot")
@@ -35040,10 +35040,10 @@ def _dlm_place_exits(t):
 # the stop and the take on the exchange (closePosition triggers), isolated margin, the leverage by the stop (the bot's
 # 1.5x buffer); one position a coin on the whole account (a position or an armed ⚡ limit on the coin -> no trade); the
 # time exit / P/R's close stop at the market; EMA's partial take reduce-only + the stop to the entry. The risk: the
-# module's own field, empty -> BN_OTHERS_RISK (v0.99.706: P/R 2%, SMC 1.5%, EMA 0.5%; v0.99.699 — port699b.py on the honest lists)
+# module's own field, empty -> BN_OTHERS_RISK (v0.99.712: P/R 2%, SMC 1.5%, EMA 1%; v0.99.699 — port699b.py on the honest lists)
 BN_OTHERS = os.environ.get("VP_BN_OTHERS", "0") == "1"
 BN_OTHERS_MODES = ("prv", "smc", "emw")
-BN_OTHERS_RISK = {"prv": 2.0, "smc": 1.5, "emw": 0.5}   # v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
+BN_OTHERS_RISK = {"prv": 2.0, "smc": 1.5, "emw": 1.0}   # v0.99.712 — EMA 1% (port_w709.py: every number better); v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
 BNO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_bn_others.json")
 _BNO = {"pos": {}}   # Gate contract -> the Binance position this bot opened for P/R / SMC / EMA
 _bno_lock = threading.Lock()
@@ -40181,7 +40181,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow subRow">
         <div>
           <div class="label">↳ 🔄 P/R, 🧱 SMC, 📐 EMA — тоже на Binance</div>
-          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, изолированная маржа; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто: P/R 2%, SMC 1.5%, EMA 0.5%. На истории (честный отбор сделок) ⚡ 4% вместе с ними — медиана за год примерно вдвое больше, чем один ⚡, при той же просадке; без ⚡ эти три слабые. Включается вместе с автоторговлей самих модулей</div>
+          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, изолированная маржа; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто: P/R 2%, SMC 1.5%, EMA 1%. На истории (честный отбор сделок) ⚡ 4% вместе с ними — медиана за год примерно вдвое больше, чем один ⚡, при той же просадке; без ⚡ эти три слабые. Включается вместе с автоторговлей самих модулей</div>
         </div>
         <label class="switch"><input type="checkbox" id="setBnOthers"><span class="switchSlider"></span></label>
       </div>
@@ -40442,13 +40442,13 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow" style="flex-wrap:wrap;">
         <div style="flex:1 1 100%;">
           <div class="label">Риск на сделку — у каждого модуля свой</div>
-          <div class="sub">% от счёта, который теряется на стопе (0.1–100). Пустое поле — значение модуля по умолчанию (на Binance, по истории связки): ⚡ 4% · P/R 2% · 🧱 SMC 1.5% · EMA 0.5%; остальные модули — 0.5%. У ⚡ к своему % ещё множители: загрузка (×0.625 / ×1.25) и дневной WaveTrend (×1.25 / ×0.85)</div>
+          <div class="sub">% от счёта, который теряется на стопе (0.1–100). Пустое поле — значение модуля по умолчанию (на Binance, по истории связки): ⚡ 4% · P/R 2% · 🧱 SMC 1.5% · EMA 1%; остальные модули — 0.5%. У ⚡ к своему % ещё множители: загрузка (×0.625 / ×1.25) и дневной WaveTrend (×1.25 / ×0.85)</div>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro 0.5" title="Нейро: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSnr" min="0.1" max="100" step="0.5" placeholder="S/R" title="S/R Zones" style="display:none;width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R 2" title="Peak Reversal: пусто — 2% на Binance (0.5% на Gate)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctEmw" min="0.1" max="100" step="0.5" placeholder="EMA 0.5" title="EMA — касания: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctEmw" min="0.1" max="100" step="0.5" placeholder="EMA 1" title="EMA — касания: пусто — 1% на Binance (0.5% на Gate)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctZones" min="0.1" max="100" step="0.5" placeholder="Зоны 0.5" title="Зоны: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctZm" min="0.1" max="100" step="0.1" placeholder="🎯 0.5" title="🎯 Сильные зоны: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctRbx" min="0.1" max="100" step="0.1" placeholder="📈 0.5" title="📈 Пробой: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
