@@ -20784,3 +20784,9 @@ v0.99.719 - 🧱 SMC: the stop to the entry once a closed 1h candle after the to
          the bot file is newer (bt_trades) — the first commit of this had the old list; the list re-made and touched after
          the last edit. Tests: t_bn_others (the walk; no move before a closed hour at +2R, then the exchange stop at the
          entry, nothing closed), t_smc_bot, t_dlm_*, t_cstop_others, t_mod_ui — OK.
+
+v0.99.720 - the "binance candles EOS 2h: 'cols'" errors (the user's screen: 10 of them, EOS and RNDR). A coin Binance's futures no
+         longer have (EOS off, RNDR renamed RENDER) gets a 6-hour "no such coin" mark in the candle cache (Gate's candles
+         meanwhile); once the mark expired bn_closed read it as candles -> a KeyError every few minutes. Now an expired mark is
+         dropped and the coin asked again. Trading unchanged (those coins on Binance: never traded there anyway). Test:
+         t_bnc_miss.py (the old code reproduces the error, the new one none); t_dlm_bot, t_dlm_binance, t_bn_source, t_smc_bot — OK.

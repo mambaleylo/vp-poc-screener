@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.719"
+APP_VERSION = "0.99.720"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30143,6 +30143,8 @@ def bn_closed(symbol, interval, sec, n, now):
         c = _BNC.get(key)
     if c is not None and c.get("miss", 0) > now:
         return None
+    if c is not None and "cols" not in c:   # v0.99.720 — a "no such coin on Binance" mark expired (EOS, RNDR — off Binance's
+        c = None                           # futures): asked again, not read as candles ('cols' errors every few minutes)
     try:
         if c is None or (len(c["cols"][0]) < n and not c.get("full")):
             base = symbol.replace("_USDT", "")
