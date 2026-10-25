@@ -20855,3 +20855,16 @@ v0.99.727 - 💰 the modules' default risks on Binance: SMC 1.5% -> 2.5%, EMA 1%
          (68 -> 66%), the last 12 months $98k -> $146k, 2026 alone $55k -> $82k. SMC 3% earns a little more but not in every
          window and with a higher drawdown; 3.5-4% worse years. The header's expectation updated (port_risk4.py).
          Tests: t_bn_others.py (SMC's default 2.5% sized), t_dlm_binance.py, t_mod_ui.py, t_lab_export.py — OK.
+v0.99.728 - 🛡 bugs: a P/R / SMC / EMA position on Binance could be left WITHOUT a stop. (1) the break-even / EMA's partial
+         take took the old exchange stop off first and only then put the new one at the entry — refused (SMC's break-even
+         is checked on the closed hour, the price may be back through the entry by then: "-2021 would immediately trigger";
+         a network error) -> a naked position, retried only an hour later. Now the wanted stop is kept first and
+         _bno_ensure_sl puts it: the price already through it -> the rest closed at the market at once (what the stop would
+         do), the take off; refused otherwise -> again each minute, closed at the market after a minute (+ Telegram) — as ⚡'s
+         since v0.99.692. (2) a stop refused at the open (OPENED_TP_SL_FAILED) was never put again: bno_tick now puts it.
+         (3) bnf_place_cond fell back to the old order endpoint on ANY Algo API refusal — that endpoint takes no conditional
+         orders any more (-4120), so the real reason was hidden (the lab upload: every ⚡ limit's exits "-4120") and a "price
+         through the trigger" was never recognised; the fallback now only when the Algo API itself is not there. The take's
+         price kept too (tp_px). Tests: t_bno_stop.py (refused at the open -> put on the next tick; refused for a minute ->
+         closed; the break-even through the entry -> closed at once, nothing left on the book; the normal break-even
+         unchanged), t_bn_others.py, t_dlm_binance.py, t_cstop_others.py, t_smc_bot.py and the rest of tools/winrate — OK.

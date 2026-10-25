@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.727"
+APP_VERSION = "0.99.728"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -34374,6 +34374,12 @@ def bnf_place_cond(bsym, s, kind, trigger, dual):
                                                       closePosition="true", workingType="CONTRACT_PRICE"))
         return "algo", str(r.get("algoId"))
     except BinanceError as e:
+        # v0.99.728 — the Algo API answered with a refusal: that is the answer (the price through the trigger -2021, a
+        # closePosition already there...) — the old endpoint takes no conditional orders any more (-4120), so falling back
+        # only hid the real reason (the lab upload: every ⚡ limit's exits "-4120"). The old endpoint only when the Algo
+        # API itself is not there
+        if not (e.status == 404 or e.code in (-5000, -1121) or (e.code is None and e.status >= 500)):
+            raise
         log_error(f"binance algo {kind} {bsym}: {e} — the order endpoint")
     r = bnf_req("POST", "/fapi/v1/order", dict(sp, symbol=bsym, type=kind, stopPrice=trigger, closePosition="true", workingType="CONTRACT_PRICE"))
     return "order", str(r.get("orderId"))
@@ -35769,7 +35775,7 @@ def bno_open(mode, symbol, direction, entry, sl, tp, kx=1.0):
     filled = float(r.get("executedQty") or 0) or q
     avg = float(r.get("avgPrice") or 0) or e
     rec = {"mode": mode, "bsym": bsym, "scl": scl, "side": s, "qty": filled, "entry": avg, "lev": int(lev), "risk": round(risk / kx, 4), "dual": dual,
-           "tick": info["tick"], "step": info["step"], "min_qty": info["min_qty"], "t": int(time.time()), "sl_px": slp, "margin": mt}   # v0.99.717
+           "tick": info["tick"], "step": info["step"], "min_qty": info["min_qty"], "t": int(time.time()), "sl_px": slp, "tp_px": tpp, "margin": mt}   # v0.99.717; v0.99.728 — tp_px: a refused take put again
     status = "OPENED"
     for kind, px, up, kk in (("STOP_MARKET", slp, s < 0, "sl"), ("TAKE_PROFIT_MARKET", tpp, s > 0, "tp")):
         try:
@@ -35818,19 +35824,54 @@ def bno_part(mode, t, frac):
     if not amt or (amt > 0) != (rec["side"] > 0):
         return "no position"
     n = bn_fmt(abs(amt) * frac, rec["step"])
+    left = abs(amt)
     if float(n) >= rec.get("min_qty", 0) and float(n) > 0:
         bnf_req("POST", "/fapi/v1/order", dict(_bnf_side_params(rec["side"], True, rec.get("dual")), symbol=rec["bsym"], type="MARKET", quantity=n))
-    _bno_cancel(rec, ("sl",))
-    rec["sl_kind"], rec["sl_id"] = bnf_place_cond(rec["bsym"], rec["side"], "STOP_MARKET", bn_fmt(rec["entry"], rec["tick"], up=(rec["side"] < 0)), rec.get("dual"))
+        left = max(0.0, abs(amt) - float(n))
+    # v0.99.728 — the old stop came off before the new one was in: a refused new stop (the price back through the entry by
+    # the hour SMC's break-even is checked, a network error) left the position with NO stop. Now the wanted stop is kept
+    # first and _bno_ensure_sl puts it — the price already through it: closed at the market (what the stop would do)
     rec["sl_px"] = float(rec["entry"])   # v0.99.717 — at the entry: the open risk counts it as none
+    _bno_cancel(rec, ("sl",))
     with _bno_lock:
         _BNO["pos"][t["symbol"]] = rec
+    note = _bno_ensure_sl(t["symbol"], rec, left) if left > 0 else None
     bno_save()
-    return f"Binance: {n} of {abs(amt):g} off, the stop at the entry {rec['entry']:g}"
+    return f"Binance: {n} of {abs(amt):g} off, the stop at the entry {rec['entry']:g}" + (f" — {note}" if note else "")
+
+
+def _bn_would_trigger(ex):
+    return getattr(ex, "code", None) == -2021 or "immediately trigger" in str(ex).lower()
+
+
+def _bno_ensure_sl(symbol, rec, amt):
+    """v0.99.728 — the position's exchange stop at rec["sl_px"] if it has none; the price already through it -> the rest
+    closed at the market now; refused otherwise for over a minute -> the same (no P/R / SMC / EMA position is left without
+    a stop, as ⚡'s since v0.99.692). -> a note or None"""
+    if rec.get("sl_id") or not rec.get("sl_px"):
+        return None
+    s = rec["side"]
+    try:
+        rec["sl_kind"], rec["sl_id"] = bnf_place_cond(rec["bsym"], s, "STOP_MARKET", bn_fmt(rec["sl_px"], rec["tick"], up=(s < 0)), rec.get("dual"))
+        rec.pop("nostop_t", None)
+        return None
+    except BinanceError as ex:
+        log_error(f"binance {rec.get('mode')} stop {rec['bsym']}: {ex}")
+        rec.setdefault("nostop_t", int(time.time()))
+        through = _bn_would_trigger(ex)
+        if not through and time.time() - rec["nostop_t"] < 60:
+            return "стоп не принят — повтор через минуту"
+    _bno_cancel(rec, ("tp",))
+    bnf_req("POST", "/fapi/v1/order", dict(_bnf_side_params(s, True, rec.get("dual")), symbol=rec["bsym"], type="MARKET", quantity=bn_fmt(amt, rec["step"])))
+    rec["closed_nostop"] = int(time.time())
+    send_telegram(f"⚠️ {symbol.replace('_USDT', '')}: {'цена уже за стопом' if through else 'Binance минуту не принимает стоп'} — "
+                  f"позиция закрыта по рынку", category=rec.get("mode") or "smc")
+    return "закрыта по рынку: стоп не встал"
 
 
 def bno_tick():
-    """a position the exchange's stop / take closed: the other trigger off, the record dropped"""
+    """a position the exchange's stop / take closed: the other trigger off, the record dropped. v0.99.728 — a live one
+    without its stop (refused at the open / at the break-even) gets it again, or is closed at the market"""
     with _bno_lock:
         recs = dict(_BNO["pos"])
     if not recs:
@@ -35844,7 +35885,18 @@ def bno_tick():
             log_error(f"bn others cleanup {k}: {e}")
         with _bno_lock:
             _BNO["pos"].pop(k, None)
-    if gone:
+    fixed = False
+    for k, rec in recs.items():
+        if k in gone or rec.get("sl_id") or rec.get("closed_nostop"):
+            continue
+        amt = sum(x["amt"] for x in pos.get(rec["bsym"]) or [])
+        if not amt or (amt > 0) != (rec["side"] > 0):
+            continue
+        try:
+            _bno_ensure_sl(k, rec, abs(amt)); fixed = True
+        except Exception as e:
+            log_error(f"bn others stop {k}: {e}")
+    if gone or fixed:
         bno_save()
 
 
