@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.712"
+APP_VERSION = "0.99.713"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -34576,13 +34576,21 @@ def dlm_scan(t_bar, st):
     dlm_save()   # v0.99.691 — the real limits: _dlm_arm (dlm_real_tick) places them as the price comes
 
 
-def _dlm_why_virtual(o):
-    """v0.99.701 — a virtual ⚡ trade: the reason its order did not go on the exchange"""
+def _dlm_why_virtual(o, t=None):
+    """v0.99.701 — a virtual ⚡ trade: the reason its order did not go on the exchange. v0.99.713 — t (the trade): its touch
+    before the bot's start / during the start's catch-up said so (the user: "тупая ошибка" — "лимитка поставлена до
+    запуска бота" for an order the catch-up re-made, the price having reached it while the bot was off)"""
     r = o.get("real") or {}
     if not AUTOTRADE_ENABLED_DLM:
         return "автоторговля ⚡ выключена"
     if r.get("status") == "DRY_RUN" or AUTOTRADE_DRY_RUN:
         return "включена «Бумажная торговля (dry-run)» в настройках — ордера на биржу не отправляются; выключите её, чтобы торговать"
+    tt = int((t or {}).get("t1h") or (t or {}).get("fbar") or 0)
+    if tt and tt + 3600 <= _PROC_START:
+        return f"цена дошла до лимитки, когда бот был выключен (до запуска {time.strftime('%d.%m %H:%M', time.localtime(_PROC_START))}) — сделка только для статистики"
+    cu = _DLM.get("catchup") or {}
+    if tt and cu.get("t") and (cu.get("run") or tt < int(cu.get("end") or 0)) and not r.get("id"):
+        return "цена дошла до лимитки, пока бот после запуска пересчитывал свечи — на биржу она не успела"
     if not o:
         return "причина не сохранилась (лимитки уже нет в памяти бота)"
     if r.get("detail"):
@@ -34721,7 +34729,7 @@ def dlm_settle(now):
                 else:
                     tv = _dlm_open_trade(o, hit["time"], hit["fill"], t1h=hit.get("t1h"))
                     if tv is not None:   # v0.99.701 — why this one is not on the exchange (the user: "открыта 1, но по факту 0")
-                        tv["why"] = _dlm_why_virtual(o)
+                        tv["why"] = _dlm_why_virtual(o, tv)
             elif now >= o["until"]:
                 o["status"] = "EXPIRED"
         except Exception as e:
@@ -35091,6 +35099,18 @@ def bn_map_any(sym):
     return None
 
 
+def _bnf_lev_cap_learn(ex):
+    """v0.99.713 — Binance -4300 "You can start trading with more than 20x leverage by <date>, because higher leverage is
+    available 30 days after Futures account registration" (the user's new account): the account's leverage cap is learnt
+    (the number in the message, else 20) and kept, the order is made again with it -> True when learnt"""
+    if getattr(ex, "code", None) != -4300:
+        return False
+    m_ = re.search(r"more than (\d+)x", str(ex))
+    _BNF["lev_cap"] = int(m_.group(1)) if m_ else 20
+    log_error(f"binance: the account's leverage cap {_BNF['lev_cap']}x (a new futures account) — the orders with it")
+    return True
+
+
 def bno_open(mode, symbol, direction, entry, sl, tp, kx=1.0):
     """the real trade of P/R / SMC / EMA on Binance -> {"status": OPENED | OPENED_TP_SL_FAILED | SKIPPED | DRY_RUN, "detail"}"""
     if AUTOTRADE_DRY_RUN:
@@ -35114,6 +35134,8 @@ def bno_open(mode, symbol, direction, entry, sl, tp, kx=1.0):
     e, slp, tpp = entry * scl, sl * scl, tp * scl
     tiers = bnf_tiers(bsym)
     cap = max((t_[2] for t_ in tiers), default=20)
+    if _BNF.get("lev_cap"):   # v0.99.713 — the account's own cap (a new futures account: 20x for 30 days)
+        cap = min(cap, int(_BNF["lev_cap"]))
     mmr = tiers[0][1] if tiers else SCALP_DEFAULT_MMR_PCT
     tb = {bsym: tiers} if tiers else None
     acct = bnf_account()
@@ -35136,7 +35158,16 @@ def bno_open(mode, symbol, direction, entry, sl, tp, kx=1.0):
     except BinanceError as ex:
         if ex.code != -4046:   # -4046 = already isolated
             log_error(f"binance isolated {bsym}: {ex}")
-    bnf_req("POST", "/fapi/v1/leverage", {"symbol": bsym, "leverage": int(lev)})
+    try:
+        bnf_req("POST", "/fapi/v1/leverage", {"symbol": bsym, "leverage": int(lev)})
+    except BinanceError as ex:
+        if _bnf_lev_cap_learn(ex) and not _BNF.get("lev_retry"):
+            _BNF["lev_retry"] = True
+            try:
+                return bno_open(mode, symbol, direction, entry, sl, tp, kx)
+            finally:
+                _BNF["lev_retry"] = False
+        raise
     r = bnf_req("POST", "/fapi/v1/order", dict(_bnf_side_params(s, False, dual), symbol=bsym, type="MARKET", quantity=qty,
                                                newClientOrderId=f"vp{mode}{int(time.time() * 1000)}"))
     filled = float(r.get("executedQty") or 0) or q
@@ -35255,6 +35286,8 @@ def dlm_bn_place(o):
     sl, kx = _dlm_size_stop(o, rule); sl *= scl   # v0.99.692 — the emergency stop for the leverage, the risk scaled
     tiers = bnf_tiers(bsym)
     cap = max((t_[2] for t_ in tiers), default=20)
+    if _BNF.get("lev_cap"):   # v0.99.713 — the account's own cap (a new futures account: 20x for 30 days)
+        cap = min(cap, int(_BNF["lev_cap"]))
     mmr = tiers[0][1] if tiers else SCALP_DEFAULT_MMR_PCT
     acct = bnf_account()
     osc = dlm_osc_mult(sym, s)   # v0.99.704 — x the daily WaveTrend
@@ -35281,7 +35314,17 @@ def dlm_bn_place(o):
     except BinanceError as e:
         if e.code != -4046:   # -4046 = already isolated
             log_error(f"binance isolated {bsym}: {e}")
-    bnf_req("POST", "/fapi/v1/leverage", {"symbol": bsym, "leverage": int(lev)})
+    try:
+        bnf_req("POST", "/fapi/v1/leverage", {"symbol": bsym, "leverage": int(lev)})
+    except BinanceError as ex:
+        if _bnf_lev_cap_learn(ex) and not _BNF.get("lev_retry"):
+            _BNF["lev_retry"] = True
+            try:
+                o["real"] = None
+                return dlm_bn_place(o)
+            finally:
+                _BNF["lev_retry"] = False
+        raise
     px = bn_fmt(lv, info["tick"], up=(s < 0))
     base_p = dict(_bnf_side_params(s, False, dual), symbol=bsym, type="LIMIT", quantity=qty, price=px, newClientOrderId=f"vpdlm{int(time.time() * 1000)}")
     gtd = int(max(float(o["until"]), time.time() + 700) * 1000)   # v0.99.708 — Binance takes a GTD at least 10 min ahead
@@ -35836,7 +35879,7 @@ def dlm_catch_up(now=None):
         except Exception as e:
             log_error(f"dlm catch-up {st.get('name')} {t_close}: {e}")
         _DLM["catchup"]["done"] += 1
-    _DLM["catchup"]["run"] = False
+    _DLM["catchup"].update(run=False, end=int(time.time()))
     dlm_save()
 
 
@@ -35906,7 +35949,7 @@ def dlm_stats():
             "model": dict({k: m.get(k) for k in ("ver", "q", "trained_to", "rule", "research", "side_cap", "liq_buf", "load_risk", "osc_risk")},
                           streams=[{k: x.get(k) for k in ("name", "tf", "anchor", "depth_atr", "thr", "alive_bars", "take_atr", "stop_atr", "hold_bars", "far_take_atr", "pull_atr", "hard_stop_atr", "stop_mode", "close_h")} for x in m.get("streams") or []]) if m else None,
             "err": err, "scan": scan, "orders": orders[:40], "orders_n": len(orders),
-            "open": [dict(t, why=t.get("why") or (_dlm_why_virtual(_ord.get(t["id"]) or {}) if not t.get("real") else None))
+            "open": [dict(t, why=t.get("why") or (_dlm_why_virtual(_ord.get(t["id"]) or {}, t) if not t.get("real") else None))
                      for t in trades if t["status"] == "OPEN"][-40:],   # v0.99.702 — the reason also for a trade opened before v0.99.701
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for t in fin if t["result"] == "WIN") / len(fin), 1) if fin else None,
             "sum": round(sum(rs), 2) if rs else None, "per_day": round(len(fin) / days, 1) if days else None,
@@ -44182,9 +44225,10 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
     <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 9000 ? '⏳ скан старше 2.5 ч — бот был выключен' : 'пересчёт на закрытии каждой 2ч и 4ч свечи (UTC)'}</div>`
     : `<div class="dim" style="font-size:var(--fs-sm);">${(d.catchup || {}).run ? `⏳ после запуска пересчитываю пропущенные свечи: ${d.catchup.done} из ${d.catchup.of} (первый раз качаются свечи 210 монет — на телефоне до 5–15 мин)` : 'первый пересчёт — на закрытии ближайшей 2ч свечи (00, 02, 04 … UTC)'}</div>`);
   const op = d.open || [];
-  const row = (t, i) => `<div onclick="btLiveOpen('dlm', ${i})" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
-      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim">${t.bs ? (t.bs === 7200 ? ' · 2ч' : (t.bs === 900 ? ' · 15м' : ' · 4ч')) : ''}${t.real ? ' · 💰 на бирже' : ' · виртуально'}</span>${!t.real && (t.why || d.dry || !d.auto) ? `<br><span class="dim" style="font-size:var(--fs-xs);">не на бирже: ${t.why || (!d.auto ? 'автоторговля ⚡ выключена' : 'включена «Бумажная торговля (dry-run)» в настройках — ордера на биржу не отправляются; выключите её, чтобы торговать')}</span>` : ''}</span>
-      <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry)} · тейк ${fmtNum(t.tp)} · до ${hm(t.until)}</span></div>`;
+  // v0.99.713 — the reason on its own full-width line (it squeezed the coin column into a tall thin strip)
+  const row = (t, i) => `<div onclick="btLiveOpen('dlm', ${i})" style="padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;"><span style="white-space:nowrap;"><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim">${t.bs ? (t.bs === 7200 ? ' · 2ч' : (t.bs === 900 ? ' · 15м' : ' · 4ч')) : ''}${t.real ? ' · 💰 на бирже' : ' · виртуально'}</span></span>
+      <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry)} · тейк ${fmtNum(t.tp)} · до ${hm(t.until)}</span></div>${!t.real && (t.why || d.dry || !d.auto) ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:2px;">не на бирже: ${t.why || (!d.auto ? 'автоторговля ⚡ выключена' : 'включена «Бумажная торговля (dry-run)» в настройках — ордера на биржу не отправляются; выключите её, чтобы торговать')}</div>` : ''}</div>`;
   const opReal = op.filter(t => t.real).length;   // v0.99.701 — the user: "открыта 1, но по факту 0": a virtual trade is not on the exchange
   h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, op.length ? (opReal ? `на бирже ${opReal}${op.length > opReal ? ` · виртуально ${op.length - opReal}` : ''}` : (!d.auto ? 'виртуально — автоторговля ⚡ выключена' : (d.dry ? 'виртуально — включена бумажная торговля (dry-run)' : 'виртуально — причина под сделкой'))) : `из ${d.max_pos || 20} возможных`)}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_day != null ? `~${d.per_day} в день` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.real_n ? `реальных ${d.real_n}: ${sgR(d.real_sum)}` : 'виртуально')}</div>
     ${op.length ? `<div style="margin-top:8px;">${op.slice(-12).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}

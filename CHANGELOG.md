@@ -20682,3 +20682,14 @@ v0.99.712 - 📈 EMA on Binance 1% (was 0.5%): the bundle's risk split re-checke
          header's expectation, the risk field's placeholder and texts. Also rejected: EMA shorts (14 trades in 4 years,
          -0.04R), the SMC stop at 0.75 dATR (the same as more risk), ⚡ hold 24-64 bars (32 best), P/R take / hold (current
          best), EMA hold 96-120 h (±1%). Tests: t_bn_others — OK.
+v0.99.713 - Binance: a new futures account's 20x cap; the virtual trades' reasons right. The user's screen: "XRP … не на бирже:
+         Binance -4300: You can start trading with more than 20x leverage by 2026-11-21 … 30 days after Futures account
+         registration" — the order was lost; now the cap is learnt from the error (_bnf_lev_cap_learn: the number in it,
+         else 20), kept (_BNF["lev_cap"]) and the order made again at once with the leverage at most that (⚡ and P/R / SMC /
+         EMA) — the margin larger, the risk the same. And ("тупая ошибка у JTO"): an order the start's catch-up re-made,
+         the price having reached it while the bot was off, read "лимитка поставлена до запуска бота" — now by its touch's
+         time: "цена дошла до лимитки, когда бот был выключен (до запуска …) — сделка только для статистики" / "пока бот
+         после запуска пересчитывал свечи" (the auto-off / dry-run reasons first). The open-trades list ("форматирование
+         поправь"): the reason on its own full-width line under the trade — it squeezed the coin column into a thin strip.
+         Tests: t_dlm_binance (a fake -4300 above 20x: the order made at ≤ 20x), t_dlm_bot,
+         t_dlm_ui, t_bn_others — OK.

@@ -72,6 +72,8 @@ def fake(method, url, headers=None, timeout=None, **k):
         X["mtype"][p["symbol"]] = p["marginType"]
         return R(200, {"code": 200})
     if path == "/fapi/v1/leverage":
+        if X.get("lev_cap") and int(p["leverage"]) > X["lev_cap"]:   # v0.99.713 — a new futures account
+            return R(400, {"code": -4300, "msg": "You can start trading with more than 20x leverage by 2026-11-21 09:13 (UTC), because higher leverage is available 30 days after Futures account registration."})
         X["lev"][p["symbol"]] = int(p["leverage"])
         return R(200, {"leverage": int(p["leverage"])})
     if path == "/fapi/v1/order":
@@ -288,6 +290,14 @@ V.dlm_real_place(h)
 res["position cap"] = not h.get("real")
 V.DLM_MAX_POS = cap0; V._DLM["trades"] = [t for t in V._DLM["trades"] if t["id"] != "held"]
 # (13) the UI
+# v0.99.713 — a new futures account (Binance -4300: no more than 20x for 30 days): the cap learnt, the order made again
+X["lev_cap"] = 20; X["algo_api"] = True; X["dual"] = False; X["dual_lock"] = False; V._BNF["dual"] = None; X["pos"].clear(); V._BNF.pop("lev_cap", None)
+V._DLM.update({"orders": [], "trades": []}); w0 = (X["wallet"], X["free"]); X["wallet"] = X["free"] = 100.0   # a small notional: the 50x bracket
+q4 = mk("AAA_USDT", 1, 10.0, 0.02); V._DLM["orders"].append(q4); V.dlm_real_place(q4)
+res["new account: leverage capped at 20x, the order made"] = (q4["real"] or {}).get("status") == "LIMIT" and V._BNF.get("lev_cap") == 20 and X["lev"].get("AAAUSDT", 99) <= 20
+X["lev_cap"] = None; V._BNF.pop("lev_cap", None); X["wallet"], X["free"] = w0
+for i_ in [int(q4["real"].get("id") or 0)] + [int((q4["real"].get(k) or [0, 0])[1]) for k in ("pre_sl", "pre_tp")]:   # its limit gone
+    X["orders"].pop(i_, None); X["algos"].pop(i_, None)
 # v0.99.708 — (a) the limit goes with its stop + take (closePosition triggers) and a GTD; (b) "another phone": the state lost ->
 # the bot takes over its limit (with its triggers), a ⚡ position (stop + take limit) and an SMC-like one (stop + take
 # triggers: take / stop = 1.5), nothing placed or cancelled on the exchange

@@ -17,3 +17,5 @@ vp_ui_auth.json.tmp
 vp_ui_auth.json.tunnel.pid
 vp_binance_credentials.json
 vp_binance_credentials.json.tmp
+vp_bn_others.json
+vp_bn_others.json.tmp
