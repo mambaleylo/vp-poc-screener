@@ -20822,3 +20822,15 @@ v0.99.723 - 🔁 the autostart: Termux opened -> the bot, and another program st
          Tests: t_autostart_lux.py (the three start.sh kinds: started once, no second copy while running, again after it
          stops), t_autostart_extra.py (the bashrc line once, the user's kept, off removes it), t_autostart.py,
          t_autostart_job.py, t_autostart_ui.py — OK.
+v0.99.724 - 📤 the trades for the lab, by a button. The user: "добавь кнопку выгрузки в GitHub и сам увидишь файл". The menu's
+         «📤 Сделки в GitHub» packs the modules' own state files (⚡ orders + trades, P/R, SMC, EMA, the Binance positions)
+         into one gzip'ed JSON and puts it on this repository's branch lab-data (lab/vp_lab.json.gz; the branch made from
+         main's head the first time, the file updated by its sha later; main is never written — the self-update reads it).
+         The repository is public, so every money field is cut before the upload (sizes / qty, the $ risk, margin, balance,
+         $ P&L, notional, the account) — the coins, times, prices and R stay; coin keys (ETHUSDT) are kept. The token: a
+         fine-grained one, this repository only, Contents: read and write — asked once, kept next to the bot like the
+         Binance keys (vp_github_credentials.json, chmod 600, gitignored), set / removed only from this phone; the
+         errors in words (a wrong / expired token, no write right). Tests: t_lab_export.py (the money cut, coin keys
+         kept, the branch made once then the file updated by sha, never main, 401 / 403 in words, the token file 600 and
+         removed by an empty one, set only from 127.0.0.1, the page's dialog with no errors), t_autostart_ui.py,
+         t_mod_ui.py — OK.

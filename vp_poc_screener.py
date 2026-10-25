@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.723"
+APP_VERSION = "0.99.724"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28328,6 +28328,138 @@ def api_autostart():
         return jsonify({"ok": False, "error": str(e)[:200]}), 500
 
 
+# v0.99.724 — the user: "добавь кнопку выгрузки в GitHub и сам увидишь файл": the lab compares the real trades with the
+# backtest. The button packs the modules' own state files (⚡, P/R, SMC, EMA, the Binance positions) into one gzip'ed JSON
+# and puts it on the repository's own branch "lab-data" (never main: the bot's self-update reads main). The repository is
+# PUBLIC, so every money field (sizes, $ risk, margin, balance, $ P&L, the account) is cut before the upload — the prices,
+# times, coins and R stay. The token (a fine-grained one, this repository only, Contents: read and write) lives next to
+# the bot like the Binance keys: its own file, chmod 600, gitignored.
+GITHUB_CREDENTIALS_FILE = os.environ.get("VP_GITHUB_CREDENTIALS_FILE",
+                                         os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_github_credentials.json"))
+LAB_REPO = "mambaleylo/vp-poc-screener"
+LAB_BRANCH = "lab-data"
+LAB_PATH = "lab/vp_lab.json.gz"
+_LAB_DROP = re.compile(r"^(qty|size|risk|filled|pnl|pnl_total|real_pnl|loss_at_stop|account|min_qty|step|executedQty|origQty|cumQuote)$"
+                       r"|usd|balance|wallet|equity|margin|notional|amount|income|commission", re.I)
+_LAB = {"last": None}
+
+
+def github_token():
+    try:
+        with open(GITHUB_CREDENTIALS_FILE) as f:
+            return (json.load(f) or {}).get("token", "")
+    except (OSError, ValueError):
+        return ""
+
+
+def save_github_token(tok):
+    """a token -> saved (chmod 600), empty -> the file removed"""
+    tok = (tok or "").strip()
+    with _credentials_lock:
+        if not tok:
+            if os.path.exists(GITHUB_CREDENTIALS_FILE):
+                os.remove(GITHUB_CREDENTIALS_FILE)
+            return
+        tmp = GITHUB_CREDENTIALS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"token": tok}, f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, GITHUB_CREDENTIALS_FILE)
+
+
+def lab_sanitize(x):
+    if isinstance(x, dict):
+        return {k: lab_sanitize(v) for k, v in x.items() if str(k).isupper() or not _LAB_DROP.search(str(k))}   # a coin (ETHUSDT) is no money field
+    if isinstance(x, list):
+        return [lab_sanitize(v) for v in x]
+    return x
+
+
+def lab_export_build():
+    files = {}
+    for path in (DLM_STATE_FILE, PRX_STATE_FILE, SMC_STATE_FILE, EMX_STATE_FILE, BNO_FILE):
+        try:
+            with open(path) as f:
+                files[os.path.basename(path)] = lab_sanitize(json.load(f))
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            log_error(f"lab export {os.path.basename(path)}: {e}")
+    return {"ver": APP_VERSION, "made": int(time.time()), "binance": bool(DLM_BINANCE), "files": files}
+
+
+def _gh(method, url, tok, **kw):
+    return requests.request(method, url, headers={"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json",
+                                                  "X-GitHub-Api-Version": "2022-11-28"}, timeout=60, **kw)
+
+
+def lab_upload():
+    import base64, gzip
+    tok = github_token()
+    if not tok:
+        raise RuntimeError("нет токена GitHub")
+    data = lab_export_build()
+    gz = gzip.compress(json.dumps(data, separators=(",", ":")).encode(), 9)
+    api = f"https://api.github.com/repos/{LAB_REPO}"
+    def why(r, what):
+        if r.status_code == 401:
+            return RuntimeError("GitHub не принял токен (неверный или истёк)")
+        if r.status_code in (403, 404):
+            return RuntimeError(f"у токена нет права записи в {LAB_REPO} (нужно: Contents — Read and write)")
+        return RuntimeError(f"GitHub {r.status_code} ({what}): {r.text[:160]}")
+    r = _gh("GET", f"{api}/branches/{LAB_BRANCH}", tok)
+    if r.status_code == 404:   # the first upload: the branch from main's head
+        m = _gh("GET", f"{api}/git/ref/heads/main", tok)
+        if m.status_code != 200:
+            raise why(m, "main")
+        c = _gh("POST", f"{api}/git/refs", tok, json={"ref": f"refs/heads/{LAB_BRANCH}", "sha": m.json()["object"]["sha"]})
+        if c.status_code not in (200, 201):
+            raise why(c, "ветка")
+    elif r.status_code != 200:
+        raise why(r, "ветка")
+    g = _gh("GET", f"{api}/contents/{LAB_PATH}", tok, params={"ref": LAB_BRANCH})
+    body = {"message": f"lab export v{APP_VERSION} {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC",
+            "content": base64.b64encode(gz).decode(), "branch": LAB_BRANCH}
+    if g.status_code == 200:
+        body["sha"] = g.json().get("sha")
+    elif g.status_code != 404:
+        raise why(g, "файл")
+    p = _gh("PUT", f"{api}/contents/{LAB_PATH}", tok, json=body)
+    if p.status_code not in (200, 201):
+        raise why(p, "запись")
+    n = {k: len(v.get("trades") or v.get("pos") or []) for k, v in data["files"].items() if isinstance(v, dict)}
+    _LAB["last"] = {"t": int(time.time()), "kb": round(len(gz) / 1024), "n": n}
+    return dict(_LAB["last"], url=f"https://github.com/{LAB_REPO}/blob/{LAB_BRANCH}/{LAB_PATH}")
+
+
+@app.route("/api/lab", methods=["GET"])
+def api_lab():
+    return jsonify({"ok": True, "token": bool(github_token()), "last": _LAB["last"], "repo": LAB_REPO, "branch": LAB_BRANCH})
+
+
+@app.route("/api/lab/token", methods=["POST"])
+def api_lab_token():
+    if not _is_local_request():
+        return jsonify({"ok": False, "error": "только с этого телефона (http://127.0.0.1)"}), 403
+    try:
+        save_github_token((request.get_json(silent=True) or {}).get("token"))
+        return jsonify({"ok": True, "token": bool(github_token())})
+    except Exception as e:
+        log_error(f"github token: {e}")
+        return jsonify({"ok": False, "error": str(e)[:200]}), 500
+
+
+@app.route("/api/lab/upload", methods=["POST"])
+def api_lab_upload():
+    try:
+        return jsonify(dict(lab_upload(), ok=True))
+    except RuntimeError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        log_error(f"lab upload: {e}")
+        return jsonify({"ok": False, "error": str(e)[:200]}), 502
+
+
 @app.route("/api/self_update", methods=["POST"])
 def api_self_update():
     """v0.99.450 — the button version of the Termux command: download the main
@@ -40454,6 +40586,7 @@ INDEX_HTML = """<!doctype html>
     <div class="hdrRow"><span class="hdrLbl">Бот</span><button onclick="selfUpdate()" class="btnNeutral">⬇️ Обновить и перезапустить</button></div>
     <div class="hdrRow"><span class="hdrLbl">Автозапуск</span><button onclick="autostartUi()" class="btnNeutral">🔁 Автозапуск</button></div>
     <div class="hdrRow"><span class="hdrLbl">Другой бот</span><button onclick="autostartExtraUi()" class="btnNeutral">➕ В автозапуск</button></div>
+    <div class="hdrRow"><span class="hdrLbl">Лаборатория</span><button onclick="labUploadUi()" class="btnNeutral">📤 Сделки в GitHub</button></div>
   </div>
   <div id="status"></div>
   <div id="overview" class="dim" style="margin-top:4px;"></div>
@@ -43457,6 +43590,24 @@ async function autostartExtraUi() {
   if (!r.ok) return alert(r.error || 'не получилось');
   const x = (r.extras || [])[0];
   alert(x ? `Добавлено: ${x.cmd}\\nРаботает ли он, узнаю ${x.dir ? 'по программе, работающей в папке ' + x.dir : 'по «' + x.marker + '» в его процессе'} — если уже запущен, второй не стартует.` + (r.status && r.status.on ? '\\nЕсли сейчас не запущен — запускаю.' : '\\nВключите «🔁 Автозапуск», чтобы это заработало.') : 'Другой бот убран из автозапуска.');
+}
+// v0.99.724 — the trades for the lab: one gzip'ed file on the repository's branch lab-data (no money fields: the repository is public)
+async function labUploadUi() {
+  let st;
+  try { st = await (await fetch('/api/lab')).json(); } catch (e) { return alert('ошибка сети'); }
+  if (!st.token || !confirm(`Выгрузить сделки бота (⚡, P/R, SMC, EMA, позиции Binance) в GitHub ${st.repo}, ветка ${st.branch}?\\n\\nРепозиторий публичный: суммы в $, размеры позиций и баланс вырезаются, ключей там нет — только монеты, время, цены и R.` + (st.last ? `\\nПрошлая выгрузка: ${new Date(st.last.t * 1000).toLocaleString()}` : '') + '\\n\\nОтмена — сменить или удалить токен GitHub.')) {
+    const tok = prompt((st.token ? 'Новый токен GitHub (пусто — удалить сохранённый).' : 'Нужен токен GitHub, один раз.') + '\\n\\ngithub.com → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token:\\n• Repository access: Only select repositories → ' + st.repo + '\\n• Permissions → Contents: Read and write\\n\\nТокен хранится только на телефоне (как ключи Binance).', '');
+    if (tok === null) return;
+    let r;
+    try { r = await (await fetch('/api/lab/token', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({token: tok.trim()})})).json(); } catch (e) { return alert('ошибка сети'); }
+    if (!r.ok) return alert(r.error || 'не получилось');
+    if (!r.token) return alert('Токен GitHub удалён.');
+    if (!confirm('Токен сохранён. Выгрузить сделки сейчас?')) return;
+  }
+  let r;
+  try { r = await (await fetch('/api/lab/upload', {method: 'POST'})).json(); } catch (e) { return alert('ошибка сети'); }
+  if (!r.ok) return alert('Не выгрузилось: ' + (r.error || '?'));
+  alert(`Выгружено (${r.kb} КБ): ` + Object.entries(r.n || {}).map(([k, v]) => `${k.replace('vp_', '').replace('.json', '')} ${v}`).join(', ') + '\\nНапишите в чат лаборатории — я заберу файл.');
 }
 async function autostartUi() {
   let st;

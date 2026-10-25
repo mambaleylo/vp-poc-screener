@@ -25,3 +25,5 @@ vp_keepalive.pid
 vp_autostart.off
 vp_bot.log
 vp_bot.log.1
+vp_github_credentials.json
+vp_github_credentials.json.tmp
