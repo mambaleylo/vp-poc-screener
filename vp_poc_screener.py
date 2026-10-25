@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.730"
+APP_VERSION = "0.99.731"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -36020,7 +36020,7 @@ def dlm_bn_place(o):
         r = bnf_req("POST", "/fapi/v1/order", dict(base_p, timeInForce="GTC")); tif = "GTC"
     o["real"] = {"status": "LIMIT", "ex": "binance", "id": str(r.get("orderId")), "bsym": bsym, "scl": scl, "qty": q, "price": float(px) / scl,
                  "lev": int(lev), "risk": round(risk / kx, 2), "osc": osc, "load": lm, "dual": dual, "tick": info["tick"], "step": info["step"], "tif": tif,
-                 "margin": mt}   # v0.99.717
+                 "margin": mt, "t_place": int(time.time())}   # v0.99.717; v0.99.731 — t_place: from when it stood on the exchange
     _dlm_bn_pre_exits(o, sl)
 
 
@@ -36086,6 +36086,25 @@ def _dlm_bn_cancel_exits(t, keep_tp_limit=False):
         bnf_cancel(r["bsym"], "order" if r.get("tp_kind") == "limit" else r.get("tp_kind"), r["tp_id"])
 
 
+def _dlm_touch_note(o, r, now):
+    """v0.99.731 — the user agreed: "цена коснулась уровня, а лимитка не исполнилась" recorded. The backtest takes any
+    touch of the level as a fill (a touch of one tick too — and those touch-and-turn trades are its best ones); a real
+    limit gone unfilled: Binance's 1-min candles since it was put on the exchange — did the price reach it and how far
+    past it (% of the price) -> o["touch"]; the lab upload carries it (the share of the touches a resting limit misses)"""
+    t0 = int(r.get("t_place") or o.get("t0") or now - 3600)
+    cs = [c for c in (binance_klines(o["symbol"], "1m", t0, int(now)) or []) if t0 <= c["time"] < now]
+    if not cs:
+        return None
+    s, lv = o["side"], float(r.get("price") or o["lv"])
+    ext = min(c["low"] for c in cs) if s > 0 else max(c["high"] for c in cs)
+    pen = s * (lv - ext) / lv * 100
+    first = next((c["time"] for c in cs if ((c["low"] <= lv) if s > 0 else (c["high"] >= lv))), None)
+    o["touch"] = {"reached": pen >= 0, "pen_pct": round(pen, 4), "t": first, "from": t0, "n1m": len(cs)}
+    if pen >= 0:
+        log_error(f"⚡ binance limit touched but not filled {o['symbol']}: the price {pen:.3f}% past the level {lv:g}")
+    return o["touch"]
+
+
 def dlm_bn_tick(orders, trades):
     """dlm_real_tick() for the Binance orders and trades -> changed"""
     now = time.time()
@@ -36138,6 +36157,10 @@ def dlm_bn_tick(orders, trades):
                 _dlm_bn_cancel_pre(r)   # v0.99.708 — the limit gone unfilled: its stop / take off too
             except Exception as e:
                 log_error(f"dlm binance pre exits off {o['symbol']}: {e}")
+            try:
+                _dlm_touch_note(o, r, now)   # v0.99.731
+            except Exception as e:
+                log_error(f"dlm touch note {o['symbol']}: {e}")
     for t in trades:
         r = t["real"]; bsym, s = r["bsym"], t["side"]
         p = next((x for x in pos.get(bsym) or [] if (x["amt"] > 0) == (s > 0)), None)

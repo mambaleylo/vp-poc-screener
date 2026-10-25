@@ -20890,3 +20890,11 @@ v0.99.730 - 📝 the texts and the rest of Gate for P/R / SMC / EMA on Binance. 
          (Neuro, Cascade, Breakout, Zones) keep their Gate wording — they trade there. Tests: t_gate_bn.py (+ the coins on
          Binance with Gate down / Gate's top otherwise), t_smc_bot.py / t_dlm_bot.py (their stubs take the new argument),
          t_mod_ui.py, t_bn_others.py, t_cstop_others.py, t_dlm_ui.py — OK.
+v0.99.731 - 🔎 "the price touched the level, the limit did not fill" recorded. The audit (tools/winrate audit_fill.py): the
+         backtest takes any touch of a ⚡ level as a fill; 2.5% of its fills went under 0.02% past the level, 6% under 0.05%,
+         and those are its best trades (+0.35R, WR 88%) — counted as not filled the median year drops 13% / 49%; a resting
+         limit may miss a one-tick touch (the queue). The real numbers decide it: a real ⚡ limit gone unfilled (expired /
+         cancelled) now gets Binance's 1-min candles since it went on the exchange (t_place): reached or not, how far past
+         it (% of the price), the first touch -> o["touch"], a log line when reached; the lab upload carries it.
+         Tests: t_dlm_touch.py (a long touched by 0.01%, a short never reached, no candles -> nothing), t_dlm_binance.py,
+         t_dlm_bot.py, t_lab_export.py — OK.
