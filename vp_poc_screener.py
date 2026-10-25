@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.717"
+APP_VERSION = "0.99.718"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28094,9 +28094,9 @@ _PROC_START = time.time()
 # v0.99.700 — the user: "ожидания по доходу добавь тоже куда нибудь тонкой строкой, может под шапку, типа связка индикаторов
 # худшее ожидание и лучшее": a year from $100 on the history (the 12-month windows from each week of 2023-02..2025-10, one
 # account, the bot's leverage, the honest pools; tools/winrate port_expect.py): the worst 10% / the median / the best 10% of
-# the years, the median drawdown. "bundle" = ⚡ 4% + P/R 2% + SMC 1.5% + EMA 1% (on Binance together), "dlm" = ⚡ alone
-EXPECT_YEAR = {"dlm": {"p10": 1036, "p50": 6355, "p90": 15913, "dd": 59, "last12": 11663},   # v0.99.704: x the daily WaveTrend (port_osc3.py)
-               "bundle": {"p10": 1631, "p50": 17743, "p90": 55095, "dd": 62, "last12": 37206}}   # v0.99.712: EMA 1% (port_w709.py); v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
+# the years, the median drawdown. "bundle" = ⚡ 4.5% + P/R 3% + SMC 1.5% + EMA 1% (on Binance together, v0.99.718), "dlm" = ⚡ alone
+EXPECT_YEAR = {"dlm": {"p10": 1620, "p50": 7804, "p90": 27800, "dd": 65, "last12": 22216},   # v0.99.718: cross 10x, the open risk <= 90%, ⚡ 4.5% (port_717d.py); v0.99.704: x the daily WaveTrend (port_osc3.py)
+               "bundle": {"p10": 2102, "p50": 29197, "p90": 116774, "dd": 61, "last12": 96041}}   # v0.99.718: ⚡ 4.5 + P/R 3 + SMC 1.5 + EMA 1, cross 10x, the open risk <= 90% (port_717d.py)   # v0.99.712: EMA 1% (port_w709.py); v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
 
 
 @app.route("/api/boot")
@@ -34072,7 +34072,7 @@ DLM_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_dl
 DLM_ENABLED = os.environ.get("VP_DLM", "1") == "1"
 AUTOTRADE_ENABLED_DLM = os.environ.get("VP_AUTOTRADE_DLM2", "0") == "1"
 TELEGRAM_ALERTS_DLM = os.environ.get("VP_TG_ALERTS_DLM", "0") == "1"   # ~2 trades a day: quiet unless asked
-DLM_RISK_DEFAULT = 4.0   # v0.99.687 — % of the account a trade, up to DLM_MAX_POS at once; v0.99.688: 4 (was 3) — tools/winrate
+DLM_RISK_DEFAULT = 4.5   # v0.99.718 — 4.5 with cross margin (port_717*.py: the margin no longer binds);  v0.99.687 — % of the account a trade, up to DLM_MAX_POS at once; v0.99.688: 4 (was 3) — tools/winrate
 # best_money.py (336 variants of the threshold / a side's cap / positions / risk): 4% at 20 a side takes nearly all the
 # money (a year from $100 cautious: the median $1 880 vs $1 150 at 3%, the worst 10% $560 vs $410); above it the free
 # margin binds (6%: +7% more for a deeper worst drawdown). The drawdown from the peak is ~50% in a crash: 24–25 May 2025
@@ -35189,7 +35189,7 @@ def bn_size(direction, e, sl_x, cap, mmr, equity, risk, bsym, tb, mt, safety=Non
         margin, lev = margin * lev / lev2, lev2
     return margin, lev, skip
 BN_OTHERS_MODES = ("prv", "smc", "emw")
-BN_OTHERS_RISK = {"prv": 2.0, "smc": 1.5, "emw": 1.0}   # v0.99.712 — EMA 1% (port_w709.py: every number better); v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
+BN_OTHERS_RISK = {"prv": 3.0, "smc": 1.5, "emw": 1.0}   # v0.99.718 — P/R 3% with cross margin (port_717*.py); v0.99.712 — EMA 1% (port_w709.py: every number better); v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
 BNO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_bn_others.json")
 _BNO = {"pos": {}}   # Gate contract -> the Binance position this bot opened for P/R / SMC / EMA
 _bno_lock = threading.Lock()
@@ -40416,7 +40416,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow subRow">
         <div>
           <div class="label">↳ 🔄 P/R, 🧱 SMC, 📐 EMA — тоже на Binance</div>
-          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, маржа — по настройке ниже; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто: P/R 2%, SMC 1.5%, EMA 1%. На истории (честный отбор сделок) ⚡ 4% вместе с ними — медиана за год примерно вдвое больше, чем один ⚡, при той же просадке; без ⚡ эти три слабые. Включается вместе с автоторговлей самих модулей</div>
+          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, маржа — по настройке ниже; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто: P/R 3%, SMC 1.5%, EMA 1%. На истории (честный отбор сделок) ⚡ 4.5% вместе с ними — медиана за год примерно вдвое больше, чем один ⚡, при той же просадке; без ⚡ эти три слабые. Включается вместе с автоторговлей самих модулей</div>
         </div>
         <label class="switch"><input type="checkbox" id="setBnOthers"><span class="switchSlider"></span></label>
       </div>
@@ -40684,18 +40684,18 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow" style="flex-wrap:wrap;">
         <div style="flex:1 1 100%;">
           <div class="label">Риск на сделку — у каждого модуля свой</div>
-          <div class="sub">% от счёта, который теряется на стопе (0.1–100). Пустое поле — значение модуля по умолчанию (на Binance, по истории связки): ⚡ 4% · P/R 2% · 🧱 SMC 1.5% · EMA 1%; остальные модули — 0.5%. У ⚡ к своему % ещё множители: загрузка (×0.625 / ×1.25) и дневной WaveTrend (×1.25 / ×0.85)</div>
+          <div class="sub">% от счёта, который теряется на стопе (0.1–100). Пустое поле — значение модуля по умолчанию (на Binance, по истории связки): ⚡ 4.5% · P/R 3% · 🧱 SMC 1.5% · EMA 1%; остальные модули — 0.5%. У ⚡ к своему % ещё множители: загрузка (×0.625 / ×1.25) и дневной WaveTrend (×1.25 / ×0.85)</div>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro 0.5" title="Нейро: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSnr" min="0.1" max="100" step="0.5" placeholder="S/R" title="S/R Zones" style="display:none;width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R 2" title="Peak Reversal: пусто — 2% на Binance (0.5% на Gate)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R 3" title="Peak Reversal: пусто — 3% на Binance (0.5% на Gate)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctEmw" min="0.1" max="100" step="0.5" placeholder="EMA 1" title="EMA — касания: пусто — 1% на Binance (0.5% на Gate)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctZones" min="0.1" max="100" step="0.5" placeholder="Зоны 0.5" title="Зоны: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctZm" min="0.1" max="100" step="0.1" placeholder="🎯 0.5" title="🎯 Сильные зоны: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctRbx" min="0.1" max="100" step="0.1" placeholder="📈 0.5" title="📈 Пробой: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctCas" min="0.1" max="100" step="0.1" placeholder="🌊 0.5" title="🌊 Каскад: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctDlm" min="0.1" max="100" step="0.05" placeholder="⚡ 4" title="⚡ Лимитки 4ч+2ч: пусто — 4% на сделку, до 20 сделок сразу; больше 10% не берётся" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctDlm" min="0.1" max="100" step="0.05" placeholder="⚡ 4.5" title="⚡ Лимитки 4ч+2ч: пусто — 4.5% на сделку, до 20 сделок сразу; больше 10% не берётся" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSmc" min="0.1" max="100" step="0.05" placeholder="🧱 1.5" title="🧱 SMC: пусто — 1.5% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
         </div>
       </div>
@@ -40793,7 +40793,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ ⚡ Лимитки 4ч+2ч</div>
-          <div class="sub">настоящие лимитки на бирже из вкладки ⚡ (до 20 позиций, с лимитками — до 26, по монете без чужой позиции); исполнилась — стоп триггером и тейк лимиткой «только закрытие», через 5 дней 8 ч бот закрывает остаток. Риск — поле «⚡» выше (пусто = 4%, больше 10% не берётся); не хватает свободной маржи — риск сделки уменьшается</div>
+          <div class="sub">настоящие лимитки на бирже из вкладки ⚡ (до 20 позиций, с лимитками — до 26, по монете без чужой позиции); исполнилась — стоп триггером и тейк лимиткой «только закрытие», через 5 дней 8 ч бот закрывает остаток. Риск — поле «⚡» выше (пусто = 4.5%, больше 10% не берётся); не хватает свободной маржи — риск сделки уменьшается</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeDlm"><span class="switchSlider"></span></label>
       </div>
@@ -44382,7 +44382,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
       <div class="zsub hintx">Сделки посчитаны по часовым свечам Binance: стоп — только если свеча своего графика (4ч у 4ч-сделок, 2ч у 2ч) закрылась за ним; фитили и часовые закрытия за стопом не выбивают, от обвала — аварийный стоп 3 ATR на бирже. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%${(m && m.load_risk) ? ` (риск по загрузке: пока открыто меньше ${m.load_risk.n} сделок ⚡ — ×${m.load_risk.lo}, дальше ×${m.load_risk.hi}: сделки общего прострела рынка на истории вдвое лучше одиночных)` : ''}${(m && m.osc_risk) ? ` и по дневному WaveTrend (осциллятор LazyBear с TradingView): монета на дневке перепродана против сделки — ×${m.osc_risk.up}, перекуплена в её сторону — ×${m.osc_risk.dn}` : ''} с плечом, как у бота (ликвидация в ${mo.liq_buf || 1.25}× дальше аварийного стопа — маржа ограничивает число сделок), без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 7189)}</b>, худшие 10% ~${usd(mo.year_p10 || 2783)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 4926)}), последние 12 месяцев ~${usd(mo.last12 || 11387)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
       <div class="zbanner warn hintx">Просадка: при обвале рынка счёт может временно упасть на 60–70% от пика — 24–25 мая 2025 за два дня стопы закрыли 19 сделок 4ч (−19R, при 4% на сделку это около −50%), с 2ч сделками просадки ещё глубже. Потом счёт восстанавливался, но к такому надо быть готовым и не повышать риск после серии стопов.</div>
       ${d.risk_set && d.risk_set > 6 ? `<div class="zbanner warn">Риск ${d.risk}% на сделку при до ${d.max_pos || 20} сделок сразу — это до ${Math.round(d.risk * (d.max_pos || 20))}% счёта под стопами одновременно. Лучше всего по деньгам — 3–4%: выше денег даже меньше (маржи хватает на меньшее число сделок), а просадки глубже.</div>` : ''}
-      ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} (бот держит их у себя и выставляет на бирже, когда цена подошла на 1 ATR — так места и маржа не заняты далёкими лимитками) — переключатель «↳ ⚡ Лимитки 4ч+2ч» в автоторговле; риск — поле «⚡» (пусто = 4%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
+      ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} (бот держит их у себя и выставляет на бирже, когда цена подошла на 1 ATR — так места и маржа не заняты далёкими лимитками) — переключатель «↳ ⚡ Лимитки 4ч+2ч» в автоторговле; риск — поле «⚡» (пусто = 4.5%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
   }
   let h = card(`⚡ Лимитки 4ч+2ч ${pill}`, top);
   {   // v0.99.684 — the exchange: Gate or Binance (the keys, the balance)

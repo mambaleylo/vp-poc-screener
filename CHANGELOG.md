@@ -20758,3 +20758,13 @@ v0.99.717 - Binance: cross margin 10x with the open risk capped at 90% (was: iso
          The setting "💱 Кросс-маржа 10x, общий риск до 90%" (on; off = as before). Tests: t_dlm_binance (cross 10x, the
          risk scaled to the room, no room -> waits, a refused change -> isolated; the old isolated checks with it off),
          t_bn_others (cross 10x), t_dlm_bot, t_cstop_others, t_dlm_ui, t_mod_ui, t_smc_bot, t_bn_source, t_dlm_coins — OK.
+
+v0.99.718 - the risks again, now the margin no longer binds: ⚡ 4% -> 4.5%, P/R 2% -> 3% (on Binance; SMC 1.5%, EMA 1% kept).
+         With isolated margin a higher risk gave nothing (the margin cut the trades); with cross 10x and the open risk
+         capped at 90% (v0.99.717) a year from $100 (port_717*.py): the median $24 773 -> $29 197, the last 12 months
+         $72 757 -> $96 041, 2026 $36 318 -> $53 675, the drawdown the same 61%, the worst 10% $2 393 -> $2 102; better in
+         59% of the 12-month windows (those from 2024–2025: 77–100%, from 2023: 6%) — more risk for more money, the user:
+         "в любом случае важнее доход". ⚡ 5% / SMC 1.75% — +4% more for a 65–66% drawdown; ⚡'s 20 cap no longer matters
+         (the open risk binds first). 📈 Breakout again (the margin had decided it): at 0.5% the worst 10% +43%, the median
+         -5% — not taken. EXPECT_YEAR: the bundle (p10 $2 102, median $29 197, p90 $116 774, drawdown 61%, last 12 months
+         $96 041), ⚡ alone at 4.5% (median $7 804). Tests: t_dlm_bot (the risk from dlm_risk()), the others — OK.

@@ -154,8 +154,8 @@ mk = lambda sym, side, lv: {"id": f"dlm_{sym}_{side}_{tb}", "symbol": sym, "side
 a, b_, c = mk("AAA_USDT", 1, 1.0), mk("BBB_USDT", -1, 2.0), mk("CCC_USDT", 1, 3.0)
 V._DLM["orders"] += [a, b_, c]
 for o in (a, b_, c): V.dlm_real_place(o)
-placed = (all((o.get("real") or {}).get("id") for o in (a, b_, c)) and risks and all(r == 3.75 for r in risks)   # 4% x 0.625 (few open) x 3 / 2 at the emergency stop
-          and all(o["real"]["risk"] == 2.5 for o in (a, b_, c)))
+placed = (all((o.get("real") or {}).get("id") for o in (a, b_, c)) and risks and all(abs(r - V.dlm_risk() * 0.625 * 1.5) < 1e-3 for r in risks)   # the risk (4.5% v0.99.718) x 0.625 (few open) x 3 / 2 at the emergency stop
+          and all(abs(o["real"]["risk"] - V.dlm_risk() * 0.625) < 0.01 for o in (a, b_, c)))
 # v0.99.703 — the load: 5+ open -> x1.25, fewer -> x0.625; the old 4h-less trades (bs 900) not counted
 _tr0 = V._DLM["trades"]
 V._DLM["trades"] = [{"status": "OPEN", "bs": 14400}] * 4 + [{"status": "OPEN", "bs": 900}] * 3
@@ -251,8 +251,8 @@ for g in pick:
 _om = V.dlm_osc_mult; V.dlm_osc_mult = lambda sym, side, now=None: 1.25
 _o0, _t0 = V._DLM["orders"], V._DLM["trades"]; V._DLM["orders"], V._DLM["trades"] = [], []
 risks.clear(); d_ = mk("DDD_USDT", 1, 4.0); V._DLM["orders"].append(d_); V.dlm_real_place(d_)
-want_r = 4 * V.dlm_load_mult() * 1.25 * 1.5
-placed_osc = bool((d_.get("real") or {}).get("id")) and risks and abs(risks[-1] - want_r) < 1e-6 and d_["real"].get("osc") == 1.25 and a["real"].get("osc") == 1.0
+want_r = V.dlm_risk() * V.dlm_load_mult() * 1.25 * 1.5
+placed_osc = bool((d_.get("real") or {}).get("id")) and risks and abs(risks[-1] - want_r) < 1e-3 and d_["real"].get("osc") == 1.25 and a["real"].get("osc") == 1.0
 V.dlm_osc_mult = _om; V._DLM["orders"], V._DLM["trades"] = _o0, _t0
 osc_ok = bool(osc) and worst_wt < 0.5 and mult_ok and n_up > 0 and n_dn > 0 and placed_osc
 print(f"(6) daily WaveTrend: bot vs research max diff {worst_wt:.3f} on 40 pool trades · multiplier by the model ({osc}) {mult_ok} (x{osc.get('up')} {n_up}, x{osc.get('dn')} {n_dn}) · the real order's risk x it {want_r:.4f}% {placed_osc} {osc_ok}")
@@ -263,7 +263,7 @@ import inspect
 fills = [m for m in TG if "исполнилась" in m]
 f0 = next((m for m in fills if "AAA" in m), "")
 tg_ok = ("send_telegram" not in inspect.getsource(V.dlm_scan) and not any("лимитки 4h" in m or "лимитки 2h" in m for m in TG)
-         and "⚡ Лимитки (4ч, лимитка на фитиль)" in f0 and "тейк" in f0 and "аварийный" in f0 and "оценка модели" in f0 and "риск 2.5%" in f0 and "загрузка ×0.625" in f0)
+         and "⚡ Лимитки (4ч, лимитка на фитиль)" in f0 and "тейк" in f0 and "аварийный" in f0 and "оценка модели" in f0 and f"риск {round(V.dlm_risk() * 0.625, 2):g}%" in f0 and "загрузка ×0.625" in f0)
 print(f"(7) Telegram: orders silent, a fill told {tg_ok}\n" + f0)
 ok &= tg_ok
 print("ALL OK" if ok else "FAILED"); sys.exit(0 if ok else 1)
