@@ -20741,3 +20741,20 @@ v0.99.716 - ⚡: the start's catch-up orders checked one by one; the catch-up re
          margin ⚡'s clustered (best) trades need; not blocking the coins — lower still. Rejected; 🌊 Cascade likewise.
          Tests: t_dlm_bot (a reached / a never-reached catch-up order), t_dlm_binance (the reason), t_dlm_ui, t_mod_ui,
          t_bn_others, t_cstop_others, t_smc_bot — OK.
+
+v0.99.717 - Binance: cross margin 10x with the open risk capped at 90% (was: isolated, the leverage by the stop). The lab (the user:
+         "ты прав про то, что надолго маржу задерживает", "в любом случае важнее доход"): with isolated margin the margin
+         was the bundle's real limit — 31% of the trades cut and 20% skipped for it (the long SMC / P/R / EMA positions held
+         it when ⚡'s best, clustered trades came). Cross margin with a fixed leverage and the open risk itself capped — the
+         loss if every open position and armed ⚡ limit hit its exchange stop <= BN_HEAT_MAX 90% of the equity (it was ~70%
+         by the margin; a new trade scaled to fit, under a tenth of its risk left -> a ⚡ limit waits, P/R / SMC / EMA
+         skipped, saying why): a year from $100 the worst 10% $1 631 -> $2 393, the median $17 743 -> $24 773, the last 12
+         months $37 206 -> $72 757, 2026 $19 817 -> $36 318, the drawdown 62% -> 61% (port_heat*.py; 15x / 20x or a cap of
+         100%+ — a deeper drawdown for no more money; at an equal cap of 70% no gain). bn_margin_mode: CROSSED set per coin
+         (Binance refusing — a position / an order on it — the isolated way kept: the leverage by its stop, the liquidation
+         beyond it); bn_size: the same notional (the risk at the stop), the leverage 10x within the coin's cap; bn_heat: the
+         ⚡ trades (to the emergency stop), the armed ⚡ limits (to their pre-placed stop), the P/R / SMC / EMA positions (to
+         their exchange stop, "sl_px"; at the entry after EMA's partial -> none) — only the loss toward the stop counts.
+         The setting "💱 Кросс-маржа 10x, общий риск до 90%" (on; off = as before). Tests: t_dlm_binance (cross 10x, the
+         risk scaled to the room, no room -> waits, a refused change -> isolated; the old isolated checks with it off),
+         t_bn_others (cross 10x), t_dlm_bot, t_cstop_others, t_dlm_ui, t_mod_ui, t_smc_bot, t_bn_source, t_dlm_coins — OK.

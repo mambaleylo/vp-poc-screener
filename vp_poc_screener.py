@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.716"
+APP_VERSION = "0.99.717"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1156,7 +1156,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones", "risk_pct_zm", "risk_pct_rbx", "rbx_enabled", "autotrade_rbx", "telegram_alerts_rbx", "rbx_part",
                   "cas_enabled", "autotrade_cas", "telegram_alerts_cas", "risk_pct_cas",   # v0.99.653
                   "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
-                  "dlm_enabled", "autotrade_dlm2", "telegram_alerts_dlm", "risk_pct_dlm2", "dlm_binance", "dlm_more_coins", "bn_others",   # v0.99.679, v0.99.684, v0.99.686 (v0.99.687: the single mode and the ladder dropped; the 4h module's own autotrade / risk keys: it starts virtual at 4% (v0.99.688), the 15m one held up to 50%)
+                  "dlm_enabled", "autotrade_dlm2", "telegram_alerts_dlm", "risk_pct_dlm2", "dlm_binance", "dlm_more_coins", "bn_others", "bn_cross",   # v0.99.679, v0.99.684, v0.99.686 (v0.99.687: the single mode and the ladder dropped; the 4h module's own autotrade / risk keys: it starts virtual at 4% (v0.99.688), the 15m one held up to 50%)
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
@@ -1242,6 +1242,7 @@ def get_settings():
         "dlm_enabled": DLM_ENABLED, "autotrade_dlm2": AUTOTRADE_ENABLED_DLM, "telegram_alerts_dlm": TELEGRAM_ALERTS_DLM, "risk_pct_dlm2": MODULE_RISK_PCT.get("dlm"),   # v0.99.679, v0.99.687
         "dlm_binance": DLM_BINANCE,   # v0.99.684
         "bn_others": BN_OTHERS,   # v0.99.698
+        "bn_cross": BN_CROSS,   # v0.99.717
         "dlm_more_coins": DLM_MORE_COINS,   # v0.99.686
         "autotrade_zones": AUTOTRADE_ENABLED_ZONES,
         "autotrade_zones_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
@@ -1530,7 +1531,7 @@ def apply_settings(updates):
                    ("cas_enabled", "CAS_ENABLED"), ("autotrade_cas", "AUTOTRADE_ENABLED_CAS"), ("telegram_alerts_cas", "TELEGRAM_ALERTS_CAS"),
                    ("smc_enabled", "SMC_ENABLED"), ("autotrade_smc", "AUTOTRADE_ENABLED_SMC"), ("telegram_alerts_smc", "TELEGRAM_ALERTS_SMC"),
                    ("dlm_enabled", "DLM_ENABLED"), ("autotrade_dlm2", "AUTOTRADE_ENABLED_DLM"), ("telegram_alerts_dlm", "TELEGRAM_ALERTS_DLM"),
-                   ("dlm_binance", "DLM_BINANCE"), ("dlm_more_coins", "DLM_MORE_COINS"), ("bn_others", "BN_OTHERS")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
+                   ("dlm_binance", "DLM_BINANCE"), ("dlm_more_coins", "DLM_MORE_COINS"), ("bn_others", "BN_OTHERS"), ("bn_cross", "BN_CROSS")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
         if _k in updates:
             globals()[_g] = bool(updates[_k])
     if "zones_zm_enabled" in updates:   # v0.99.616
@@ -35113,6 +35114,80 @@ def _dlm_place_exits(t):
 # time exit / P/R's close stop at the market; EMA's partial take reduce-only + the stop to the entry. The risk: the
 # module's own field, empty -> BN_OTHERS_RISK (v0.99.712: P/R 2%, SMC 1.5%, EMA 1%; v0.99.699 — port699b.py on the honest lists)
 BN_OTHERS = os.environ.get("VP_BN_OTHERS", "0") == "1"
+# v0.99.717 — the user ("ты прав про то, что надолго маржу задерживает"; "в любом случае важнее доход"): with isolated margin
+# the margin was the bundle's real limit — 31% of the trades cut and 20% skipped for it (the long SMC / P/R / EMA
+# positions held it when ⚡'s best, clustered trades came). Cross margin at a fixed 10x with the open risk itself capped
+# instead — the loss if every open position and armed ⚡ limit hit its exchange stop <= 90% of the equity (it was ~70%
+# by the margin): a year from $100 the worst 10% $1 631 -> $2 393, the median $17 743 -> $24 773, the last 12 months
+# $37 206 -> $72 757, the drawdown the same 61–62% (tools/winrate port_heat*.py). 15x / 20x or a cap of 100%+ — a deeper
+# drawdown for no more money. A coin whose margin type Binance will not change (a position / an order on it) keeps
+# the isolated way (the leverage by its stop, the liquidation beyond it)
+BN_CROSS = os.environ.get("VP_BN_CROSS", "1") == "1"
+BN_CROSS_LEV = 10
+BN_HEAT_MAX = 0.90
+
+
+def bn_margin_mode(bsym):
+    """the symbol's margin type set as the setting asks -> "CROSSED" | "ISOLATED" (what it really is)"""
+    want = "CROSSED" if BN_CROSS else "ISOLATED"
+    try:
+        bnf_req("POST", "/fapi/v1/marginType", {"symbol": bsym, "marginType": want})
+        return want
+    except BinanceError as e:
+        if e.code == -4046:   # "No need to change margin type": already so
+            return want
+        log_error(f"binance margin type {bsym} -> {want}: {e}")
+        return "ISOLATED" if want == "CROSSED" else "CROSSED"
+
+
+def bn_heat(equity=None):
+    """$ the Binance account loses if every open position and armed ⚡ limit of the bot hits its exchange stop"""
+    h = 0.0
+    with _dlm_lock:
+        trs = [t for t in _DLM["trades"] if t.get("real") and t["status"] == "OPEN" and (t["real"].get("ex") or "binance") == "binance"]
+        ods = [o for o in _DLM["orders"] if o["status"] == "OPEN" and (o.get("real") or {}).get("id") and o["real"].get("ex") == "binance"]
+    for t in trs:
+        r = t["real"]; q = float(r.get("filled") or 0); scl = float(r.get("scl") or 1.0); stp = t.get("hsl") or t.get("sl")
+        if q and stp:   # the loss toward the stop only (a stop at / past the entry — moved to break-even — risks nothing)
+            h += q * scl * max(0.0, t["side"] * (float(t["entry"]) - float(stp)))
+        elif equity:
+            h += equity * float(r.get("risk") or DLM_RISK_DEFAULT) / 100
+    for o in ods:
+        r = o["real"]; q = float(r.get("qty") or 0); scl = float(r.get("scl") or 1.0)
+        sp = float(r.get("pre_sl_px") or 0) or (o["lv"] - o["side"] * 3.0 * (o.get("atr") or 0)) * scl
+        h += q * max(0.0, o["side"] * (float(r.get("price") or o["lv"]) * scl - sp))
+    with _bno_lock:
+        recs = list(_BNO["pos"].values())
+    for rec in recs:
+        if rec.get("sl_px"):
+            h += float(rec["qty"]) * max(0.0, int(rec.get("side") or 1) * (float(rec["entry"]) - float(rec["sl_px"])))
+        elif equity:
+            h += equity * float(rec.get("risk") or 2.0) * 1.5 / 100
+    return h
+
+
+def bn_heat_cap(risk_pct, equity):
+    """cross margin: the new trade's risk % (its loss at its exchange stop) scaled so the open risk + it <= BN_HEAT_MAX
+    of the equity -> (risk %, the reason it is 0 or None)"""
+    if not equity or equity <= 0:
+        return risk_pct, None
+    h = bn_heat(equity); room = BN_HEAT_MAX * equity - h; hn = equity * risk_pct / 100
+    if hn <= room:
+        return risk_pct, None
+    if room < hn * 0.1:   # under a tenth of its risk left: waits (a crumb would be under Binance's minimum / not worth it)
+        return 0.0, f"общий риск открытых позиций уже {h / equity * 100:.0f}% счёта (потолок {BN_HEAT_MAX * 100:.0f}%) — ждёт, пока освободится"
+    return round(risk_pct * room / hn, 4), None
+
+
+def bn_size(direction, e, sl_x, cap, mmr, equity, risk, bsym, tb, mt, safety=None):
+    """compute_risk_based_position, with cross margin the leverage fixed (BN_CROSS_LEV within the coin's cap): the same
+    notional (the risk at the stop), less margin -> (margin, lev, skip)"""
+    kw = {"safety_margin": safety} if safety is not None else {}
+    margin, lev, skip = compute_risk_based_position(direction, e, sl_x, cap, mmr, equity, risk_pct=risk, symbol=bsym, tiers_by_symbol=tb, **kw)
+    if not skip and mt == "CROSSED" and lev:
+        lev2 = max(1, min(int(cap), BN_CROSS_LEV))
+        margin, lev = margin * lev / lev2, lev2
+    return margin, lev, skip
 BN_OTHERS_MODES = ("prv", "smc", "emw")
 BN_OTHERS_RISK = {"prv": 2.0, "smc": 1.5, "emw": 1.0}   # v0.99.712 — EMA 1% (port_w709.py: every number better); v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
 BNO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_bn_others.json")
@@ -35203,24 +35278,24 @@ def bno_open(mode, symbol, direction, entry, sl, tp, kx=1.0):
     tb = {bsym: tiers} if tiers else None
     acct = bnf_account()
     risk = float(MODULE_RISK_PCT.get(mode) or BN_OTHERS_RISK.get(mode, 1.0)) * kx   # v0.99.700: kx — the stop sl is the emergency one
-    margin, lev, skip = compute_risk_based_position(direction, e, slp, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb)
+    mt = bn_margin_mode(bsym)   # v0.99.717 — cross (the leverage 10x, the open risk capped) or isolated (the leverage by the stop)
+    if mt == "CROSSED":
+        risk, why = bn_heat_cap(risk, acct["equity"])
+        if why:
+            return {"status": "SKIPPED", "detail": why}
+    margin, lev, skip = bn_size(direction, e, slp, cap, mmr, acct["equity"], risk, bsym, tb, mt)
     if not skip and margin > acct["free"] * 0.9:   # the free margin: the risk scaled down to what the account carries
         if acct["free"] <= 1:
             skip = f"нет свободной маржи (свободно {acct['free']:.2f}$)"
         else:
             risk = round(risk * acct["free"] * 0.9 / margin, 2)
-            margin, lev, skip = compute_risk_based_position(direction, e, slp, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb)
+            margin, lev, skip = bn_size(direction, e, slp, cap, mmr, acct["equity"], risk, bsym, tb, mt)
     if skip:
         return {"status": "SKIPPED", "detail": str(skip)[:160]}
     qty = bn_fmt(margin * lev / e, info["step"])
     q = float(qty)
     if q < info["min_qty"] or q * e < info["min_notional"]:
         return {"status": "SKIPPED", "detail": f"позиция {q * e:.2f}$ меньше минимума Binance ({info['min_notional']:g}$)"}
-    try:
-        bnf_req("POST", "/fapi/v1/marginType", {"symbol": bsym, "marginType": "ISOLATED"})
-    except BinanceError as ex:
-        if ex.code != -4046:   # -4046 = already isolated
-            log_error(f"binance isolated {bsym}: {ex}")
     try:
         bnf_req("POST", "/fapi/v1/leverage", {"symbol": bsym, "leverage": int(lev)})
     except BinanceError as ex:
@@ -35236,7 +35311,7 @@ def bno_open(mode, symbol, direction, entry, sl, tp, kx=1.0):
     filled = float(r.get("executedQty") or 0) or q
     avg = float(r.get("avgPrice") or 0) or e
     rec = {"mode": mode, "bsym": bsym, "scl": scl, "side": s, "qty": filled, "entry": avg, "lev": int(lev), "risk": round(risk / kx, 4), "dual": dual,
-           "tick": info["tick"], "step": info["step"], "min_qty": info["min_qty"], "t": int(time.time())}
+           "tick": info["tick"], "step": info["step"], "min_qty": info["min_qty"], "t": int(time.time()), "sl_px": slp, "margin": mt}   # v0.99.717
     status = "OPENED"
     for kind, px, up, kk in (("STOP_MARKET", slp, s < 0, "sl"), ("TAKE_PROFIT_MARKET", tpp, s > 0, "tp")):
         try:
@@ -35247,7 +35322,7 @@ def bno_open(mode, symbol, direction, entry, sl, tp, kx=1.0):
     with _bno_lock:
         _BNO["pos"][symbol] = rec
     bno_save()
-    return {"status": status, "detail": f"Binance {bsym}: {filled:g} по ~{avg / scl:.6g}, плечо {int(lev)}x, риск {risk:g}%"
+    return {"status": status, "detail": f"Binance {bsym}: {filled:g} по ~{avg / scl:.6g}, плечо {int(lev)}x {'кросс' if mt == 'CROSSED' else 'изолир.'}, риск {risk:g}%"
                                         + ("" if status == "OPENED" else " · стоп / тейк не поставились — проверьте позицию")}
 
 
@@ -35289,6 +35364,7 @@ def bno_part(mode, t, frac):
         bnf_req("POST", "/fapi/v1/order", dict(_bnf_side_params(rec["side"], True, rec.get("dual")), symbol=rec["bsym"], type="MARKET", quantity=n))
     _bno_cancel(rec, ("sl",))
     rec["sl_kind"], rec["sl_id"] = bnf_place_cond(rec["bsym"], rec["side"], "STOP_MARKET", bn_fmt(rec["entry"], rec["tick"], up=(rec["side"] < 0)), rec.get("dual"))
+    rec["sl_px"] = float(rec["entry"])   # v0.99.717 — at the entry: the open risk counts it as none
     with _bno_lock:
         _BNO["pos"][t["symbol"]] = rec
     bno_save()
@@ -35361,13 +35437,19 @@ def dlm_bn_place(o):
     lm = dlm_load_mult()
     risk = round(dlm_risk(acct["equity"]) * lm * osc * kx, 4)   # v0.99.703 — x the load
     tb = {bsym: tiers} if tiers else None
-    margin, lev, skip = compute_risk_based_position(direction, lv, sl, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb, safety_margin=_dlm_liq_buf())
+    mt = bn_margin_mode(bsym)   # v0.99.717 — cross (10x, the open risk capped) or isolated (the leverage by the emergency stop)
+    if mt == "CROSSED":
+        risk, why = bn_heat_cap(risk, acct["equity"])
+        if why:   # waits (an open trade may close before the price comes) and says why
+            o["hold"] = why; o["real"] = None
+            return
+    margin, lev, skip = bn_size(direction, lv, sl, cap, mmr, acct["equity"], risk, bsym, tb, mt, safety=_dlm_liq_buf())
     if not skip and margin > acct["free"] * 0.9:   # the free margin checked: the risk scaled down to what the account carries
         if acct["free"] <= 1:
             skip = f"нет свободной маржи (свободно {acct['free']:.2f}$)"
         else:
             risk = round(risk * acct["free"] * 0.9 / margin, 2)
-            margin, lev, skip = compute_risk_based_position(direction, lv, sl, cap, mmr, acct["equity"], risk_pct=risk, symbol=bsym, tiers_by_symbol=tb, safety_margin=_dlm_liq_buf())
+            margin, lev, skip = bn_size(direction, lv, sl, cap, mmr, acct["equity"], risk, bsym, tb, mt, safety=_dlm_liq_buf())
     if skip:
         o["real"] = {"status": "SKIPPED", "ex": "binance", "detail": str(skip)[:160]}
         return
@@ -35376,11 +35458,6 @@ def dlm_bn_place(o):
     if q < info["min_qty"] or q * lv < info["min_notional"]:
         o["real"] = {"status": "SKIPPED", "ex": "binance", "detail": f"позиция {q * lv:.2f}$ меньше минимума Binance ({info['min_notional']:g}$)"}
         return
-    try:
-        bnf_req("POST", "/fapi/v1/marginType", {"symbol": bsym, "marginType": "ISOLATED"})
-    except BinanceError as e:
-        if e.code != -4046:   # -4046 = already isolated
-            log_error(f"binance isolated {bsym}: {e}")
     try:
         bnf_req("POST", "/fapi/v1/leverage", {"symbol": bsym, "leverage": int(lev)})
     except BinanceError as ex:
@@ -35401,7 +35478,8 @@ def dlm_bn_place(o):
         log_error(f"binance GTD limit {bsym}: {e} — GTC")
         r = bnf_req("POST", "/fapi/v1/order", dict(base_p, timeInForce="GTC")); tif = "GTC"
     o["real"] = {"status": "LIMIT", "ex": "binance", "id": str(r.get("orderId")), "bsym": bsym, "scl": scl, "qty": q, "price": float(px) / scl,
-                 "lev": int(lev), "risk": round(risk / kx, 2), "osc": osc, "load": lm, "dual": dual, "tick": info["tick"], "step": info["step"], "tif": tif}
+                 "lev": int(lev), "risk": round(risk / kx, 2), "osc": osc, "load": lm, "dual": dual, "tick": info["tick"], "step": info["step"], "tif": tif,
+                 "margin": mt}   # v0.99.717
     _dlm_bn_pre_exits(o, sl)
 
 
@@ -35747,7 +35825,8 @@ def dlm_bn_adopt(now=None):
                 mode = min((("prv", 0.75), ("smc", 1.5), ("emw", 2.0)), key=lambda m_: abs(m_[1] - ratio))[0] if ratio else "smc"
                 rec = {"mode": mode, "bsym": bsym, "scl": scl, "side": s, "qty": abs(p["amt"]), "entry": p["entry"], "lev": None, "risk": None, "dual": dual,
                        "tick": info.get("tick"), "step": info.get("step"), "min_qty": info.get("min_qty"), "t": int(now), "adopted": True,
-                       "sl_kind": stp[0] if stp else None, "sl_id": stp[1] if stp else None, "tp_kind": tpo[0] if tpo else None, "tp_id": tpo[1] if tpo else None}
+                       "sl_kind": stp[0] if stp else None, "sl_id": stp[1] if stp else None, "tp_kind": tpo[0] if tpo else None, "tp_id": tpo[1] if tpo else None,
+                       "sl_px": stp[2] if stp and stp[2] else None}   # v0.99.717 — for the open risk
                 with _bno_lock:
                     _BNO["pos"][sym] = rec
                 bno_save()
@@ -40337,9 +40416,16 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow subRow">
         <div>
           <div class="label">↳ 🔄 P/R, 🧱 SMC, 📐 EMA — тоже на Binance</div>
-          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, изолированная маржа; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто: P/R 2%, SMC 1.5%, EMA 1%. На истории (честный отбор сделок) ⚡ 4% вместе с ними — медиана за год примерно вдвое больше, чем один ⚡, при той же просадке; без ⚡ эти три слабые. Включается вместе с автоторговлей самих модулей</div>
+          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, маржа — по настройке ниже; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто: P/R 2%, SMC 1.5%, EMA 1%. На истории (честный отбор сделок) ⚡ 4% вместе с ними — медиана за год примерно вдвое больше, чем один ⚡, при той же просадке; без ⚡ эти три слабые. Включается вместе с автоторговлей самих модулей</div>
         </div>
         <label class="switch"><input type="checkbox" id="setBnOthers"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ 💱 Кросс-маржа 10x, общий риск до 90%</div>
+          <div class="sub hintx">новые позиции на Binance — в кросс-марже с плечом 10x, а предел — сам риск: сумма потерь всех открытых позиций и выставленных лимиток ⚡, если все сработают по стопам на бирже, не больше 90% счёта (новая сделка урезается, чтобы в него уложиться). В изолированной марже пределом была маржа: на истории она урезала 31% сделок и отменяла ещё 20% — долгие позиции SMC / P/R / EMA держали её, когда приходили лучшие пачки ⚡. За год со $100: плохой год $1 631 → $2 393, медиана $17 743 → $24 773, последние 12 мес $37 206 → $72 757, просадка та же ~61%. Выключено — как раньше: изолированная, плечо по стопу. Монета, где Binance не даёт сменить режим (на ней позиция или ордер), торгуется по-старому</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setBnCross"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow subRow">
         <div>
@@ -45706,6 +45792,7 @@ const setInputs = {
   telegram_alerts_dlm: document.getElementById('setTgDlm'),
   dlm_binance: document.getElementById('setDlmBinance'),   // v0.99.684
   bn_others: document.getElementById('setBnOthers'),   // v0.99.698
+  bn_cross: document.getElementById('setBnCross'),   // v0.99.717
   dlm_more_coins: document.getElementById('setDlmMoreCoins'),   // v0.99.686
   autotrade_smc: document.getElementById('setAutotradeSmc'),
   telegram_alerts_smc: document.getElementById('setTgSmc'),

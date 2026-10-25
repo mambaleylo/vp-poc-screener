@@ -67,8 +67,10 @@ def fake(method, url, headers=None, timeout=None, **k):
             {"bracket": 1, "initialLeverage": 50, "notionalCap": 5000, "notionalFloor": 0, "maintMarginRatio": 0.01, "cum": 0},
             {"bracket": 2, "initialLeverage": 20, "notionalCap": 25000, "notionalFloor": 5000, "maintMarginRatio": 0.025, "cum": 75}]}])
     if path == "/fapi/v1/marginType":
-        if X["mtype"].get(p["symbol"]) == "ISOLATED":
+        if X["mtype"].get(p["symbol"]) == p["marginType"]:
             return R(400, {"code": -4046, "msg": "No need to change margin type."})
+        if p["symbol"] in X.get("mt_lock", ()):   # v0.99.717 — a position / an order on it
+            return R(400, {"code": -4048, "msg": "Margin type cannot be changed if there exists position."})
         X["mtype"][p["symbol"]] = p["marginType"]
         return R(200, {"code": 200})
     if path == "/fapi/v1/leverage":
@@ -155,7 +157,7 @@ V.dlm_real_place(a)
 ra = a["real"]; o = X["orders"].get(int(ra.get("id") or 0)) or {}
 loss = float(o.get("quantity", 0)) * (10.0 - 9.8)
 res["limit placed"] = (ra.get("status") == "LIMIT" and ra.get("ex") == "binance" and o.get("type") == "LIMIT" and o.get("side") == "BUY"
-                       and o.get("price") == "10" and X["mtype"].get("AAAUSDT") == "ISOLATED" and X["lev"].get("AAAUSDT") == ra["lev"]
+                       and o.get("price") == "10" and X["mtype"].get("AAAUSDT") == "CROSSED" and X["lev"].get("AAAUSDT") == ra["lev"] == 10   # v0.99.717
                        and 80 <= loss <= 100 and ra["lev"] <= 50)
 # (3) the fill -> the stop (algo, the whole position) + the take (reduce-only limit)
 o.update(status="FILLED", executedQty=o["quantity"], avgPrice="9.99"); X["pos"]["AAAUSDT"] = float(o["quantity"])
@@ -292,11 +294,13 @@ res["position cap"] = not h.get("real")
 V.DLM_MAX_POS = cap0; V._DLM["trades"] = [t for t in V._DLM["trades"] if t["id"] != "held"]
 # (13) the UI
 # v0.99.713 — a new futures account (Binance -4300: no more than 20x for 30 days): the cap learnt, the order made again
+V.BN_CROSS = False   # the isolated way (the leverage by the stop: 50x asked here)
 X["lev_cap"] = 20; X["algo_api"] = True; X["dual"] = False; X["dual_lock"] = False; V._BNF["dual"] = None; X["pos"].clear(); V._BNF.pop("lev_cap", None)
 V._DLM.update({"orders": [], "trades": []}); w0 = (X["wallet"], X["free"]); X["wallet"] = X["free"] = 100.0   # a small notional: the 50x bracket
 q4 = mk("AAA_USDT", 1, 10.0, 0.02); V._DLM["orders"].append(q4); V.dlm_real_place(q4)
 res["new account: leverage capped at 20x, the order made"] = (q4["real"] or {}).get("status") == "LIMIT" and V._BNF.get("lev_cap") == 20 and X["lev"].get("AAAUSDT", 99) <= 20
 X["lev_cap"] = None; V._BNF.pop("lev_cap", None); X["wallet"], X["free"] = w0
+V.BN_CROSS = True
 for i_ in [int(q4["real"].get("id") or 0)] + [int((q4["real"].get(k) or [0, 0])[1]) for k in ("pre_sl", "pre_tp")]:   # its limit gone
     X["orders"].pop(i_, None); X["algos"].pop(i_, None)
 # v0.99.715 — the user ("сделка закрылась тейком, но её нигде нет", "особенно параллельный поток"): (a) the coin's limit of
@@ -332,6 +336,26 @@ o_ = {"symbol": "GGG_USDT", "side": 1, "lv": 1.0, "t0": int(time.time()) - 3600,
 w1 = V._dlm_why_virtual(o_, {"t1h": int(time.time())}); w2 = V._dlm_why_virtual(dict(o_, from_cu=True), {"t1h": int(time.time())})
 res["the catch-up reason only for the catch-up's orders"] = "20 мест" in w1 and "пересчитывал" in w2
 V._DLM["catchup"] = cu0
+# v0.99.717 — cross margin 10x, the open risk (the loss at the exchange stops) capped at 90%: (a) the risk scaled to fit,
+# (b) no room -> waits saying why, (c) Binance refusing the margin type change -> the isolated way (the leverage by the stop)
+X["algo_api"] = True; X["dual"] = False; X["dual_lock"] = False; V._BNF["dual"] = None; X["pos"].clear()
+V._DLM.update({"orders": [], "trades": []}); V._BNO["pos"].clear(); X["wallet"] = X["free"] = 1000.0
+V._BNO["pos"]["ZZ_USDT"] = {"mode": "smc", "bsym": "ZZUSDT", "side": 1, "qty": 100.0, "entry": 10.0, "sl_px": 2.0}   # $800 at its stop
+h0 = V.bn_heat(1000.0)
+c1 = mk("AAA_USDT", 1, 10.0, 0.1); c1["id"] += "x1"; V._DLM["orders"].append(c1); V.dlm_real_place(c1)
+rc = c1.get("real") or {}; oc = X["orders"].get(int(rc.get("id") or 0)) or {}
+loss_c = float(oc.get("quantity", 0)) * (10.0 - float(rc.get("pre_sl_px") or 0))   # at its stop on the exchange
+scaled = rc.get("status") == "LIMIT" and rc.get("margin") == "CROSSED" and rc.get("lev") == 10 and 80 <= loss_c <= 101   # 900 - 800 = $100 room
+c2 = mk("BBB_USDT", 1, 5.0, 0.05); c2["id"] += "x2"; V._DLM["orders"].append(c2); V.dlm_real_place(c2)
+full = c2.get("real") is None and "общий риск" in (c2.get("hold") or "")
+V._DLM["orders"] = [x for x in V._DLM["orders"] if x is not c2]; V._dlm_cancel_back(c1); V._DLM["orders"] = []; V._BNO["pos"].clear()
+X["mt_lock"] = {"AAAUSDT"}; X["mtype"]["AAAUSDT"] = "ISOLATED"
+c3 = mk("AAA_USDT", 1, 10.0, 0.1); c3["id"] += "x3"; V._DLM["orders"].append(c3); V.dlm_real_place(c3)
+iso = (c3.get("real") or {}).get("margin") == "ISOLATED" and X["mtype"]["AAAUSDT"] == "ISOLATED"
+print(f"   cross: heat before {h0:.0f}$ · scaled to the room {scaled} (loss at the stop {loss_c:.0f}$) · no room -> waits {full} · refused -> isolated {iso}, lev {(c3.get('real') or {}).get('lev')}")
+res["cross 10x: the open risk capped at 90%, a refused change -> isolated"] = h0 == 800 and scaled and full and iso
+if (c3.get("real") or {}).get("id"): V._dlm_cancel_back(c3)
+X["mt_lock"] = set(); V._DLM["orders"] = []
 # v0.99.708 — (a) the limit goes with its stop + take (closePosition triggers) and a GTD; (b) "another phone": the state lost ->
 # the bot takes over its limit (with its triggers), a ⚡ position (stop + take limit) and an SMC-like one (stop + take
 # triggers: take / stop = 1.5), nothing placed or cancelled on the exchange

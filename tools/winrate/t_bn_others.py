@@ -68,7 +68,7 @@ def fake(method, url, headers=None, timeout=None, **k):
             {"bracket": 1, "initialLeverage": 50, "notionalCap": 5000, "notionalFloor": 0, "maintMarginRatio": 0.01, "cum": 0},
             {"bracket": 2, "initialLeverage": 20, "notionalCap": 25000, "notionalFloor": 5000, "maintMarginRatio": 0.025, "cum": 75}]}])
     if path == "/fapi/v1/marginType":
-        if X["mtype"].get(p["symbol"]) == "ISOLATED":
+        if X["mtype"].get(p["symbol"]) == p["marginType"]:
             return R(400, {"code": -4046, "msg": "No need to change margin type."})
         X["mtype"][p["symbol"]] = p["marginType"]
         return R(200, {"code": 200})
@@ -146,7 +146,7 @@ algos = [a for a in X["algos"].values() if a["symbol"] == "AAAUSDT"]
 st = next((a for a in algos if a["type"] == "STOP_MARKET"), {}); tk = next((a for a in algos if a["type"] == "TAKE_PROFIT_MARKET"), {})
 q = float(mk[0][2]["quantity"]) if mk else 0
 res["smc opened on Binance, its 1.5% at the stop"] = (r1["status"] == "OPENED" and not gate and len(mk) == 1 and mk[0][2]["side"] == "BUY"
-                                               and 0.9 * 15 <= q * 0.5 <= 1.001 * 15 and X["mtype"].get("AAAUSDT") == "ISOLATED" and X["lev"].get("AAAUSDT", 0) >= 1)
+                                               and 0.9 * 15 <= q * 0.5 <= 1.001 * 15 and X["mtype"].get("AAAUSDT") == "CROSSED" and X["lev"].get("AAAUSDT", 0) == 10)   # v0.99.717 — cross 10x
 res["stop + take on the exchange"] = (st.get("triggerPrice") == "9.5" and st.get("closePosition") == "true" and st.get("side") == "SELL"
                                      and tk.get("triggerPrice") == "11.5" and tk.get("closePosition") == "true")
 X["pos"]["AAAUSDT"] = q
