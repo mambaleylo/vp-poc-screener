@@ -20809,3 +20809,16 @@ v0.99.722 - 🔁 the autostart's 15-min check (the user's screen: ❌ on it). It
          (termux-job-scheduler --pending) and, the autostart on and the job missing, registers it then: install Termux:API +
          pkg install termux-api, open «🔁 Автозапуск» again — ✅. Tests: t_autostart_job.py (a fake termux-job-scheduler: none
          -> appears -> registered once, off -> cancelled), t_autostart.py, t_autostart_ui.py — OK.
+
+v0.99.723 - 🔁 the autostart: Termux opened -> the bot, and another program started with it. The user: "чтобы при запуске Termux …
+         ещё выполнялась команда для запуска luxestetic" (its command from its own chat: cd ~/storage/downloads/luxestetic &&
+         bash start.sh). (1) ~/.bashrc gets one line (marked, the user's lines kept, removed with the autostart off): opening
+         Termux runs vp_check.sh — after a force stop Android may keep Termux:Boot / the 15-min job from running until Termux
+         is opened by hand. (2) the menu's «➕ В автозапуск»: a command run by the check (after the phone starts, Termux
+         opened, every 15 min) unless already running — a non-shell process working in its `cd` folder (resolved through
+         ~/storage's symlink), so start.sh running the bot in the foreground, in the background and exiting, or exec'ing it
+         are all seen; with no `cd`, a process with the command's file as its program / argument (not any text holding it —
+         the first version also matched the grep itself / a shell's command line). Its output in ~/autostart_<file>.log.
+         Tests: t_autostart_lux.py (the three start.sh kinds: started once, no second copy while running, again after it
+         stops), t_autostart_extra.py (the bashrc line once, the user's kept, off removes it), t_autostart.py,
+         t_autostart_job.py, t_autostart_ui.py — OK.

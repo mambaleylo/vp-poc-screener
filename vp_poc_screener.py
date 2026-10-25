@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.722"
+APP_VERSION = "0.99.723"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28081,12 +28081,50 @@ def _autostart_paths():
     bot = os.path.abspath(__file__); d = os.path.dirname(bot)
     return {"bot": bot, "dir": d, "keep": os.path.join(d, "vp_keepalive.sh"), "check": os.path.join(d, "vp_check.sh"),
             "pid": os.path.join(d, "vp_keepalive.pid"), "off": os.path.join(d, "vp_autostart.off"), "log": os.path.join(d, "vp_bot.log"),
-            "boot": os.path.join(os.path.expanduser("~"), ".termux", "boot", "vp-bot.sh")}
+            "boot": os.path.join(os.path.expanduser("~"), ".termux", "boot", "vp-bot.sh"),
+            "extra": os.path.join(d, "vp_autostart_extra.json"), "bashrc": os.path.join(os.path.expanduser("~"), ".bashrc")}
+
+
+def autostart_extras():
+    """v0.99.723 — the other programs started with the bot (the user: "для luxestetic бота … при запуске Termux ещё
+    выполнялась команда"): [{"cmd", "marker"}] — run when the marker is in no running process's command line"""
+    try:
+        with open(_autostart_paths()["extra"]) as f:
+            return [x for x in (json.load(f) or []) if x.get("cmd")]
+    except Exception:
+        return []
+
+
+def _sh_q(x):
+    return "'" + str(x).replace("'", "'\"'\"'") + "'"
+
+
+def _extra_marker(cmd):
+    """how to tell the program is running: (the folder it is started in — `cd X && …` — resolved, any non-shell process
+    working there; else the last file in the command, a process with it as its program / first argument)"""
+    m = re.match(r"\s*cd\s+(\S+)\s*(&&|;)", cmd)
+    d = os.path.realpath(os.path.expanduser(m.group(1))) if m else None
+    words = [w for w in re.split(r"[\s;&|]+", cmd.strip()) if w]
+    files = [w for w in words if re.search(r"\.(py|js|sh|jar|php|rb)$", w)]
+    return d, os.path.basename((files or words or [cmd])[-1])
 
 
 def _autostart_scripts(p):
     sh = shutil.which("sh") or "/bin/sh"
+    ex = ""
+    for i, x in enumerate(autostart_extras()):   # v0.99.723 — the other programs: started unless running
+        log = os.path.join(os.path.expanduser("~"), f"autostart_{re.sub(r'[^A-Za-z0-9_.-]', '_', x['marker'])}.log")
+        if x.get("dir"):   # any non-shell process working in its folder (start.sh may exec / background the program)
+            test = (f"  [ \"$(readlink \"$d/cwd\" 2>/dev/null)\" = {_sh_q(x['dir'])} ] || continue\n"
+                    f"  case \"${{a0##*/}}\" in sh|bash|zsh|dash|login|-sh|-bash|-zsh|tr|head|sed|grep|readlink) continue;; esac\n")
+        else:              # a process with the file as its program or first / second argument
+            test = f"  tr '\\000' '\\n' < \"$d/cmdline\" 2>/dev/null | head -n 3 | sed 's#.*/##' | grep -qxF -- {_sh_q(x['marker'])} || continue\n"
+        ex += ("run_=0\nfor d in /proc/[0-9]*; do\n  [ \"$d\" = \"/proc/$$\" ] && continue\n"
+               "  a0=$(tr '\\000' '\\n' < \"$d/cmdline\" 2>/dev/null | head -n 1); [ -z \"$a0\" ] && continue\n"
+               + test + "  run_=1; break\ndone\n"
+               f"[ \"$run_\" = 0 ] && (cd \"$HOME\" && nohup {sh} -c {_sh_q(x['cmd'])} >> {_sh_q(log)} 2>&1 &)\n")
     port = int(os.environ.get("VP_PORT", 8080)); py = sys.executable
+    extras = ex
     keep = f"""#!{sh}
 # VP-POC: the bot again 10 s after it stops (written by the bot, v0.99.721 — the button «🔁 Автозапуск»)
 cd "{p['dir']}" || exit 1
@@ -28105,7 +28143,7 @@ done
 command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock
 cd "{p['dir']}" || exit 1
 [ -f "{p['off']}" ] && exit 0
-"{py}" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:{port}/api/health', timeout=8)" >/dev/null 2>&1 && exit 0
+{extras}"{py}" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:{port}/api/health', timeout=8)" >/dev/null 2>&1 && exit 0
 if [ -f "{p['pid']}" ] && kill -0 "$(cat "{p['pid']}")" 2>/dev/null; then exit 0; fi
 nohup {sh} "{p['keep']}" >/dev/null 2>&1 &
 """
@@ -28116,6 +28154,58 @@ sleep 30
 exec {sh} "{p['check']}"
 """
     return {"keep": keep, "check": check, "boot": boot}
+
+
+BASHRC_MARK = "# VP-POC autostart (v0.99.723): Termux opened -> the bot (and the other programs) unless running"
+
+
+def _bashrc_hook(p, on):
+    """v0.99.723 — opening Termux starts the bot too (after a force stop Android may keep Termux:Boot / the 15-min job
+    from running until Termux is opened by hand): one line in ~/.bashrc, removed with the autostart off"""
+    try:
+        lines = open(p["bashrc"]).read().splitlines() if os.path.exists(p["bashrc"]) else []
+    except OSError as e:
+        log_error(f"autostart bashrc: {e}")
+        return False
+    keep = []; skip = False
+    for ln in lines:
+        if ln == BASHRC_MARK:
+            skip = True
+            continue
+        if skip:
+            skip = False
+            continue
+        keep.append(ln)
+    if on:
+        keep += [BASHRC_MARK, f'[ -f "{p["check"]}" ] && ( sh "{p["check"]}" >/dev/null 2>&1 & )']
+    try:
+        with open(p["bashrc"], "w") as f:
+            f.write("\n".join(keep) + ("\n" if keep else ""))
+        return True
+    except OSError as e:
+        log_error(f"autostart bashrc: {e}")
+        return False
+
+
+def _autostart_write_check(p):
+    sc = _autostart_scripts(p)
+    with open(p["check"], "w") as f:
+        f.write(sc["check"])
+    os.chmod(p["check"], 0o755)
+
+
+def autostart_extra_set(cmd):
+    """the other program's start command (one; empty -> none); the check re-written and run now"""
+    p = _autostart_paths(); cmd = (cmd or "").strip()
+    d_, mk = _extra_marker(cmd) if cmd else (None, None)
+    lst = [{"cmd": cmd, "dir": d_, "marker": mk}] if cmd else []
+    with open(p["extra"], "w") as f:
+        json.dump(lst, f, ensure_ascii=False)
+    if os.path.exists(p["check"]):
+        _autostart_write_check(p)
+        if os.path.exists(p["keep"]) and not os.path.exists(p["off"]):
+            subprocess.Popen([shutil.which("sh") or "/bin/sh", p["check"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    return lst
 
 
 def _under_keepalive():
@@ -28160,7 +28250,8 @@ def autostart_status():
         job = _autostart_job_register(p) and bool(_autostart_job_pending())
     return {"on": on, "boot": os.path.exists(p["boot"]), "boot_dir": os.path.isdir(os.path.dirname(p["boot"])),
             "job": job is not None, "wake": bool(shutil.which("termux-wake-lock")), "under_loop": _under_keepalive(),
-            "termux": "com.termux" in sys.executable, "job_set": bool(job)}
+            "termux": "com.termux" in sys.executable, "job_set": bool(job),
+            "bashrc": os.path.exists(p["bashrc"]) and BASHRC_MARK in open(p["bashrc"]).read(), "extras": autostart_extras()}
 
 
 def autostart_set(on):
@@ -28183,6 +28274,7 @@ def autostart_set(on):
             os.remove(p["off"])
         except OSError:
             pass
+        _bashrc_hook(p, True)   # v0.99.723
         if shutil.which("termux-job-scheduler"):
             _autostart_job_register(p)
         if shutil.which("termux-wake-lock"):
@@ -28202,6 +28294,7 @@ def autostart_set(on):
         return st
     with open(p["off"], "w") as f:
         f.write("off\n")
+    _bashrc_hook(p, False)   # v0.99.723
     for k in ("boot",):
         try:
             os.remove(p[k])
@@ -28213,6 +28306,15 @@ def autostart_set(on):
         except Exception as e:
             log_error(f"autostart job cancel: {e}")
     return autostart_status()
+
+
+@app.route("/api/autostart/extra", methods=["POST"])
+def api_autostart_extra():
+    try:
+        return jsonify({"ok": True, "extras": autostart_extra_set((request.get_json(silent=True) or {}).get("cmd")), "status": autostart_status()})
+    except Exception as e:
+        log_error(f"autostart extra: {e}")
+        return jsonify({"ok": False, "error": str(e)[:200]}), 500
 
 
 @app.route("/api/autostart", methods=["GET", "POST"])
@@ -40351,6 +40453,7 @@ INDEX_HTML = """<!doctype html>
     <div class="hdrRow"><span class="hdrLbl">Ошибки</span><button id="clearErrorsBtn" class="btnDanger">🗑 Очистить</button></div>
     <div class="hdrRow"><span class="hdrLbl">Бот</span><button onclick="selfUpdate()" class="btnNeutral">⬇️ Обновить и перезапустить</button></div>
     <div class="hdrRow"><span class="hdrLbl">Автозапуск</span><button onclick="autostartUi()" class="btnNeutral">🔁 Автозапуск</button></div>
+    <div class="hdrRow"><span class="hdrLbl">Другой бот</span><button onclick="autostartExtraUi()" class="btnNeutral">➕ В автозапуск</button></div>
   </div>
   <div id="status"></div>
   <div id="overview" class="dim" style="margin-top:4px;"></div>
@@ -43342,6 +43445,19 @@ async function zutLogout() {
   refreshZones();
 }
 // v0.99.721 — the autostart: after the phone restarts (Termux:Boot), after a crash (the keepalive loop), Termux killed (a check every 15 min)
+// v0.99.723 — another program started with the bot (after the phone starts, Termux opened, the 15-min check) unless running
+async function autostartExtraUi() {
+  let st;
+  try { st = await (await fetch('/api/autostart')).json(); } catch (e) { return alert('ошибка сети'); }
+  const cur = ((st.extras || [])[0] || {}).cmd || 'cd ~/storage/downloads/luxestetic && bash start.sh';   // the user's luxestetic bot (its own chat)
+  const cmd = prompt('Команда запуска другого бота — ровно как вы набираете её в Termux (например: cd ~/luxestetic && python main.py).\\nОна выполнится после перезагрузки телефона, при открытии Termux и при проверке раз в 15 мин, если этот бот ещё не работает.\\nПусто — убрать.', cur);
+  if (cmd === null) return;
+  let r;
+  try { r = await (await fetch('/api/autostart/extra', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({cmd})})).json(); } catch (e) { return alert('ошибка сети'); }
+  if (!r.ok) return alert(r.error || 'не получилось');
+  const x = (r.extras || [])[0];
+  alert(x ? `Добавлено: ${x.cmd}\\nРаботает ли он, узнаю ${x.dir ? 'по программе, работающей в папке ' + x.dir : 'по «' + x.marker + '» в его процессе'} — если уже запущен, второй не стартует.` + (r.status && r.status.on ? '\\nЕсли сейчас не запущен — запускаю.' : '\\nВключите «🔁 Автозапуск», чтобы это заработало.') : 'Другой бот убран из автозапуска.');
+}
 async function autostartUi() {
   let st;
   try { st = await (await fetch('/api/autostart')).json(); } catch (e) { return alert('ошибка сети'); }
@@ -43353,7 +43469,9 @@ async function autostartUi() {
     `${yn(st.on && st.boot)} запуск после перезагрузки телефона (нужно приложение Termux:Boot из F-Droid, открыть его один раз)`,
     `${yn(st.on && st.job && st.job_set)} проверка раз в 15 мин, если Android закрыл Termux (нужно приложение Termux:API из F-Droid и pkg install termux-api)`,
     `${yn(st.wake)} защита от сна (termux-wake-lock)`,
-    `${yn(st.under_loop)} этот бот уже работает под автоперезапуском`, '',
+    `${yn(st.on && st.bashrc)} запуск при открытии Termux (если бот не работает)`,
+    `${yn(st.under_loop)} этот бот уже работает под автоперезапуском`,
+    ...(st.extras || []).map(x => `➕ ещё запускается: ${x.cmd} (работает ли — ${x.dir ? 'по программе в папке ' + x.dir : 'по «' + x.marker + '»'})`), '',
     'Ещё: в настройках Android снимите ограничения батареи для Termux, Termux:Boot и Termux:API («Без ограничений»).',
   ];
   if (!confirm(lines.join('\\n') + '\\n\\n' + (st.on ? 'Выключить автозапуск? (бот продолжит работать, но перезапускать его будет некому)' : 'Включить автозапуск? Бот перезапустится под присмотром — страница обновится сама.'))) return;
