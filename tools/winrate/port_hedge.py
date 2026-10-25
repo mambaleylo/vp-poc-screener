@@ -1,3 +1,6 @@
+"""WRONG — LOOKAHEAD (see port_hedge3.py / port_hedge4.py): the hedge entered at the touch HOUR's open, before the fill; BTC's
+fall inside that hour (the same dump that filled the ⚡ limit) counted as the hedge's gain. Honest (the hedge at the fill's
+15m close): the median $17 743 -> $11 922 at 0.15 — rejected."""
 """(from port_side) the bundle's one-side cap over ALL four modules (the new coins showed: the money is lost on the days every alt falls
 together) — at most N positions a side (⚡ + P/R + SMC + EMA), and a lower risk once K are open a side; v0.99.712 rules"""
 exec(open("port_w712.py").read().split("U = [1, 1, 1, 1]")[0])
