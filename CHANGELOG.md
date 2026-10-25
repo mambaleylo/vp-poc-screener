@@ -20868,3 +20868,15 @@ v0.99.728 - 🛡 bugs: a P/R / SMC / EMA position on Binance could be left WITHO
          price kept too (tp_px). Tests: t_bno_stop.py (refused at the open -> put on the next tick; refused for a minute ->
          closed; the break-even through the entry -> closed at once, nothing left on the book; the normal break-even
          unchanged), t_bn_others.py, t_dlm_binance.py, t_cstop_others.py, t_smc_bot.py and the rest of tools/winrate — OK.
+v0.99.729 - 🔁 P/R / SMC / EMA trading on Binance go by Binance, not Gate. The user: "проверь всё, что касается Гейта, ведь я на
+         Binance торгую теперь". Found: their live prices (the level's touch, P/R's entry / stop / take from the price, EMA's
+         +1R partial) were Gate's last price; their trades were walked on Gate's 1h candles (the take, the emergency stop,
+         SMC's +2R break-even and its check) — another exchange's prices than the position's: a take Gate reached and
+         Binance did not closed the record while the Binance position stayed open, no longer run by the bot (no time exit /
+         close stop / break-even) and holding the coin from ⚡; the reverse kept a closed position's record open with a
+         wrong R. Now (bn_routed): mod_px_map — Binance's last prices in the bot's coins' scale (1000-coins divided), Gate's
+         only for a coin Binance has not / no answer; mod_candles — Binance's closed candles (the research's too), Gate's as
+         the fallback; a record closed by the walk with the Binance position still open -> closed at the market as well
+         (bno_settle_close). ⚡ and its daily oscillator were Binance's already. Not on Binance: as before.
+         Tests: t_gate_bn.py (the prices / candles / fallbacks, the record WIN with the position still open -> closed,
+         already gone -> nothing sent) and the whole tools/winrate set — OK.

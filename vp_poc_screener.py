@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.728"
+APP_VERSION = "0.99.729"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31265,12 +31265,7 @@ def emx_watch_tick():
     now = time.time()
     if not armed or hour is None or now >= hour + 3600:
         return
-    px = {}
-    for t in get_tickers() or []:
-        try:
-            px[t["contract"]] = float(t.get("last") or 0)
-        except (TypeError, ValueError):
-            pass
+    px = mod_px_map("emw")   # v0.99.729 — Binance's when the trades are there
     for a in armed:
         p = px.get(a["symbol"])
         how = limit_touched(a["symbol"], a["side"], a["lv"], p, hour)
@@ -31301,7 +31296,7 @@ def emx_settle(now=None):
     changed = False
     for t in opn:
         try:
-            cs = [c for c in (get_candles_range(t["symbol"], "1h", t["hour"], int(now)) or []) if c["time"] + 3600 <= now and c["time"] >= t["hour"]]
+            cs = [c for c in mod_candles("emw", t["symbol"], "1h", t["hour"], int(now)) if c["time"] + 3600 <= now and c["time"] >= t["hour"]]
             if not cs:
                 continue
             s, fill, sl, tp = t["side"], t["entry"], t["sl"], t["tp"]
@@ -31320,6 +31315,8 @@ def emx_settle(now=None):
             r = ((pf * pr + (1 - pf) * rest) if took else rest) - (EMX_FEE + EMX_FUND * (k + 1) / 24) * fill / risk
             if kind == "TIME_EXIT" and t.get("real") and AUTOTRADE_ENABLED_EMW:
                 log_error(f"ema time exit {t['symbol']}: {close_position_for_mode('emw', t['symbol'], t['direction'])}")
+            elif t.get("real") and AUTOTRADE_ENABLED_EMW:   # v0.99.729
+                bno_settle_close("emw", t, kind)
             with _emx_lock:
                 t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + 3600), "r": round(r, 3), "part": took})
             changed = True
@@ -31341,12 +31338,7 @@ def emx_part_tick():
                 and now >= t["hour"] + 3600]
     if not todo:
         return
-    px = {}
-    for tk in get_tickers() or []:
-        try:
-            px[tk["contract"]] = float(tk.get("last") or 0)
-        except (TypeError, ValueError):
-            pass
+    px = mod_px_map("emw")   # v0.99.729 — the +1R by the position's exchange
     for t in todo:
         p = px.get(t["symbol"])
         s, lvl = t["side"], t["entry"] + t["side"] * float(t["part_r"]) * abs(t["entry"] - t["sl"])
@@ -32654,6 +32646,36 @@ def binance_recent(symbol, since):
     return (min(x[1] for x in sel), max(x[2] for x in sel)) if sel else None
 
 
+def mod_px_map(mode):
+    """v0.99.729 — the user: "проверь всё, что касается Гейта, я на Binance торгую теперь": the live prices a module's
+    watch / partial take / pending limit go by. Its real trades on Binance (bn_routed) -> Binance's last prices (the
+    exchange the position is on, the research's too), in the bot's coins' scale; Gate's for a coin Binance has not, or
+    when Binance does not answer. Was Gate's always: the level's touch, P/R's entry / stop / take and EMA's +1R by
+    another exchange's price than the position's"""
+    px = {}
+    for tk in get_tickers() or []:
+        try:
+            px[tk["contract"]] = float(tk.get("last") or 0) or None
+        except (TypeError, ValueError):
+            pass
+    if bn_routed(mode):
+        for bsym, v in (bnf_prices() or {}).items():
+            if bsym.endswith("USDT") and v:
+                sym, scl = _bn_gate_sym(bsym)
+                px[sym] = v / scl
+    return px
+
+
+def mod_candles(mode, symbol, interval, start, end):
+    """v0.99.729 — the closed candles a module's trades are walked on: Binance's when its real trades are there (the
+    exchange's own stop / take see those prices; the research's candles), Gate's otherwise / as a fallback"""
+    if bn_routed(mode):
+        cs = [c for c in (binance_klines(symbol, interval, start, end) or []) if not c.get("forming")]
+        if cs:
+            return cs
+    return get_candles_range(symbol, interval, start, end) or []
+
+
 def limit_touched(symbol, side, lv, gate_px, since):
     """v0.99.669 — has a limit at lv been reached: Gate's last price, or Binance's 1-min wick since `since`.
     -> "gate" / "binance" / None"""
@@ -32830,13 +32852,7 @@ def prx_scan_once(late=False):
         except Exception as e:
             log_error(f"p/r scan {sym}: {e}")
     best.sort(reverse=True)
-    live = {}
-    if cands:
-        for t in get_tickers() or []:
-            try:
-                live[t["contract"]] = float(t.get("last") or 0) or None
-            except (TypeError, ValueError):
-                pass
+    live = mod_px_map("prv") if cands else {}   # v0.99.729
     opened, cap = 0, int(m.get("side_cap") or 12)
     for c in sorted(cands, key=lambda c: -c["score"]):
         with _prx_lock:
@@ -32906,7 +32922,7 @@ def prx_settle(now=None):
     for t in opn:
         try:
             hrs = int(t["tf"]); sec = hrs * 3600
-            cs = [c for c in (get_candles_range(t["symbol"], "1h" if hrs == 1 else "4h", t["hour"], int(now)) or [])
+            cs = [c for c in mod_candles("prv", t["symbol"], "1h" if hrs == 1 else "4h", t["hour"], int(now))
                   if c["time"] + sec <= now and c["time"] >= t["hour"]]
             if not cs or cs[0]["time"] != t["hour"]:
                 if now > t["until"] + 6 * 3600:
@@ -32969,6 +32985,8 @@ def prx_settle(now=None):
             r = (s * (ex - e) - e * PRX_FEE - e * PRX_FUND * (k + 1) * hrs / 24) / risk
             if kind in ("TIME_EXIT", "STOP_CLOSE") and t.get("real") and AUTOTRADE_ENABLED_PRV:
                 log_error(f"p/r {kind.lower()} {t['symbol']}: {close_position_for_mode('prv', t['symbol'], t['direction'])}")
+            elif t.get("real") and AUTOTRADE_ENABLED_PRV:   # v0.99.729
+                bno_settle_close("prv", t, kind)
             with _prx_lock:
                 t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + sec), "r": round(r, 3)})
             changed = True
@@ -32990,12 +33008,7 @@ def prx_watch_tick():
                 and now < t["hour"] + int(t.get("wait") or 3) * 3600]
     if not todo or not rule:
         return
-    px = {}
-    for tk in get_tickers() or []:
-        try:
-            px[tk["contract"]] = float(tk.get("last") or 0)
-        except (TypeError, ValueError):
-            pass
+    px = mod_px_map("prv")   # v0.99.729 — the entry / stop / take by the position's exchange
     for t in todo:
         p = px.get(t["symbol"]); s = t["side"]
         how = limit_touched(t["symbol"], s, t["lv"], p, t["hour"]) if p else None
@@ -33966,12 +33979,7 @@ def smc_watch_tick():
     now = time.time()
     if not armed or hour is None or now >= hour + 3600:
         return
-    px = {}
-    for t in get_tickers() or []:
-        try:
-            px[t["contract"]] = float(t.get("last") or 0)
-        except (TypeError, ValueError):
-            pass
+    px = mod_px_map("smc")   # v0.99.729 — Binance's when the trades are there
     for a in armed:
         p = px.get(a["symbol"])
         how = limit_touched(a["symbol"], a["side"], a["lv"], p, hour)
@@ -34002,7 +34010,7 @@ def smc_settle(now=None):
     changed = False
     for t in opn:
         try:
-            cs = [c for c in (get_candles_range(t["symbol"], "1h", t["hour"], int(now)) or []) if c["time"] + 3600 <= now and c["time"] >= t["hour"]]
+            cs = [c for c in mod_candles("smc", t["symbol"], "1h", t["hour"], int(now)) if c["time"] + 3600 <= now and c["time"] >= t["hour"]]
             if not cs:
                 continue
             s, fill, sl, tp = t["side"], t["entry"], t["sl"], t["tp"]
@@ -34019,6 +34027,8 @@ def smc_settle(now=None):
             r = s * (ex - fill) / risk - (SMC_FEE + SMC_FUND * (k + 1) / 24) * fill / risk
             if kind == "TIME_EXIT" and t.get("real") and AUTOTRADE_ENABLED_SMC:
                 log_error(f"smc time exit {t['symbol']}: {close_position_for_mode('smc', t['symbol'], t['direction'])}")
+            elif t.get("real") and AUTOTRADE_ENABLED_SMC:   # v0.99.729
+                bno_settle_close("smc", t, kind)
             with _smc_lock:
                 t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + 3600), "r": round(r, 3)})
             changed = True
@@ -34047,7 +34057,7 @@ def smc_be_tick():
         t["be_chk"] = h_now
         try:
             s, lvl = t["side"], t["entry"] + t["side"] * SMC_BE_R * abs(t["entry"] - t["sl"])
-            cs = [c for c in (get_candles_range(t["symbol"], "1h", t["hour"] + 3600, int(now)) or [])
+            cs = [c for c in mod_candles("smc", t["symbol"], "1h", t["hour"] + 3600, int(now))
                   if c["time"] >= t["hour"] + 3600 and c["time"] + 3600 <= now]
             hit = next((c for c in cs if ((c["high"] >= lvl) if s > 0 else (c["low"] <= lvl))), None)
             if not hit:
@@ -35812,6 +35822,23 @@ def bno_close(mode, symbol, direction):
         _BNO["pos"].pop(symbol, None)
     bno_save()
     return {"ok": True, "ex": "binance"}
+
+
+def bno_settle_close(mode, t, kind):
+    """v0.99.729 — a real P/R / SMC / EMA trade's record closed by its walk (the take / the emergency stop / the
+    break-even): its Binance position, if still there (the exchange's trigger not hit — a tick away, the order of the
+    hour's moves), closed at the market too — the bot would no longer run it (no time exit / close stop / break-even)"""
+    with _bno_lock:
+        rec = _BNO["pos"].get(t["symbol"])
+    if not rec or rec.get("mode") != mode:
+        return
+    try:
+        amt = sum(x["amt"] for x in bnf_positions().get(rec["bsym"]) or [])
+        if amt and (amt > 0) == (rec["side"] > 0):
+            log_error(f"{mode} {kind.lower()} {t['symbol']}: the record closed, the Binance position still open -> "
+                      f"{close_position_for_mode(mode, t['symbol'], t['direction'])}")
+    except Exception as e:
+        log_error(f"{mode} settle close {t['symbol']}: {e}")
 
 
 def bno_part(mode, t, frac):
