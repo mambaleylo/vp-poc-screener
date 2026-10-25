@@ -20768,3 +20768,19 @@ v0.99.718 - the risks again, now the margin no longer binds: ⚡ 4% -> 4.5%, P/R
          (the open risk binds first). 📈 Breakout again (the margin had decided it): at 0.5% the worst 10% +43%, the median
          -5% — not taken. EXPECT_YEAR: the bundle (p10 $2 102, median $29 197, p90 $116 774, drawdown 61%, last 12 months
          $96 041), ⚡ alone at 4.5% (median $7 804). Tests: t_dlm_bot (the risk from dlm_risk()), the others — OK.
+
+v0.99.719 - 🧱 SMC: the stop to the entry once a closed 1h candle after the touch reached +2R. With cross margin (v0.99.717)
+         the open risk is the limit: a SMC trade at break-even holds none of it, the room goes to ⚡'s clustered trades.
+         The trade itself a little worse (+0.941R -> +0.909R: 15 of 317 trades came back to the entry). Checked twice: the
+         bot's own _cs_walk on every SMC trade's 1h candles gives the list's R on 317 of 317 and the research's break-even R
+         on 317 of 317 (be_verify.py); the bundle a year from $100 with all 317 SMC trades from the list (port_be5.py): the
+         median $29 169 -> $29 745, the last 12 months $95 869 -> $98 308, 2026 $53 578 -> $54 941, the worst 10% and the
+         drawdown the same, better in 81% of the 12-month windows (from 2024–2025: 100%, from 2023: 44%); the break-even
+         with the room NOT freed: $29 140 — the freed room is the whole gain. +1R / +1.5R not stable, P/R's worse. The
+         virtual trades (_cs_walk with SMC_BE_R, the model ver 4 ones), the real ones (smc_be_tick: a closed 1h candle at
+         +2R -> the exchange stop to the entry via part_take_on_exchange with nothing closed, once an hour a trade; the
+         same moment as the walk, not the first tick inside the hour), the backtest list (the 15 trades "be2", "be" = the
+         hour), EXPECT_YEAR. Found on the way: a test importing the bot from the repo re-downloads vp_bt_trades.json when
+         the bot file is newer (bt_trades) — the first commit of this had the old list; the list re-made and touched after
+         the last edit. Tests: t_bn_others (the walk; no move before a closed hour at +2R, then the exchange stop at the
+         entry, nothing closed), t_smc_bot, t_dlm_*, t_cstop_others, t_mod_ui — OK.

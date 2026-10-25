@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.718"
+APP_VERSION = "0.99.719"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28096,7 +28096,7 @@ _PROC_START = time.time()
 # account, the bot's leverage, the honest pools; tools/winrate port_expect.py): the worst 10% / the median / the best 10% of
 # the years, the median drawdown. "bundle" = ⚡ 4.5% + P/R 3% + SMC 1.5% + EMA 1% (on Binance together, v0.99.718), "dlm" = ⚡ alone
 EXPECT_YEAR = {"dlm": {"p10": 1620, "p50": 7804, "p90": 27800, "dd": 65, "last12": 22216},   # v0.99.718: cross 10x, the open risk <= 90%, ⚡ 4.5% (port_717d.py); v0.99.704: x the daily WaveTrend (port_osc3.py)
-               "bundle": {"p10": 2102, "p50": 29197, "p90": 116774, "dd": 61, "last12": 96041}}   # v0.99.718: ⚡ 4.5 + P/R 3 + SMC 1.5 + EMA 1, cross 10x, the open risk <= 90% (port_717d.py)   # v0.99.712: EMA 1% (port_w709.py); v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
+               "bundle": {"p10": 2107, "p50": 29745, "p90": 122816, "dd": 61, "last12": 98308}}   # v0.99.719: + SMC's break-even after +2R (port_be5.py, the SMC rows from the list); v0.99.718: ⚡ 4.5 + P/R 3 + SMC 1.5 + EMA 1, cross 10x, the open risk <= 90% (port_717d.py)   # v0.99.712: EMA 1% (port_w709.py); v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
 
 
 @app.route("/api/boot")
@@ -33072,6 +33072,13 @@ TELEGRAM_ALERTS_SMC = os.environ.get("VP_TG_ALERTS_SMC", "1") == "1"
 SMC_RISK_DEFAULT = 0.25   # % when the module's own risk field is empty: a quarter of EMA's (the portfolio test)
 SMC_POLL_SEC = 10
 SMC_FEE, SMC_FUND = 0.001, 0.0003
+# v0.99.719 — the stop to the entry once the price reached +2R (from the hour after the touch, as the research walk): the
+# trade itself a little worse (+0.94R -> +0.91R), but its open risk 0 from then — the room goes to ⚡'s clustered trades
+# (v0.99.717's open-risk cap): the bundle better in 81% of the 12-month windows (tools/winrate port_be5.py — all 317 SMC
+# trades of the list, the bot's own walk = the research on 317 of 317, be_verify.py: the median $29 169 -> $29 745, the last
+# 12 months $95 869 -> $98 308, 2026 $53 578 -> $54 941, the worst 10% and the drawdown the same; the break-even without
+# the freed room: no gain — the room is the whole gain). +1R / +1.5R: not stable
+SMC_BE_R = 2.0
 SMC_FNAMES = ["fam", "scope", "side", "datr", "hour", "dow", "dist_prev", "travel", "r24", "r72", "r7d", "b24", "b7d", "b_e50",
               "rsi_d", "rsi_h", "d_e50", "d_e200", "pos30", "pos90", "pos365", "vol24", "conf", "ema_near", "ema_conf",
               "round", "prog", "atr_h", "wick_prev"]
@@ -33590,7 +33597,7 @@ def smc_settle(now=None):
             hold = int(t.get("hold") or 72)
             ch = int(t.get("ch") or 0)   # v0.99.700 — the stop at a 4h close, the emergency one by a touch
             hx = abs(fill - t["hs"]) / risk if ch and t.get("hs") is not None else 1.0
-            res = _cs_walk(cs, s, fill, sl, tp, hold, ch, hx)
+            res = _cs_walk(cs, s, fill, sl, tp, hold, ch, hx, SMC_BE_R if t.get("rv", 0) >= 4 else 0.0)   # v0.99.719 — the break-even
             if not res:
                 continue
             kind, ex, k, _took = res
@@ -33606,6 +33613,41 @@ def smc_settle(now=None):
                                 note=f"SMC: {SMC_NAME.get(t.get('fam'), t.get('fam'))}")
         except Exception as e:
             log_error(f"smc trade {t.get('symbol')}: {e}")
+    if changed:
+        smc_save()
+
+
+def smc_be_tick():
+    """v0.99.719 — the real SMC trades: once a CLOSED 1h candle after the touch's hour reached +SMC_BE_R R, the exchange
+    stop to the entry (part_take_on_exchange with nothing closed) — exactly the rule the research and the virtual walk
+    (_cs_walk: the stop at the entry from the next hour) use, not the first tick at +2R inside the hour; its open risk
+    is none from then"""
+    now = time.time()
+    with _smc_lock:
+        todo = [t for t in _SMC["trades"] if t["status"] == "OPEN" and t.get("real") and not t.get("be_done") and now >= t["hour"] + 7200
+                and t.get("rv", 0) >= 4]
+    changed = False
+    h_now = int(now // 3600 * 3600)
+    for t in todo:
+        if t.get("be_chk") == h_now:   # once an hour a trade: a new closed candle comes only then
+            continue
+        t["be_chk"] = h_now
+        try:
+            s, lvl = t["side"], t["entry"] + t["side"] * SMC_BE_R * abs(t["entry"] - t["sl"])
+            cs = [c for c in (get_candles_range(t["symbol"], "1h", t["hour"] + 3600, int(now)) or [])
+                  if c["time"] >= t["hour"] + 3600 and c["time"] + 3600 <= now]
+            hit = next((c for c in cs if ((c["high"] >= lvl) if s > 0 else (c["low"] <= lvl))), None)
+            if not hit:
+                continue
+            note = part_take_on_exchange("smc", t, 0.0)
+            with _smc_lock:
+                t["be_done"] = True
+            changed = True
+            log_error(f"smc break-even {t['symbol']}: {note} (+{SMC_BE_R:g}R in the hour {hit['time']})")
+            if TELEGRAM_ALERTS_SMC and note != "no position":
+                send_telegram(f"🧱 {t['symbol'].replace('_USDT', '')}: +{SMC_BE_R:g}R — стоп перенесён в безубыток", category="smc")
+        except Exception as e:
+            log_error(f"smc break-even {t['symbol']}: {e}")
     if changed:
         smc_save()
 
@@ -33630,6 +33672,9 @@ def smc_loop():
                     last_hour = h
                 with live_http():
                     smc_watch_tick()
+                if AUTOTRADE_ENABLED_SMC:   # v0.99.719
+                    with live_http():
+                        smc_be_tick()
         except Exception as e:
             log_error(f"smc_loop: {e}")
             with _smc_lock:
@@ -40786,7 +40831,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ 🧱 SMC</div>
-          <div class="sub">реальная сделка по рынку при касании уровня (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 2 дневных ATR и тейк 3R сразу на бирже, выход по закрытию 4ч-свечи за 1 дневным ATR, через 96 ч бот закрывает сделку. Риск — поле «🧱» выше (пусто = 1.5% на Binance)</div>
+          <div class="sub">реальная сделка по рынку при касании уровня (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 2 дневных ATR и тейк 3R сразу на бирже, выход по закрытию 4ч-свечи за 1 дневным ATR, после +2R стоп на бирже переносится в безубыток (освобождает общий риск для ⚡), через 96 ч бот закрывает сделку. Риск — поле «🧱» выше (пусто = 1.5% на Binance)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeSmc"><span class="switchSlider"></span></label>
       </div>
@@ -43923,7 +43968,7 @@ const BT_SMC = {fvg4_bull: 'FVG 4ч ↑', fvg4_bear: 'FVG 4ч ↓', fvgd_bull: '
 const BT_SMC_GRP = {fvg4: 'FVG 4ч', fvgd: 'FVG день', fvgw: 'FVG неделя', swd: 'свинг дня', sww: 'свинг недели', obd: 'ордерблок дня', ob4: 'ордерблок 4ч'};
 const btLabel = t => t.lvl ? (BT_SMC[t.lvl] || t.lvl) : (t.tf ? `EMA ${t.n} · ${BT_EMA_TF[t.tf] || t.tf}` : (BT_CH[t.c] || t.c) + (t.st ? (String(t.st).startsWith('close') ? ' · от закрытия' : ' · за тенью') : ''));   // v0.99.689 — ⚡ the stream
 const btKey = t => t.lvl ? t.lvl.split('_')[0] : (t.tf || t.c);
-const BT_KIND = {fail: 'ложный пробой', FAILED: 'ложный пробой', be: 'безубыток после частичной', stop: 'стоп', hard: 'аварийный стоп', STOP_CLOSE: 'стоп по закрытию', HARD_STOP: 'аварийный стоп', take: 'тейк', trend: 'конец тренда', time: 'по времени', LOSS: 'стоп', WIN: 'тейк', TREND_END: 'конец тренда',
+const BT_KIND = {fail: 'ложный пробой', FAILED: 'ложный пробой', be: 'безубыток после частичной', be2: 'безубыток после +2R', BREAKEVEN: 'безубыток', stop: 'стоп', hard: 'аварийный стоп', STOP_CLOSE: 'стоп по закрытию', HARD_STOP: 'аварийный стоп', take: 'тейк', trend: 'конец тренда', time: 'по времени', LOSS: 'стоп', WIN: 'тейк', TREND_END: 'конец тренда',
   TIME_EXIT: 'по времени', BREAKEVEN: 'безубыток', TIME: 'по времени'};
 function btSection(mod, title) {
   const body = window._btData[mod] ? btListHtml(mod) : '<div class="dim">загружаю…</div>';

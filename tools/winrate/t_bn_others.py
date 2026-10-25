@@ -177,6 +177,27 @@ cm = [c for c in X["calls"] if c[1] == "/fapi/v1/order" and c[2].get("type") == 
 left = [a for a in X["algos"].values() if a["symbol"] == "BBBUSDT" and a["algoStatus"] == "NEW"]
 res["time exit at the market"] = (c5.get("ok") and cm and cm[0][2]["side"] == "SELL" and float(cm[0][2]["quantity"]) == rest
                                   and not left and "BBB_USDT" not in V._BNO["pos"])
+# v0.99.719 — SMC's break-even: (a) the walk — +2R reached, then back at the entry -> out at the entry; (b) a real SMC
+# position on Binance: the price at +2R -> its exchange stop at the entry, nothing closed
+cs_ = [{"time": 0, "open": 10.0, "high": 10.2, "low": 9.9, "close": 10.1}, {"time": 3600, "open": 10.1, "high": 11.05, "low": 10.1, "close": 10.9},
+       {"time": 7200, "open": 10.9, "high": 10.95, "low": 9.95, "close": 10.0}]
+w_be = V._cs_walk(cs_, 1, 10.0, 9.5, 11.5, 96, 4, 2.0, V.SMC_BE_R); w_no = V._cs_walk(cs_, 1, 10.0, 9.5, 11.5, 96, 4, 2.0, 0.0)
+X["calls"].clear(); hb = int(time.time()) // 3600 * 3600 - 3 * 3600   # the touch's hour; +2R inside the hour after it
+CND = {"AAA_USDT": [{"time": hb + 3600, "open": 10.1, "high": 10.9, "low": 10.0, "close": 10.8}]}   # first: not yet +2R (11)
+_gcr = V.get_candles_range; V.get_candles_range = lambda sym, tf, a_, b_: [c for c in CND.get(sym, []) if a_ <= c["time"] <= b_]
+V._SMC["trades"] = [{"id": "s1", "symbol": "AAA_USDT", "side": 1, "direction": "LONG", "entry": 10.0, "px": 10.0, "sl": 9.5, "tp": 11.5, "hour": hb,
+                     "status": "OPEN", "real": True, "rv": V.SMC_MODEL_VER}]
+V.AUTOTRADE_ENABLED_SMC = True; V.smc_save = lambda: None
+V.smc_be_tick(); not_yet = not V._SMC["trades"][0].get("be_done") and not [c for c in X["calls"] if c[1] == "/fapi/v1/algoOrder"]
+CND["AAA_USDT"].append({"time": hb + 7200, "open": 10.8, "high": 11.05, "low": 10.7, "close": 10.95})   # a closed hour reached +2R
+V._SMC["trades"][0].pop("be_chk", None); V.smc_be_tick(); V.get_candles_range = _gcr
+newst = [a_ for a_ in X["algos"].values() if a_["symbol"] == "AAAUSDT" and a_["type"] == "STOP_MARKET" and a_["algoStatus"] == "NEW"]
+mk_be = [c for c in X["calls"] if c[1] == "/fapi/v1/order" and c[2].get("type") == "MARKET"]
+res["SMC break-even after +2R (walk + exchange stop)"] = (not_yet and w_be and w_be[0] == "BREAKEVEN" and abs(w_be[1] - 10.0) < 1e-9 and w_no is None
+                                                         and V._SMC["trades"][0].get("be_done") and len(newst) == 1 and newst[0]["triggerPrice"] == "10"
+                                                         and not mk_be and V._BNO["pos"]["AAA_USDT"].get("sl_px") == 10.0)
+print("   be:", w_be, w_no, [a_["triggerPrice"] for a_ in newst], len(mk_be))
+V._SMC["trades"] = []
 # (6) the exchange's stop closed AAA: the take off, the record dropped
 X["pos"]["AAAUSDT"] = 0.0; V._BNO["pos"]["AAA_USDT"]["t"] -= 120
 V.bno_tick()
