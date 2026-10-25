@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.715"
+APP_VERSION = "0.99.716"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -34582,7 +34582,7 @@ def dlm_scan(t_bar, st, cu=False):
                     continue
                 new.append({"id": f"dlm_{sym}_{s}_{t_bar}" + ("" if st["name"] == "wick4h" else "_" + st["name"]), "symbol": sym, "side": s, "lv": lv,
                             "atr": a, "score": round(sc, 4), "bs": bs, "st": st["name"], "t0": t_bar, "until": t_bar + int(st.get("alive_bars", 4)) * bs,
-                            "px": bars[-1]["close"], "status": "OPEN", "real": None, **({"cu": True} if cu else {})})
+                            "px": bars[-1]["close"], "status": "OPEN", "real": None, **({"cu": True, "from_cu": True} if cu else {})})
         except Exception as e:
             log_error(f"dlm scan {sym} {tf}: {e}")
     new.sort(key=lambda o: -o["score"])
@@ -34618,7 +34618,8 @@ def _dlm_why_virtual(o, t=None):
     if tt and tt + 3600 <= _PROC_START:
         return f"цена дошла до лимитки, когда бот был выключен (до запуска {time.strftime('%d.%m %H:%M', time.localtime(_PROC_START))}) — сделка только для статистики"
     cu = _DLM.get("catchup") or {}
-    if tt and cu.get("t") and (cu.get("run") or tt < int(cu.get("end") or 0)) and not r.get("id"):
+    if tt and o.get("from_cu") and cu.get("t") and (cu.get("run") or tt < int(cu.get("end") or 0)) and not r.get("id"):   # v0.99.716 — only
+        # an order of the catch-up itself (the others are armed during it since v0.99.715: their reason is their own)
         return "цена дошла до лимитки, пока бот после запуска пересчитывал свечи — на биржу она не успела"
     if not o:
         return "причина не сохранилась (лимитки уже нет в памяти бота)"
@@ -35963,6 +35964,20 @@ def dlm_catch_up(now=None):
             dlm_scan(t_close, st, cu=True)   # v0.99.715 — "cu": not armed until the loop's settle checked its past bars
         except Exception as e:
             log_error(f"dlm catch-up {st.get('name')} {t_close}: {e}")
+        # v0.99.716 — each catch-up order checked at once on its closed 1h candles: not reached since its bar -> armed like
+        # any other right away (was: all of them waited for the whole catch-up — minutes in which a limit could not go
+        # on the exchange); reached while the bot was off -> stays for the settle (the virtual trade)
+        with _dlm_lock:
+            fresh = [o for o in _DLM["orders"] if o.get("cu") and not o.get("cu_chk") and int(o.get("bs") or 900) > 3600]
+        for o in fresh:
+            o["cu_chk"] = True
+            try:
+                h = _dlm_hit(o, time.time())
+            except Exception as e:
+                log_error(f"dlm catch-up check {o['symbol']}: {e}")
+                h = None
+            if h is False:
+                o.pop("cu", None)
         _DLM["catchup"]["done"] += 1
     _DLM["catchup"].update(run=False, end=int(time.time()))
     _DLM["cu_settle"] = True   # v0.99.715 — the loop settles them (its own thread: no two settles at once), then they may be armed

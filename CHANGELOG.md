@@ -20729,3 +20729,15 @@ v0.99.715 - every trade findable, the parallel ⚡ stream, the start's catch-up 
          counts the real / virtual ones. Tests: t_dlm_binance (the swap, the reasons, the coin held by SMC), t_dlm_bot (the
          catch-up orders wait for the settle), t_mod_ui (new: the three tabs, 14 open + a closed virtual one), t_dlm_ui,
          t_bn_others, t_cstop_others, t_smc_bot, t_bn_source, t_dlm_coins — OK.
+
+v0.99.716 - ⚡: the start's catch-up orders checked one by one; the catch-up reason only for them. The user: "исправь то, что ты
+         выше говорил": (1) since v0.99.715 the catch-up's orders all waited for the whole catch-up (minutes) — now each is
+         checked on its closed 1h candles right after its scan: never reached since its bar -> armed like any other at
+         once; reached while the bot was off -> kept for the loop's settle (the virtual trade, no real limit on a signal
+         already traded). (2) "цена дошла до лимитки, пока бот после запуска пересчитывал свечи" only for an order of
+         the catch-up itself ("from_cu") — the others are armed during it, their reason is their own. The lab: 📈 Breakout
+         as the bundle's 5th module (+0.67R a trade, uncorrelated with ⚡, positive on ⚡'s worst days) — the worst 10%
+         better ($1 680 -> $2 611 at 1%) but the median lower ($15 948 -> $13 682): its multi-day positions hold the
+         margin ⚡'s clustered (best) trades need; not blocking the coins — lower still. Rejected; 🌊 Cascade likewise.
+         Tests: t_dlm_bot (a reached / a never-reached catch-up order), t_dlm_binance (the reason), t_dlm_ui, t_mod_ui,
+         t_bn_others, t_cstop_others, t_smc_bot — OK.

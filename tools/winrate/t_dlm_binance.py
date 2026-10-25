@@ -326,6 +326,12 @@ held_ok = C3.get("real") is None and "SMC" in (C3.get("hold") or "")
 why = V._dlm_why_virtual(C3, {"t1h": int(time.time())})
 res["coin held by SMC: waits, the reason in the virtual trade"] = held_ok and "SMC" in why
 X["pos"].pop("FFFUSDT", None); V._BNO["pos"].clear(); V._DLM["orders"] = []
+# v0.99.716 — "пока бот пересчитывал свечи" only for an order of the catch-up itself
+cu0 = V._DLM.get("catchup"); V._DLM["catchup"] = {"t": int(time.time()) - 60, "run": True, "done": 1, "of": 8}
+o_ = {"symbol": "GGG_USDT", "side": 1, "lv": 1.0, "t0": int(time.time()) - 3600, "real": None, "hold": "заняты все 20 мест: сделок ⚡ на бирже 12, лимиток 8"}
+w1 = V._dlm_why_virtual(o_, {"t1h": int(time.time())}); w2 = V._dlm_why_virtual(dict(o_, from_cu=True), {"t1h": int(time.time())})
+res["the catch-up reason only for the catch-up's orders"] = "20 мест" in w1 and "пересчитывал" in w2
+V._DLM["catchup"] = cu0
 # v0.99.708 — (a) the limit goes with its stop + take (closePosition triggers) and a GTD; (b) "another phone": the state lost ->
 # the bot takes over its limit (with its triggers), a ⚡ position (stop + take limit) and an SMC-like one (stop + take
 # triggers: take / stop = 1.5), nothing placed or cancelled on the exchange

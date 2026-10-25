@@ -87,8 +87,21 @@ cu_ok = bool(got) and got[0]["until"] == t["t"] + 4 * bs and len(V._DLM["orders"
 print(f"(3b) catch-up at the start: the order of a bar closed before {bool(got)} · no copies on a second run {len(V._DLM['orders']) == n1} {cu_ok}")
 # v0.99.715 — the catch-up's orders not armed before the loop's settle checked their past bars ("cu"), then the flag off
 w = [x for x in V._DLM["orders"] if x["status"] == "OPEN"]
-cu2 = bool(w) and all(x.get("cu") for x in w) and V._DLM.get("cu_settle") is True
+# v0.99.716 — each checked at once: not reached on its closed 1h candles -> no "cu" (armed right away), reached -> "cu" kept
+cu2 = (bool(w) and all(x.get("from_cu") and x.get("cu_chk") for x in w) and V._DLM.get("cu_settle") is True
+       and all(bool(x.get("cu")) == (V._dlm_hit(x, time.time()) is not False) for x in w) and got and got[0].get("cu"))   # the backtest's order: reached
+print("   catch-up orders:", len(w), "kept for the settle:", sum(1 for x in w if x.get("cu")))
 V._DLM.pop("cu_settle", None)
+# ... and an order its price never reached: armable at once (the scan faked: one reached copy, one far level)
+_scan0 = V.dlm_scan
+def _fake_scan(t_bar, st, cu=False):
+    if st["name"] != got[0]["st"] or t_bar != got[0]["t0"]: return
+    for tag, k in (("near", 1.0), ("far", 0.01 if got[0]["side"] > 0 else 100.0)):
+        V._DLM["orders"].append(dict(got[0], id=got[0]["id"] + tag, lv=got[0]["lv"] * k, status="OPEN", cu=True, from_cu=True, cu_chk=False, real=None))
+V.dlm_scan = _fake_scan; V.dlm_catch_up(now=t["t"] + bs + 600); V.dlm_scan = _scan0; V._DLM.pop("cu_settle", None)
+o_near = next(x for x in V._DLM["orders"] if x["id"] == got[0]["id"] + "near"); o_far = next(x for x in V._DLM["orders"] if x["id"] == got[0]["id"] + "far")
+cu3 = o_near.get("cu") is True and not o_far.get("cu") and o_far.get("cu_chk")
+print(f"   reached -> waits for the settle {o_near.get('cu') is True} · never reached -> armable at once {not o_far.get('cu')}"); cu2 = cu2 and cu3
 print(f"(3c) catch-up orders wait for the settle: {cu2}"); cu_ok = cu_ok and cu2
 ok &= cu_ok
 # (4) the real path on a fake exchange (Gate)
