@@ -20880,3 +20880,13 @@ v0.99.729 - 🔁 P/R / SMC / EMA trading on Binance go by Binance, not Gate. The
          (bno_settle_close). ⚡ and its daily oscillator were Binance's already. Not on Binance: as before.
          Tests: t_gate_bn.py (the prices / candles / fallbacks, the record WIN with the position still open -> closed,
          already gone -> nothing sent) and the whole tools/winrate set — OK.
+v0.99.730 - 📝 the texts and the rest of Gate for P/R / SMC / EMA on Binance. The user: "поправь слова тогда, и тексты вообще".
+         (1) the coins they scan: Gate's top by volume decided (a Gate outage left them with no coins at all, a coin off
+         Gate's top skipped) — on Binance now all their tested coins, as ⚡'s (_research_syms(mode=...)). (2) their tabs
+         showed Gate's default risk (0.25-0.5%) while the trades took Binance's (2-3%): the real one now ("bn" in the
+         stats); "сделка на Gate по рынку" -> the exchange they trade on; P/R's "из топа Gate" -> "все, что торгуются на
+         Binance". (3) Telegram: "цена на Gate уже на XR" -> "цена уже на XR", SMC's "вход по рынку Gate" gone. (4) the
+         risk fields' hints and the SMC settings line: the v0.99.727 defaults (SMC 2.5%, EMA 2%). The Gate-only modules
+         (Neuro, Cascade, Breakout, Zones) keep their Gate wording — they trade there. Tests: t_gate_bn.py (+ the coins on
+         Binance with Gate down / Gate's top otherwise), t_smc_bot.py / t_dlm_bot.py (their stubs take the new argument),
+         t_mod_ui.py, t_bn_others.py, t_cstop_others.py, t_dlm_ui.py — OK.

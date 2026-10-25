@@ -22,6 +22,11 @@ cs = V.mod_candles("smc", "AAA_USDT", "1h", 0, 7200)
 res["Binance empty -> Gate's"] = cs and cs[0]["open"] == 9
 routed["v"] = False; calls.clear(); V.mod_candles("smc", "AAA_USDT", "1h", 0, 7200)
 res["not on Binance -> Gate's"] = calls and calls[-1][0] == "gate"
+# v0.99.730 — the coins: on Binance all the tested ones (no Gate list asked), else Gate's top as before
+routed["v"] = True; V.get_tickers = lambda: (_ for _ in ()).throw(RuntimeError("Gate down"))
+res["coins on Binance: all tested, Gate not asked"] = V._research_syms(("AAA_USDT", "BBB_USDT"), mode="smc") == ["AAA_USDT", "BBB_USDT"]
+routed["v"] = False; V.get_tickers = lambda: [{"contract": "AAA_USDT", "volume_24h_quote": "9"}, {"contract": "ZZZ_USDT", "volume_24h_quote": "5"}]
+res["not on Binance: Gate's top"] = V._research_syms(("AAA_USDT", "BBB_USDT"), mode="smc") == ["AAA_USDT"]
 # the record closed by the walk (the take reached on the candles) while the Binance position is still open -> closed
 routed["v"] = True
 h0 = int(time.time()) // 3600 * 3600 - 5 * 3600

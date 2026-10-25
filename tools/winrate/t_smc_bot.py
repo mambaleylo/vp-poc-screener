@@ -54,7 +54,7 @@ def binance_name(gs):
     return None, 1
 picks = [t for t in BT if t["t"] >= 1767225600][:6]
 V.RESEARCH_COINS_127 = tuple(sorted({t["s"] for t in picks}))
-V._research_syms = lambda coins, n=300: list(coins)
+V._research_syms = lambda coins, n=300, mode=None: list(coins)
 NOW = {"t": 0}
 def fake_closed(sym, tf, sec, n, now):
     src = "BTCUSDT" if sym == "BTC_USDT" else binance_name(sym)[0]

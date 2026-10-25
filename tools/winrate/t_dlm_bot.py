@@ -60,7 +60,7 @@ V._dlm_closed = fake_closed; V.get_candles_range = fake_range; V.bn_closed = lam
 V.dlm_save = lambda: None; V.heartbeat = lambda *a, **k: None; V.AUTOTRADE_ENABLED_DLM = False; V.DLM_BINANCE = False
 hits = 0
 for t in picks:
-    V.RESEARCH_COINS_211 = V.RESEARCH_COINS_127 = (t["s"],); V._research_syms = lambda coins, n=300: list(coins)
+    V.RESEARCH_COINS_211 = V.RESEARCH_COINS_127 = (t["s"],); V._research_syms = lambda coins, n=300, mode=None: list(coins)
     V._DLM.update({"orders": [], "trades": []})
     V.dlm_scan(t["t"], V._dlm_stream(t["st"]))
     o = [x for x in V._DLM["orders"] if x["side"] == t["d"]]

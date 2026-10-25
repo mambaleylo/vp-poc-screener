@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.729"
+APP_VERSION = "0.99.730"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -29541,9 +29541,13 @@ def _own_top_syms(n=None):
     return [s for _, s in sorted(vols, reverse=True)[:n or ZONES_OWN_TOP]]
 
 
-def _research_syms(coins, n=300):
+def _research_syms(coins, n=300, mode=None):
     """v0.99.673 — Gate's top n by 24h volume, only the coins a module was tested on (the user's screenshot: MSTR / CRCL —
-    stock perps — near the P/R threshold; the models were trained on crypto only)"""
+    stock perps — near the P/R threshold; the models were trained on crypto only). v0.99.730 — a module trading on
+    Binance (mode, bn_routed): all its tested coins (Binance's own, as ⚡'s) — Gate's list no longer decides, and a Gate
+    outage no longer leaves it without coins"""
+    if mode and bn_routed(mode):
+        return list(coins)
     cs = set(coins)
     return [s for s in _own_top_syms(n) if s in cs]
 
@@ -31133,7 +31137,7 @@ def emx_arm():
     bd1 = _zm_closed("BTC_USDT", "1d", 86400, 3000, now)
     bt = {"cs": bh1, "t": [c["time"] for c in bh1], "S": emx_series(bh1, bh4, bd1)}
     armed, coins = [], 0
-    for sym in _research_syms(RESEARCH_COINS_127):   # v0.99.673 — the tested coins only (was Gate's top EMX_TOP)
+    for sym in _research_syms(RESEARCH_COINS_127, mode="emw"):   # v0.99.673 — the tested coins only (was Gate's top EMX_TOP); v0.99.730 — on Binance all
         heartbeat("emx_loop")   # v0.99.619 — alive while the hourly levels are counted
         try:
             h1, h4, d1 = _emx_coin(sym, now)
@@ -31253,7 +31257,7 @@ def emx_fire(a, t_touch, live_px=None, how=None):
         send_telegram(f"{'🟢' if a['side'] > 0 else '🔴'} {a['symbol'].replace('_USDT', '')} {direction} · EMA {a['n']} ({EMX_TF_NAME[a['tf']]}) — " + (f"лимитка за EMA ({a['ema']:.6g})" if a.get("ema") and a["ema"] != a["lv"] else "касание") + "\n"
                       f"вход {a['lv']:.6g} · стоп {a['sl']:.6g} ({pct(a['sl']):+.1f}%) · тейк {a['tp']:.6g} ({pct(a['tp']):+.1f}%) · держать до {int(m.get('rule', {}).get('hold_h', 24))} ч\n"
                       + (f"на {a['lv'] + a['side'] * tr['part_r'] * abs(a['lv'] - a['sl']):.6g} закрыть {round(tr['part_f'] * 100)}% и стоп в безубыток\n" if tr["part_r"] else "") +
-                      f"оценка модели {a['score']} · " + ("💰 сделка на бирже" if tr["real"] else (f"без сделки: цена на Gate уже на {tr['late']}R от лимитки" if tr.get("late") else "без сделки (только сигнал)"))
+                      f"оценка модели {a['score']} · " + ("💰 сделка на бирже" if tr["real"] else (f"без сделки: цена уже на {tr['late']}R от лимитки" if tr.get("late") else "без сделки (только сигнал)"))
                       + (" · касание по Binance" if how == "binance" else ""), category="emw")
 
 
@@ -31402,7 +31406,7 @@ def emx_stats():
     return {"on": EMW_ENABLED, "auto": AUTOTRADE_ENABLED_EMW, "tg": TELEGRAM_ALERTS_EMW,
             "sel": {"coins": sel_n, "of": len(m.get("coins") or {}), "rule": cr, "research": m.get("coin_research"),
                     "n_all": len(rs_all), "avg_all": round(sum(rs_all) / len(rs_all), 3) if rs_all else None},
-            "risk": MODULE_RISK_PCT.get("emw") or EMX_RISK_DEFAULT,
+            "risk": MODULE_RISK_PCT.get("emw") or (BN_OTHERS_RISK["emw"] if bn_routed("emw") else EMX_RISK_DEFAULT), "bn": bn_routed("emw"),   # v0.99.730
             "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap", "sides", "max_d_ema200", "tf_margin", "btc_ema50", "tfs", "ls_min_d24")} if m else None,
             "err": err, "scan": scan, "armed": armed[:40], "armed_n": len(armed),
             "open": [dict(t, why=mod_why_virtual(t, AUTOTRADE_ENABLED_EMW)) for t in trades if t["status"] == "OPEN"][-30:],   # v0.99.715 — the reason of a virtual one
@@ -32831,7 +32835,7 @@ def prx_scan_once(late=False):
     t_hour = int(now // 3600 * 3600)
     ref = {"btc": _zm_closed("BTC_USDT", "1h", 3600, 1000, now), "eth": _zm_closed("ETH_USDT", "1h", 3600, 1000, now)}
     cands, coins, events, best, btc_skip = [], 0, 0, [], 0
-    for sym in _research_syms(RESEARCH_COINS_211, PRX_TOP + 100):   # v0.99.673 — the 211 tested coins in Gate's top 300
+    for sym in _research_syms(RESEARCH_COINS_211, PRX_TOP + 100, mode="prv"):   # v0.99.673 — the 211 tested coins in Gate's top 300; v0.99.730 — on Binance all
         heartbeat("prx_loop")
         try:
             evs = prx_coin_events(sym, now, ref, t_hour, tuple(m.get("tfs") or PRX_TFS))
@@ -33069,7 +33073,7 @@ def prx_stats():
     t0 = min((t["hour"] for t in trades), default=None)
     weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
     return {"on": PRV_ENABLED, "auto": AUTOTRADE_ENABLED_PRV, "tg": TELEGRAM_ALERTS_PRV, "top": PRX_TOP,
-            "risk": MODULE_RISK_PCT.get("prv") or PRX_RISK_DEFAULT,
+            "risk": MODULE_RISK_PCT.get("prv") or (BN_OTHERS_RISK["prv"] if bn_routed("prv") else PRX_RISK_DEFAULT), "bn": bn_routed("prv"),   # v0.99.730
             "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "label_rule", "research", "side_cap", "train")} | {"btc_filter": m.get("btc_filter") or PRX_BTC_FILTER, "btc_filter_1h": m.get("btc_filter_1h") or PRX_BTC_FILTER_1H,
                                                          "tfs": m.get("tfs") or list(PRX_TFS)} if m else None,
             "err": err, "scan": scan, "near": last,
@@ -33886,7 +33890,7 @@ def smc_arm(late=False):
     bd1 = _zm_closed("BTC_USDT", "1d", 86400, 3000, t_hour)
     rule = m.get("rule") or {}
     armed, coins, cands, best = [], 0, 0, []
-    for sym in _research_syms(RESEARCH_COINS_127):
+    for sym in _research_syms(RESEARCH_COINS_127, mode="smc"):   # v0.99.730 — on Binance all the tested coins
         heartbeat("smc_loop")
         try:
             h1 = _zm_closed(sym, "1h", 3600, 1000, t_hour)
@@ -33968,8 +33972,8 @@ def smc_fire(a, t_touch, live_px=None, how=None):
         pct = lambda p: (p - a["lv"]) / a["lv"] * 100
         send_telegram(f"🧱 {a['symbol'].replace('_USDT', '')} {direction} · SMC: {SMC_NAME.get(a['fam'], a['fam'])} — лимитка на уровне\n"
                       f"вход {a['lv']:.6g} · стоп {a['sl']:.6g} ({pct(a['sl']):+.1f}%) · тейк {a['tp']:.6g} ({pct(a['tp']):+.1f}%) · держать до {hold} ч\n"
-                      f"оценка модели {a['score']} · " + ("💰 сделка на бирже" if tr["real"] else (f"без сделки: цена на Gate уже на {tr['late']}R от лимитки" if tr.get("late") else "без сделки (только сигнал)"))
-                      + (" · касание по Binance, вход по рынку Gate" if how == "binance" else ""), category="smc")
+                      f"оценка модели {a['score']} · " + ("💰 сделка на бирже" if tr["real"] else (f"без сделки: цена уже на {tr['late']}R от лимитки" if tr.get("late") else "без сделки (только сигнал)"))
+                      + (" · касание по минутной свече Binance" if how == "binance" else ""), category="smc")
 
 
 def smc_watch_tick():
@@ -34116,7 +34120,7 @@ def smc_stats():
     t0 = min((t["t_in"] for t in trades), default=None)
     weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
     return {"on": SMC_ENABLED, "auto": AUTOTRADE_ENABLED_SMC, "tg": TELEGRAM_ALERTS_SMC,
-            "risk": MODULE_RISK_PCT.get("smc") or SMC_RISK_DEFAULT,
+            "risk": MODULE_RISK_PCT.get("smc") or (BN_OTHERS_RISK["smc"] if bn_routed("smc") else SMC_RISK_DEFAULT), "bn": bn_routed("smc"),   # v0.99.730
             "model": {k: m.get(k) for k in ("ver", "q", "thr", "trained_to", "rule", "research", "side_cap", "smc_fams")} if m else None,
             "names": SMC_NAME, "err": err, "scan": scan, "armed": armed[:40], "armed_n": len(armed),
             "open": [dict(t, why=mod_why_virtual(t, AUTOTRADE_ENABLED_SMC)) for t in trades if t["status"] == "OPEN"][-30:],   # v0.99.715 — the reason of a virtual one
@@ -41230,13 +41234,13 @@ INDEX_HTML = """<!doctype html>
           <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro 0.5" title="Нейро: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSnr" min="0.1" max="100" step="0.5" placeholder="S/R" title="S/R Zones" style="display:none;width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R 3" title="Peak Reversal: пусто — 3% на Binance (0.5% на Gate)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctEmw" min="0.1" max="100" step="0.5" placeholder="EMA 1" title="EMA — касания: пусто — 1% на Binance (0.5% на Gate)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctEmw" min="0.1" max="100" step="0.5" placeholder="EMA 2" title="EMA — касания: пусто — 2% на Binance (0.5% на Gate)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctZones" min="0.1" max="100" step="0.5" placeholder="Зоны 0.5" title="Зоны: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctZm" min="0.1" max="100" step="0.1" placeholder="🎯 0.5" title="🎯 Сильные зоны: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctRbx" min="0.1" max="100" step="0.1" placeholder="📈 0.5" title="📈 Пробой: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctCas" min="0.1" max="100" step="0.1" placeholder="🌊 0.5" title="🌊 Каскад: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctDlm" min="0.1" max="100" step="0.05" placeholder="⚡ 4.5" title="⚡ Лимитки 4ч+2ч: пусто — 4.5% на сделку, до 20 сделок сразу; больше 10% не берётся" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctSmc" min="0.1" max="100" step="0.05" placeholder="🧱 1.5" title="🧱 SMC: пусто — 1.5% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctSmc" min="0.1" max="100" step="0.05" placeholder="🧱 2.5" title="🧱 SMC: пусто — 2.5% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
         </div>
       </div>
       <div class="settingRow subRow">
@@ -41326,7 +41330,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ 🧱 SMC</div>
-          <div class="sub">реальная сделка по рынку при касании уровня (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 2 дневных ATR и тейк 3R сразу на бирже, выход по закрытию 4ч-свечи за 1 дневным ATR, после +2R стоп на бирже переносится в безубыток (освобождает общий риск для ⚡), через 96 ч бот закрывает сделку. Риск — поле «🧱» выше (пусто = 1.5% на Binance)</div>
+          <div class="sub">реальная сделка по рынку при касании уровня (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 2 дневных ATR и тейк 3R сразу на бирже, выход по закрытию 4ч-свечи за 1 дневным ATR, после +2R стоп на бирже переносится в безубыток (освобождает общий риск для ⚡), через 96 ч бот закрывает сделку. Риск — поле «🧱» выше (пусто = 2.5% на Binance)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeSmc"><span class="switchSlider"></span></label>
       </div>
@@ -44357,7 +44361,7 @@ async function refreshEmw() {   // v0.99.618 — «EMA — касания»: the
     top += `<div class="zsub">Проверка на истории — каждый год модель не видела. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>сделка до <b>${Math.round((rule.hold_h || 24))} ч</b></span><span>просадка до <b>${dd}R</b></span></div>
-      <div class="zsub">Вход — ${rule.deep_datr ? `лимиткой на <b>${rule.deep_datr} дневного хода за EMA</b> (не дошла за час касания — сделки нет; касание ловится и по минутным свечам Binance, на которых считан бэктест, — сделка на Gate по рынку)` : 'на EMA'}, стоп — <b>${rule.stop_datr} дневного хода</b> монеты за входом${rule.stop_close_h ? ` — если ${rule.stop_close_h}-часовая свеча закрылась за ним (фитили не выбивают; аварийный стоп на бирже — ${+(rule.stop_datr * (rule.hard_x || 2)).toFixed(2)} дневного хода)` : ""}${rule.part_r ? `, на <b>+${rule.part_r}R закрыть ${Math.round(rule.part_f * 100)}%</b> и стоп в безубыток` : ''}, тейк — <b>${rule.take_r} риска</b>. Не больше ${m.side_cap || 12} сделок в одну сторону.
+      <div class="zsub">Вход — ${rule.deep_datr ? `лимиткой на <b>${rule.deep_datr} дневного хода за EMA</b> (не дошла за час касания — сделки нет; касание ловится и по минутным свечам Binance, на которых считан бэктест, — сделка по рынку на ${d.bn ? 'Binance' : 'Gate'})` : 'на EMA'}, стоп — <b>${rule.stop_datr} дневного хода</b> монеты за входом${rule.stop_close_h ? ` — если ${rule.stop_close_h}-часовая свеча закрылась за ним (фитили не выбивают; аварийный стоп на бирже — ${+(rule.stop_datr * (rule.hard_x || 2)).toFixed(2)} дневного хода)` : ""}${rule.part_r ? `, на <b>+${rule.part_r}R закрыть ${Math.round(rule.part_f * 100)}%</b> и стоп в безубыток` : ''}, тейк — <b>${rule.take_r} риска</b>. Не больше ${m.side_cap || 12} сделок в одну сторону.
         ${m.sides ? `${m.sides.length === 1 && m.sides[0] === 1 ? 'Только лонги (на шортах модель не различает хорошие касания от плохих). ' : ''}Не входит, если цена уже дальше ${m.max_d_ema200} дневных ATR над EMA200 дня${m.tfs && !m.tfs.includes('4h') ? '; касания на 4ч не берёт (с входом за EMA они слабее)' : '; касания на 4ч — только самые уверенные'}.${m.btc_ema50 ? ' Лонги — только пока BTC выше своей дневной EMA50.' : ''}${m.ls_min_d24 != null ? ' Не входит, если толпа (все счета Binance) за сутки не прибавила в лонгах — на истории такие касания заметно хуже.' : ''}` : ''}</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «EMA» в настройках риска (пусто = ${d.risk}%). Сделок много одновременно: просадка на истории до ${dd}R — держите риск маленьким.</div>`}`;
     const sl = d.sel || {}, cr = sl.rule || {}, rsl = sl.research || {};
@@ -45064,7 +45068,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
   let h = '';
   // 1. what it is and how it did on the years it never saw
-  let top = `<div class="dim hintx">Канал Кельтнера (EMA20 ± ATR) на ${(m && m.tfs && !m.tfs.includes(4)) ? '1ч' : '1ч и 4ч'} у ${d.top ? 211 : 120} проверенных монет (из топа Gate по объёму; акции и непроверенные монеты не берёт). Сам выход за полосу на истории убыточен (проверено 4 608 вариантов правила, фильтры и подбор под монету — всё в минусе), поэтому сигнал даёт модель: она смотрит, как цена вышла за полосу, и ещё 89 параметров рынка, и берёт только лучший ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 1}% выходов.</div>`;
+  let top = `<div class="dim hintx">Канал Кельтнера (EMA20 ± ATR) на ${(m && m.tfs && !m.tfs.includes(4)) ? '1ч' : '1ч и 4ч'} у ${d.top ? 211 : 120} проверенных монет (${d.bn ? 'все, что торгуются на Binance' : 'из топа Gate по объёму'}; акции и непроверенные монеты не берёт). Сам выход за полосу на истории убыточен (проверено 4 608 вариантов правила, фильтры и подбор под монету — всё в минусе), поэтому сигнал даёт модель: она смотрит, как цена вышла за полосу, и ещё 89 параметров рынка, и берёт только лучший ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 1}% выходов.</div>`;
   if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
   else {
     const ys = rs.years || {};
@@ -45075,7 +45079,7 @@ async function refreshPrv() {   // v0.99.624 — Peak Reversal v2: the model, th
     top += tr_ + `<div class="zsub">Проверка на истории ${rs.coins || 127} монет Binance — каждый год модель не видела${rs.scheme ? ' (' + rs.scheme + ')' : ''}. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y === '2025' ? '2025–26' : y, sub: `~${x.wk}/нед · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2025'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${wk == null ? '—' : wk.toFixed(0)}</b> сделок в неделю</span><span>до <b>${rule.hold_bars || 48}</b> свечей</span><span>просадка до <b>${dd}R</b></span></div>
-      <div class="zsub">Вход — ${rule.entry_lim_atr ? `<b>лимиткой на ${rule.entry_lim_atr} ATR лучше цены</b> после закрытия свечи (ждёт до ${rule.entry_wait} ч; не дошла — сделки нет; касание ловится и по минутным свечам Binance, на которых считан бэктест, — сделка на Gate по рынку)` : 'по рынку после закрытия свечи'}, ${rule.stop_close ? `стоп — <b>${rule.stop_atr} ATR по закрытию свечи</b> (тень за стопом сделку не закрывает; на бирже стоит аварийный стоп ${rule.hard_atr} ATR — от него считается риск и R), тейк — <b>${(rule.take_r * rule.stop_atr).toFixed(1)} ATR</b>` : `стоп — <b>${rule.stop_atr} ATR</b> её графика, тейк — <b>${rule.take_r} риска</b>`}, через ${rule.hold_bars} свечей выход (${(m.tfs && !m.tfs.includes(4)) ? '2 дня; 4ч график убран — на нём модель ошибалась' : '1ч — 2 дня, 4ч — 8 дней'}). Не больше ${m.side_cap || 12} сделок в одну сторону.
+      <div class="zsub">Вход — ${rule.entry_lim_atr ? `<b>лимиткой на ${rule.entry_lim_atr} ATR лучше цены</b> после закрытия свечи (ждёт до ${rule.entry_wait} ч; не дошла — сделки нет; касание ловится и по минутным свечам Binance, на которых считан бэктест, — сделка по рынку на ${d.bn ? 'Binance' : 'Gate'})` : 'по рынку после закрытия свечи'}, ${rule.stop_close ? `стоп — <b>${rule.stop_atr} ATR по закрытию свечи</b> (тень за стопом сделку не закрывает; на бирже стоит аварийный стоп ${rule.hard_atr} ATR — от него считается риск и R), тейк — <b>${(rule.take_r * rule.stop_atr).toFixed(1)} ATR</b>` : `стоп — <b>${rule.stop_atr} ATR</b> её графика, тейк — <b>${rule.take_r} риска</b>`}, через ${rule.hold_bars} свечей выход (${(m.tfs && !m.tfs.includes(4)) ? '2 дня; 4ч график убран — на нём модель ошибалась' : '1ч — 2 дня, 4ч — 8 дней'}). Не больше ${m.side_cap || 12} сделок в одну сторону.
         ${m.btc_filter ? `Против рынка не входит: лонг — если BTC упал за 24 ч больше чем на ${m.btc_filter}% или за последний час больше чем на ${m.btc_filter_1h}%, шорт — если вырос так же.` : ''}</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «P/R» в настройках риска (пусто = ${d.risk}%). Сделок бывает много одновременно — держите риск маленьким.</div>`}`;
   }
