@@ -20845,3 +20845,13 @@ v0.99.726 - 📤 the lab upload carries the error log. The second phone's file: 
          in their own ring (400), the upload adds them, the recent ones and the [ERR] lines of vp_bot.log (the autostart's,
          across restarts); the texts scrubbed of secrets too (a Telegram bot token in a URL, signature= / key= values, long
          keys) besides the money. Tests: t_lab_export.py (+ the errors exported, a bot token / signature / $ cut) — OK.
+v0.99.727 - 💰 the modules' default risks on Binance: SMC 1.5% -> 2.5%, EMA 1% -> 2% (P/R 3%, ⚡ 4.5% kept). The split was
+         chosen before the cross margin (v0.99.717) and SMC's break-even after +2R (v0.99.719), which frees SMC's open risk
+         early. The bundle money (the v0.99.719 regime: cross 10x, open risk <= 90%, the honest lists — each module's model
+         walk-forward in time, SMC / EMA / P/R lists re-checked: no look-ahead, the bot's rules) over 36 splits
+         (port_risk2.py), then SMC 2-4% x EMA 1-2 (port_risk3.py): SMC 2.5 + EMA 2 better than the old split in 100% of the
+         12-month windows both as backtested and with friction (every trade -0.03R, ⚡'s emergency stops -0.1R): the median
+         year x1.57 / x1.54, the worst 10% $2,107 -> $2,949 ($777 -> $1,069 with friction), the median drawdown 61% -> 59%
+         (68 -> 66%), the last 12 months $98k -> $146k, 2026 alone $55k -> $82k. SMC 3% earns a little more but not in every
+         window and with a higher drawdown; 3.5-4% worse years. The header's expectation updated (port_risk4.py).
+         Tests: t_bn_others.py (SMC's default 2.5% sized), t_dlm_binance.py, t_mod_ui.py, t_lab_export.py — OK.

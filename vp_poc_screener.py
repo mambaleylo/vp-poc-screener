@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.726"
+APP_VERSION = "0.99.727"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28505,9 +28505,9 @@ _PROC_START = time.time()
 # v0.99.700 — the user: "ожидания по доходу добавь тоже куда нибудь тонкой строкой, может под шапку, типа связка индикаторов
 # худшее ожидание и лучшее": a year from $100 on the history (the 12-month windows from each week of 2023-02..2025-10, one
 # account, the bot's leverage, the honest pools; tools/winrate port_expect.py): the worst 10% / the median / the best 10% of
-# the years, the median drawdown. "bundle" = ⚡ 4.5% + P/R 3% + SMC 1.5% + EMA 1% (on Binance together, v0.99.718), "dlm" = ⚡ alone
+# the years, the median drawdown. "bundle" = ⚡ 4.5% + P/R 3% + SMC 2.5% + EMA 2% (on Binance together, v0.99.727), "dlm" = ⚡ alone
 EXPECT_YEAR = {"dlm": {"p10": 1620, "p50": 7804, "p90": 27800, "dd": 65, "last12": 22216},   # v0.99.718: cross 10x, the open risk <= 90%, ⚡ 4.5% (port_717d.py); v0.99.704: x the daily WaveTrend (port_osc3.py)
-               "bundle": {"p10": 2107, "p50": 29745, "p90": 122816, "dd": 61, "last12": 98308}}   # v0.99.719: + SMC's break-even after +2R (port_be5.py, the SMC rows from the list); v0.99.718: ⚡ 4.5 + P/R 3 + SMC 1.5 + EMA 1, cross 10x, the open risk <= 90% (port_717d.py)   # v0.99.712: EMA 1% (port_w709.py); v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
+               "bundle": {"p10": 2949, "p50": 40219, "p90": 216119, "dd": 59, "last12": 146001}}   # v0.99.727: SMC 2.5% + EMA 2% (port_risk4.py); v0.99.719: + SMC's break-even after +2R (port_be5.py, the SMC rows from the list); v0.99.718: ⚡ 4.5 + P/R 3 + SMC 1.5 + EMA 1, cross 10x, the open risk <= 90% (port_717d.py)   # v0.99.712: EMA 1% (port_w709.py); v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
 
 
 @app.route("/api/boot")
@@ -35647,7 +35647,7 @@ def bn_size(direction, e, sl_x, cap, mmr, equity, risk, bsym, tb, mt, safety=Non
         margin, lev = margin * lev / lev2, lev2
     return margin, lev, skip
 BN_OTHERS_MODES = ("prv", "smc", "emw")
-BN_OTHERS_RISK = {"prv": 3.0, "smc": 1.5, "emw": 1.0}   # v0.99.718 — P/R 3% with cross margin (port_717*.py); v0.99.712 — EMA 1% (port_w709.py: every number better); v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
+BN_OTHERS_RISK = {"prv": 3.0, "smc": 2.5, "emw": 2.0}   # v0.99.727 — SMC 2.5% + EMA 2% (port_risk2/3.py: with the cross margin and SMC's break-even the bundle is better in every 12-month window, with and without friction); v0.99.718 — P/R 3% with cross margin (port_717*.py); v0.99.712 — EMA 1% (port_w709.py: every number better); v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
 BNO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_bn_others.json")
 _BNO = {"pos": {}}   # Gate contract -> the Binance position this bot opened for P/R / SMC / EMA
 _bno_lock = threading.Lock()
@@ -40877,7 +40877,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow subRow">
         <div>
           <div class="label">↳ 🔄 P/R, 🧱 SMC, 📐 EMA — тоже на Binance</div>
-          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, маржа — по настройке ниже; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто: P/R 3%, SMC 1.5%, EMA 1%. На истории (честный отбор сделок) ⚡ 4.5% вместе с ними — медиана за год примерно вдвое больше, чем один ⚡, при той же просадке; без ⚡ эти три слабые. Включается вместе с автоторговлей самих модулей</div>
+          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, маржа — по настройке ниже; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто: P/R 3%, SMC 2.5%, EMA 2%. На истории (честный отбор сделок) ⚡ 4.5% вместе с ними — медиана за год примерно вдвое больше, чем один ⚡, при той же просадке; без ⚡ эти три слабые. Включается вместе с автоторговлей самих модулей</div>
         </div>
         <label class="switch"><input type="checkbox" id="setBnOthers"><span class="switchSlider"></span></label>
       </div>
@@ -41145,7 +41145,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow" style="flex-wrap:wrap;">
         <div style="flex:1 1 100%;">
           <div class="label">Риск на сделку — у каждого модуля свой</div>
-          <div class="sub">% от счёта, который теряется на стопе (0.1–100). Пустое поле — значение модуля по умолчанию (на Binance, по истории связки): ⚡ 4.5% · P/R 3% · 🧱 SMC 1.5% · EMA 1%; остальные модули — 0.5%. У ⚡ к своему % ещё множители: загрузка (×0.625 / ×1.25) и дневной WaveTrend (×1.25 / ×0.85)</div>
+          <div class="sub">% от счёта, который теряется на стопе (0.1–100). Пустое поле — значение модуля по умолчанию (на Binance, по истории связки): ⚡ 4.5% · P/R 3% · 🧱 SMC 2.5% · EMA 2%; остальные модули — 0.5%. У ⚡ к своему % ещё множители: загрузка (×0.625 / ×1.25) и дневной WaveTrend (×1.25 / ×0.85)</div>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro 0.5" title="Нейро: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
