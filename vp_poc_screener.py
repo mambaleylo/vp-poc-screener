@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.720"
+APP_VERSION = "0.99.721"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28067,6 +28067,144 @@ def self_update_url():
     return SELF_UPDATE_URL
 
 
+# v0.99.721 — the user: "автозапуск после перезапуска телефона и падения Termux". Three parts, all written by the bot
+# itself next to its file (the button «🔁 Автозапуск»):
+#  vp_keepalive.sh — the bot again 10 s after it stops (a crash, Android killing python), its log in vp_bot.log;
+#  vp_check.sh — starts the keepalive loop unless the bot answers on its port (run by the two below);
+#  ~/.termux/boot/vp-bot.sh — Termux:Boot (an F-Droid app, opened once) runs it after the phone starts: the wake
+#  lock, then vp_check.sh; and termux-job-scheduler (Termux:API) runs vp_check.sh every 15 min, kept by Android over
+#  restarts — so Termux killed by Android is back within 15 min. "Off" leaves the bot running, only nothing restarts it
+AUTOSTART_JOB_ID = 4242
+
+
+def _autostart_paths():
+    bot = os.path.abspath(__file__); d = os.path.dirname(bot)
+    return {"bot": bot, "dir": d, "keep": os.path.join(d, "vp_keepalive.sh"), "check": os.path.join(d, "vp_check.sh"),
+            "pid": os.path.join(d, "vp_keepalive.pid"), "off": os.path.join(d, "vp_autostart.off"), "log": os.path.join(d, "vp_bot.log"),
+            "boot": os.path.join(os.path.expanduser("~"), ".termux", "boot", "vp-bot.sh")}
+
+
+def _autostart_scripts(p):
+    sh = shutil.which("sh") or "/bin/sh"
+    port = int(os.environ.get("VP_PORT", 8080)); py = sys.executable
+    keep = f"""#!{sh}
+# VP-POC: the bot again 10 s after it stops (written by the bot, v0.99.721 — the button «🔁 Автозапуск»)
+cd "{p['dir']}" || exit 1
+echo $$ > "{p['pid']}"
+while true; do
+  [ -f "{p['off']}" ] && exit 0
+  if [ -f "{p['log']}" ] && [ "$(wc -c < "{p['log']}")" -gt 5000000 ]; then mv -f "{p['log']}" "{p['log']}.1"; fi
+  echo "=== start $(date)" >> "{p['log']}"
+  "{py}" "{p['bot']}" >> "{p['log']}" 2>&1
+  echo "=== stopped $(date), again in 10 s" >> "{p['log']}"
+  sleep 10
+done
+"""
+    check = f"""#!{sh}
+# VP-POC: start the keepalive loop unless the bot answers (Termux:Boot after the phone starts, termux-job-scheduler every 15 min)
+command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock
+cd "{p['dir']}" || exit 1
+[ -f "{p['off']}" ] && exit 0
+"{py}" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:{port}/api/health', timeout=8)" >/dev/null 2>&1 && exit 0
+if [ -f "{p['pid']}" ] && kill -0 "$(cat "{p['pid']}")" 2>/dev/null; then exit 0; fi
+nohup {sh} "{p['keep']}" >/dev/null 2>&1 &
+"""
+    boot = f"""#!{sh}
+# VP-POC: after the phone starts (Termux:Boot) — the wake lock, a minute for the network, then the bot
+command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock
+sleep 30
+exec {sh} "{p['check']}"
+"""
+    return {"keep": keep, "check": check, "boot": boot}
+
+
+def _under_keepalive():
+    try:
+        with open(f"/proc/{os.getppid()}/cmdline", "rb") as f:
+            return b"vp_keepalive.sh" in f.read()
+    except Exception:
+        return False
+
+
+def autostart_status():
+    p = _autostart_paths()
+    return {"on": os.path.exists(p["keep"]) and not os.path.exists(p["off"]), "boot": os.path.exists(p["boot"]),
+            "boot_dir": os.path.isdir(os.path.dirname(p["boot"])), "job": bool(shutil.which("termux-job-scheduler")),
+            "wake": bool(shutil.which("termux-wake-lock")), "under_loop": _under_keepalive(), "termux": "com.termux" in sys.executable,
+            "job_set": bool(STATE.get("autostart_job"))}
+
+
+def autostart_set(on):
+    """-> the status (+ "restart": the bot moves under the keepalive loop now)"""
+    p = _autostart_paths()
+    if on:
+        sc = _autostart_scripts(p)
+        for k in ("keep", "check"):
+            with open(p[k], "w") as f:
+                f.write(sc[k])
+            os.chmod(p[k], 0o755)
+        try:
+            os.makedirs(os.path.dirname(p["boot"]), exist_ok=True)
+            with open(p["boot"], "w") as f:
+                f.write(sc["boot"])
+            os.chmod(p["boot"], 0o755)
+        except OSError as e:
+            log_error(f"autostart boot script: {e}")
+        try:
+            os.remove(p["off"])
+        except OSError:
+            pass
+        if shutil.which("termux-job-scheduler"):
+            try:
+                r = subprocess.run(["termux-job-scheduler", "--job-id", str(AUTOSTART_JOB_ID), "--period-ms", "900000", "--persisted", "true",
+                                    "--script", p["check"]], capture_output=True, text=True, timeout=20)
+                STATE["autostart_job"] = r.returncode == 0
+                if r.returncode != 0:
+                    log_error(f"autostart job: {(r.stderr or r.stdout)[:200]}")
+            except Exception as e:
+                log_error(f"autostart job: {e}")
+        if shutil.which("termux-wake-lock"):
+            try:
+                subprocess.Popen(["termux-wake-lock"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+        st = autostart_status()
+        if not st["under_loop"]:   # this copy was started by hand: the loop takes over (its copy stops this one on start)
+            def _go():
+                time.sleep(2)
+                save_everything_before_exit()
+                subprocess.Popen([shutil.which("sh") or "/bin/sh", p["keep"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+            threading.Thread(target=_go, daemon=True).start()
+            st["restart"] = True
+        return st
+    with open(p["off"], "w") as f:
+        f.write("off\n")
+    for k in ("boot",):
+        try:
+            os.remove(p[k])
+        except OSError:
+            pass
+    if shutil.which("termux-job-scheduler"):
+        try:
+            subprocess.run(["termux-job-scheduler", "--cancel", "--job-id", str(AUTOSTART_JOB_ID)], capture_output=True, timeout=20)
+        except Exception as e:
+            log_error(f"autostart job cancel: {e}")
+    STATE["autostart_job"] = False
+    return autostart_status()
+
+
+@app.route("/api/autostart", methods=["GET", "POST"])
+def api_autostart():
+    try:
+        if request.method == "POST":
+            return jsonify(dict(autostart_set(bool((request.get_json(silent=True) or {}).get("on"))), ok=True))
+        return jsonify(dict(autostart_status(), ok=True))
+    except Exception as e:
+        log_error(f"autostart: {e}")
+        return jsonify({"ok": False, "error": str(e)[:200]}), 500
+
+
 @app.route("/api/self_update", methods=["POST"])
 def api_self_update():
     """v0.99.450 — the button version of the Termux command: download the main
@@ -40191,6 +40329,7 @@ INDEX_HTML = """<!doctype html>
     <div class="hdrRow"><span class="hdrLbl">Авто-тюнинг</span><button id="resetRiskAutotuneBtn" class="btnDanger">🗑 Сбросить</button></div>
     <div class="hdrRow"><span class="hdrLbl">Ошибки</span><button id="clearErrorsBtn" class="btnDanger">🗑 Очистить</button></div>
     <div class="hdrRow"><span class="hdrLbl">Бот</span><button onclick="selfUpdate()" class="btnNeutral">⬇️ Обновить и перезапустить</button></div>
+    <div class="hdrRow"><span class="hdrLbl">Автозапуск</span><button onclick="autostartUi()" class="btnNeutral">🔁 Автозапуск</button></div>
   </div>
   <div id="status"></div>
   <div id="overview" class="dim" style="margin-top:4px;"></div>
@@ -43180,6 +43319,36 @@ async function zutLogout() {
   if (!confirm('Выйти из аккаунта? Сессия будет завершена и в Telegram (Настройки → Устройства).')) return;
   await zutPostJson('/api/zones/ut/logout', {});
   refreshZones();
+}
+// v0.99.721 — the autostart: after the phone restarts (Termux:Boot), after a crash (the keepalive loop), Termux killed (a check every 15 min)
+async function autostartUi() {
+  let st;
+  try { st = await (await fetch('/api/autostart')).json(); } catch (e) { return alert('ошибка сети'); }
+  if (!st.ok) return alert(st.error || 'не получилось');
+  const yn = b => b ? '✅' : '❌';
+  const lines = [
+    `Автозапуск сейчас: ${st.on ? 'ВКЛЮЧЁН' : 'выключен'}`, '',
+    `${yn(st.on)} перезапуск бота через 10 с, если он упал`,
+    `${yn(st.on && st.boot)} запуск после перезагрузки телефона (нужно приложение Termux:Boot из F-Droid, открыть его один раз)`,
+    `${yn(st.on && st.job && st.job_set)} проверка раз в 15 мин, если Android закрыл Termux (нужно приложение Termux:API из F-Droid и pkg install termux-api)`,
+    `${yn(st.wake)} защита от сна (termux-wake-lock)`,
+    `${yn(st.under_loop)} этот бот уже работает под автоперезапуском`, '',
+    'Ещё: в настройках Android снимите ограничения батареи для Termux, Termux:Boot и Termux:API («Без ограничений»).',
+  ];
+  if (!confirm(lines.join('\\n') + '\\n\\n' + (st.on ? 'Выключить автозапуск? (бот продолжит работать, но перезапускать его будет некому)' : 'Включить автозапуск? Бот перезапустится под присмотром — страница обновится сама.'))) return;
+  let r;
+  try { r = await (await fetch('/api/autostart', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({on: !st.on})})).json(); } catch (e) { return alert('ошибка сети'); }
+  if (!r.ok) return alert(r.error || 'не получилось');
+  if (!r.restart) return alert(r.on ? 'Автозапуск включён.' : 'Автозапуск выключен.');
+  alert('Автозапуск включён, бот перезапускается под присмотром (20–40 с).');
+  const t0 = Date.now();
+  const wait = async () => {
+    await new Promise(res => setTimeout(res, 3000));
+    try { const x = await fetch('/', {cache: 'no-store'}); if (x.ok) return location.reload(); } catch (e) {}
+    if (Date.now() - t0 < 180000) return wait();
+    alert('Бот не поднялся за 3 минуты — посмотрите Termux (файл vp_bot.log рядом с ботом).');
+  };
+  wait();
 }
 // v0.99.450 — the same as the Termux command: fresh file from GitHub, then restart
 async function selfUpdate() {

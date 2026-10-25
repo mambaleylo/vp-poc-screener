@@ -20790,3 +20790,16 @@ v0.99.720 - the "binance candles EOS 2h: 'cols'" errors (the user's screen: 10 o
          meanwhile); once the mark expired bn_closed read it as candles -> a KeyError every few minutes. Now an expired mark is
          dropped and the coin asked again. Trading unchanged (those coins on Binance: never traded there anyway). Test:
          t_bnc_miss.py (the old code reproduces the error, the new one none); t_dlm_bot, t_dlm_binance, t_bn_source, t_smc_bot — OK.
+
+v0.99.721 - 🔁 the autostart (the user: "автозапуск после перезапуска телефона и падения Termux"; this time the phone had updated
+         and restarted). The menu's «🔁 Автозапуск» writes next to the bot: vp_keepalive.sh (the bot again 10 s after it
+         stops, its output in vp_bot.log, rotated at 5 MB), vp_check.sh (starts the loop unless the bot answers on its port
+         and the loop is not alive), ~/.termux/boot/vp-bot.sh (Termux:Boot after the phone starts: the wake lock, 30 s for
+         the network, then the check) and a termux-job-scheduler job every 15 min, kept by Android over restarts (Termux:API:
+         Termux killed by Android -> back within 15 min). A bot started by hand moves under the loop at once (the loop's
+         copy stops it on start — stop_previous_instances matches only python + vp_poc_screener.py, not the sh loop).
+         Off: the boot script and the job removed, the loop ends; the bot keeps running. The dialog shows what is set and
+         what to install (Termux:Boot, Termux:API from F-Droid; no battery limits for them). Tests: t_autostart.py (the
+         scripts valid sh; the check starts the loop, the loop restarts a crashing bot every 10 s, no second loop, off ends
+         it, a bot answering -> nothing started), t_autostart_ui.py (no page errors, the status dialog), t_dlm_ui, t_mod_ui,
+         t_dlm_bot — OK.

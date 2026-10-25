@@ -19,3 +19,9 @@ vp_binance_credentials.json
 vp_binance_credentials.json.tmp
 vp_bn_others.json
 vp_bn_others.json.tmp
+vp_keepalive.sh
+vp_check.sh
+vp_keepalive.pid
+vp_autostart.off
+vp_bot.log
+vp_bot.log.1
