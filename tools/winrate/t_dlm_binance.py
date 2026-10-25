@@ -329,8 +329,15 @@ res["new phone: takes over, cancels nothing"] = (not moves and oA is not None an
                                                  and abs(tB2["entry"] - 20.0) < 1e-9 and cc.get("mode") == "smc" and cc.get("sl_id") and cc.get("tp_id") and len(got) == 3)
 V.dlm_real_tick()   # the next tick: the adopted ones managed, nothing new placed for them
 res["adopted managed on the next tick"] = tB2["status"] == "OPEN" and tB2["real"].get("sl_id") == sl0 and oA["status"] == "OPEN"
+# v0.99.714 — a stop / take with no position, no entry order and no record (a limit's GTD ended while the bot was off, the
+# phone changed) -> cancelled; the ones of the live limit (AAA) and of the positions (BBB, CCC) kept
+oD = oid(); X["algos"][oD] = {"symbol": "DDDUSDT", "side": "SELL", "type": "STOP_MARKET", "triggerPrice": "1.0", "closePosition": "true", "algoId": oD, "algoStatus": "NEW"}
+keep = [i for i, a_ in X["algos"].items() if a_["algoStatus"] == "NEW" and a_["symbol"] in ("AAAUSDT", "BBBUSDT", "CCCUSDT")]
+got2 = V.dlm_bn_adopt()
+res["orphan stop cancelled, the others kept"] = (X["algos"][oD]["algoStatus"] != "NEW" and all(X["algos"][i]["algoStatus"] == "NEW" for i in keep)
+                                                 and any("DDDUSDT" in l_ for l_ in got2))
 V._dlm_atr_at = _atr
-print("   adopt:", got)
+print("   adopt:", got, got2)
 html = V.app.test_client().get("/").get_data(as_text=True)
 st = V.app.test_client().get("/api/dlm/status").get_json()
 res["ui"] = "setDlmBinance" in html and "bnSaveKeys" in html and st["binance"] is True and st["bn_keys"] is True and st["bn_check"]["ok"]

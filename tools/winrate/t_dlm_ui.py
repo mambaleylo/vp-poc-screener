@@ -87,6 +87,9 @@ with sync_playwright() as p:
     print("rows with $:", len(rows), "· e.g.", rows[0].strip()[:120] if rows else "-", "· python final", bal[-1] if bal else None, m50_ok)
     why_ok = "не на бирже: включена «Бумажная торговля (dry-run)»" in txt and "виртуально — включена бумажная торговля" in txt
     print("virtual trade's reason shown", why_ok)
+    # v0.99.714 — a closed virtual trade says so ("закрылась тейком, но на бирже её нет")
+    closed_ok = "виртуально — на бирже её не было" in pg.content()
+    why_ok = why_ok and closed_ok; print("closed virtual trade marked", closed_ok)
     gone = "setDlmSingle" not in html and "setDlmLadder" not in html and "Лесенка" not in txt
     print("errors", errs, "· why virtual", why_ok, "· last 50 money", m50_ok, "· TLM exit / emergency stop", exit_ok and hs_ok, "· single/ladder gone", gone, "· 4h text", "4ч" in txt and "старый модуль 15м" in txt, "· 2h chart", "2ч" in t2)
     b.close()

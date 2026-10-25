@@ -20693,3 +20693,18 @@ v0.99.713 - Binance: a new futures account's 20x cap; the virtual trades' reason
          поправь"): the reason on its own full-width line under the trade — it squeezed the coin column into a thin strip.
          Tests: t_dlm_binance (a fake -4300 above 20x: the order made at ≤ 20x), t_dlm_bot,
          t_dlm_ui, t_bn_others — OK.
+
+v0.99.714 - ⚡: a closed trade says whether it was on the exchange; the stale stop / take of an expired limit cancelled. The user:
+         "есть сделка, которая закрылась тейком, но я не нигде больше не вижу — ни в списке лимиток с причиной, ни на
+         бирже": a virtual trade (the price reached the limit while the bot was off / catching up) showed its reason only
+         while open; the last results now read "💰 была на бирже" / "виртуально — на бирже её не было: <the reason>" on
+         their own line. And ("время жизни ордера заложенное сразу это правильно?"): yes — the limit's GTD is the order's
+         life the research traded, it ends on Binance even with the phone off; but its stop / take (closePosition
+         triggers) stayed: on a new phone nobody cancelled them, and a later position on the coin would be closed by them
+         or its own stop refused. dlm_bn_adopt (the start, every 10 min) now cancels a closing trigger with no position on
+         its coin, no entry order there and no record of the bot (older than 2 min). The lab: one-side cap over the four
+         modules (8..20 a side, or the risk lower from 8 / 12 / 16) — no gain (the median $17 743 -> at most the same,
+         the worst 10% lower); ⚡ on 152 more Binance coins — the money of 2026 $19 817 -> $3 608 (their losses fall on
+         the same days); the GitHub states as P/R / SMC / EMA risk weights — noise. Tests: t_dlm_binance (an orphan stop
+         cancelled, the live ones kept), t_dlm_ui (a closed virtual trade marked), t_dlm_bot, t_bn_others,
+         t_cstop_others — OK.

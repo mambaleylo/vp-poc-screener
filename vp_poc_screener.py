@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.713"
+APP_VERSION = "0.99.714"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -35689,6 +35689,25 @@ def dlm_bn_adopt(now=None):
                              f"выход по времени и по закрытию свечи этот бот по ней не ведёт (их запись на старом телефоне)")
             else:
                 lines.append(f"⚠️ {bsym}: позиция без стопа на бирже и без записи бота — поставьте стоп сами")
+    # (3) v0.99.714 — the user: "время жизни ордера заложенное сразу это правильно?" — the limit's GTD ends it on the exchange
+    # even with the bot off, but its stop / take (closePosition triggers) stay: on a new phone (no state) nobody cancelled
+    # them, and a later position on the coin would be closed by them / its own stop refused (one closePosition trigger a
+    # side). A closing trigger with no position on its coin, no entry order there and no record of the bot -> cancelled
+    with _dlm_lock:
+        mine = {str(v) for o in _DLM["orders"] for k in ("pre_sl", "pre_tp") for v in [((o.get("real") or {}).get(k) or [None, None])[1]] if v}
+        mine |= {str(t["real"].get(k)) for t in _DLM["trades"] if t.get("real") for k in ("sl_id", "tp_id") if t["real"].get(k)}
+    with _bno_lock:
+        mine |= {str(r_.get(k)) for r_ in _BNO["pos"].values() for k in ("sl_id", "tp_id") if r_.get(k)}
+    entry_syms = {y.get("symbol") for y in opn if y.get("type") not in ("STOP_MARKET", "TAKE_PROFIT_MARKET") and str(y.get("reduceOnly")).lower() != "true"}
+    for kind, lst_, idk in (("algo", algos, "algoId"), ("order", opn, "orderId")):
+        for x in lst_:
+            k = x.get("orderType") or x.get("type"); bsym = x.get("symbol"); oid = str(x.get(idk))
+            if (k not in ("STOP_MARKET", "TAKE_PROFIT_MARKET") or str(x.get("closePosition")).lower() != "true" or pos.get(bsym)
+                    or bsym in entry_syms or oid in mine or now - float(x.get("createTime") or x.get("time") or 0) / 1000 < 120):
+                continue
+            if bnf_cancel(bsym, kind, oid):
+                lines.append(f"🧹 {bsym}: {'стоп' if k == 'STOP_MARKET' else 'тейк'} {x.get('triggerPrice') or x.get('stopPrice')} без позиции "
+                             f"(лимитка уже снята / истекла) — отменён")
     if changed:
         dlm_save()
     return lines
@@ -35960,6 +35979,7 @@ def dlm_stats():
                             "wr": round(100 * sum(1 for t in x if t["result"] == "WIN") / len(x), 1) if x else None}
                         for n in ("wick4h", "close2h") for x in [[t for t in fin if (t.get("st") or "wick4h") == n]]},   # v0.99.689
             "last": [{k: t.get(k) for k in ("symbol", "side", "t0", "fbar", "t_in", "r", "result", "real", "entry", "lv", "sl", "tp", "exit", "t_out", "bs", "st", "tp1", "tp2", "take")}
+                     | {"why": None if t.get("real") else (t.get("why") or _dlm_why_virtual(_ord.get(t["id"]) or {}, t))}   # v0.99.714
                      for t in sorted(fin, key=lambda t: -t["t_in"])[:40]]}
 
 
@@ -43829,9 +43849,9 @@ async function btGateStart(mod) {
 function btRowHtml(t, onclick) {
   const d = new Date(((t._byClose && t.x) || t.t) * 1000).toLocaleDateString('ru-RU', {day: '2-digit', month: '2-digit', year: '2-digit'});
   const r = t.r == null ? '<span class="dim">открыта</span>' : `<span class="${t.r > 0 ? 'win' : (t.r < 0 ? 'loss' : '')}">${t.r > 0 ? '+' : ''}${(+t.r).toFixed(2)}R</span>`;
-  return `<div onclick="${onclick}" style="display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;">
+  return `<div onclick="${onclick}" style="padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;">
     <span><span class="dim">${d}</span> <b>${(t.s || '').replace('_USDT', '')}</b> <span class="${t.d > 0 ? 'win' : 'loss'}">${t.d > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${btLabel(t)}${t.k ? ' · ' + (BT_KIND[t.k] || t.k) : ''}</span></span>
-    <span style="white-space:nowrap;">${t._usd != null ? `${t._cut != null && t._cut < 0.95 ? `<span class="dim">${Math.round(t._cut * 100)}% размера · </span>` : ''}<span class="${t._usd > 0 ? 'win' : (t._usd < 0 ? 'loss' : '')}">${t._usd >= 0 ? '+' : '−'}$${Math.abs(t._usd).toFixed(t._bal < 1000 ? 2 : 0)}</span> <span class="dim">→ $${Math.round(t._bal).toLocaleString('ru-RU')}</span> · ` : (t._skip ? `<span class="dim">${t._skip}</span> · ` : '')}${r} ›</span></div>`;
+    <span style="white-space:nowrap;">${t._usd != null ? `${t._cut != null && t._cut < 0.95 ? `<span class="dim">${Math.round(t._cut * 100)}% размера · </span>` : ''}<span class="${t._usd > 0 ? 'win' : (t._usd < 0 ? 'loss' : '')}">${t._usd >= 0 ? '+' : '−'}$${Math.abs(t._usd).toFixed(t._bal < 1000 ? 2 : 0)}</span> <span class="dim">→ $${Math.round(t._bal).toLocaleString('ru-RU')}</span> · ` : (t._skip ? `<span class="dim">${t._skip}</span> · ` : '')}${r} ›</span></div>${t.vnote ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:2px;">${t.vnote}</div>` : ''}</div>`;
 }
 function btOpen(mod, i) { const t = (window._btData[mod] || [])[i]; if (t) btChart(Object.assign({mod}, t, mod === 'dlm' && t.sl2 != null && t.hs == null ? {hs: t.sl2} : {})); }   // v0.99.693 — ⚡ the 3 ATR emergency stop of the list drawn
 function btLiveOpen(mod, i) { const t = (window._btLive[mod] || [])[i]; if (t) btChart(t); }
@@ -43853,7 +43873,8 @@ function btFromSmc(t) {   // v0.99.678 — a live 🧱 trade -> the chart's trad
   return {mod: 'smc', s: t.symbol, d: t.side, c: '1h', lvl: t.fam, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
 }
 function btFromDlm(t) {   // v0.99.679 — a live ⚡ trade -> the chart's trade (v0.99.687: 4h candles; the 15m module's own on 15m)
-  return {mod: 'dlm', st: t.bs === 900 ? null : (t.st || 'wick4h'), s: t.symbol, d: t.side, c: t.bs === 900 ? '15m' : (t.bs === 7200 ? '2h' : '4h'), t: t.t0, lv: t.lv, e: t.entry, sl: t.sl, hs: t.hsl, tp: t.tp, f: t.fbar, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+  return {mod: 'dlm', st: t.bs === 900 ? null : (t.st || 'wick4h'), s: t.symbol, d: t.side, c: t.bs === 900 ? '15m' : (t.bs === 7200 ? '2h' : '4h'), t: t.t0, lv: t.lv, e: t.entry, sl: t.sl, hs: t.hsl, tp: t.tp, f: t.fbar, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true,
+    vnote: t.t_out ? (t.real ? '💰 была на бирже' : 'виртуально — на бирже её не было' + (t.why ? ': ' + t.why : '')) : null};   // v0.99.714 — the user: "закрылась тейком, но на бирже её нет"
 }
 function btFromPrx(t) {
   return {mod: 'prv', s: t.symbol, d: t.side, c: (t.tf || 1) + 'h', t: t.hour, e: t.entry != null ? t.entry : t.px, sl: t.sl, tp: t.tp, hs: t.hs, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
