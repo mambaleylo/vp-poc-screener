@@ -20839,3 +20839,9 @@ v0.99.725 - 📤 the lab upload: the money in the TEXTS cut too. The first real 
          has its "$12.3" / "12.3$" / "12 USDT" replaced by "$…" (coins like BTC_USDT and dates untouched). The file already
          on lab-data was replaced by a cleaned one (a normal commit; the first version stays in the branch's history).
          Tests: t_lab_export.py (+ the money in texts cut) — OK.
+v0.99.726 - 📤 the lab upload carries the error log. The second phone's file: every ⚡ limit's exits placed with it
+         (_dlm_bn_pre_exits) failed — the stored text is the OLD endpoint's -4120 (conditional orders moved to the Algo
+         API), the Algo API's own refusal only in the error log, which rolled over (30 kept). Now: the Binance errors kept
+         in their own ring (400), the upload adds them, the recent ones and the [ERR] lines of vp_bot.log (the autostart's,
+         across restarts); the texts scrubbed of secrets too (a Telegram bot token in a URL, signature= / key= values, long
+         keys) besides the money. Tests: t_lab_export.py (+ the errors exported, a bot token / signature / $ cut) — OK.

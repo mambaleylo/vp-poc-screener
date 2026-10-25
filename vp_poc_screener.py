@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.725"
+APP_VERSION = "0.99.726"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3313,6 +3313,9 @@ def _russian_error_prefix(text):
     return ""  # no recognized pattern — left as-is rather than guessing a misleading translation
 
 
+_BN_ERRORS = deque(maxlen=400)
+
+
 def log_error(msg):
     text = str(msg)[:500]
     try:
@@ -3322,6 +3325,8 @@ def log_error(msg):
     print("[ERR]", text)
     with state_lock:
         STATE["errors"].append({"t": time.time(), "msg": text[:550], "ru": ru})
+        if "binance" in text.lower():   # v0.99.726 — kept longer for the lab upload (the 30 above roll over in minutes)
+            _BN_ERRORS.append({"t": int(time.time()), "msg": text[:400]})
     if any(marker in text for marker in _NETWORK_ERROR_MARKERS):
         now = time.time()
         with _network_error_lock:
@@ -28341,6 +28346,7 @@ LAB_BRANCH = "lab-data"
 LAB_PATH = "lab/vp_lab.json.gz"
 _LAB_DROP = re.compile(r"^(qty|size|risk|filled|pnl|pnl_total|real_pnl|loss_at_stop|account|min_qty|step|executedQty|origQty|cumQuote)$"
                        r"|usd|balance|wallet|equity|margin|notional|amount|income|commission", re.I)
+_LAB_SECRET_TXT = re.compile(r"bot\d+:[\w-]{20,}|(?i:signature|apikey|api_key|secret|token|key)=[^&\s'\"]+|\b[A-Za-z0-9_-]{40,}\b")   # v0.99.726 — the error texts
 _LAB_MONEY_TXT = re.compile(r"\$\s?-?\d[\d.,]*|-?\d[\d.,]*\s?(?:\$|USDT\b|USD\b)")   # v0.99.725 — "$29.53" in a reason's text
 _LAB = {"last": None}
 
@@ -28374,7 +28380,7 @@ def lab_sanitize(x):
     if isinstance(x, list):
         return [lab_sanitize(v) for v in x]
     if isinstance(x, str):   # v0.99.725 — the money in the texts too: "маржа $29.53 … баланс $1.62" was uploaded once
-        return _LAB_MONEY_TXT.sub("$…", x)
+        return _LAB_MONEY_TXT.sub("$…", _LAB_SECRET_TXT.sub("…", x))
     return x
 
 
@@ -28388,7 +28394,16 @@ def lab_export_build():
             continue
         except Exception as e:
             log_error(f"lab export {os.path.basename(path)}: {e}")
-    return {"ver": APP_VERSION, "made": int(time.time()), "binance": bool(DLM_BINANCE), "files": files}
+    errs = {"binance": list(_BN_ERRORS), "recent": [{"t": int(e.get("t") or 0), "msg": e.get("msg")} for e in list(STATE["errors"])]}
+    try:   # v0.99.726 — the keepalive's log (the autostart): the [ERR] lines of the last ~2 MB, across restarts
+        lp = _autostart_paths()["log"]
+        if os.path.exists(lp):
+            with open(lp, "rb") as f:
+                f.seek(max(0, os.path.getsize(lp) - 2_000_000))
+                errs["log"] = [ln[:400] for ln in f.read().decode("utf-8", "replace").splitlines() if ln.startswith("[ERR]")][-600:]
+    except Exception as e:
+        log_error(f"lab export log: {e}")
+    return {"ver": APP_VERSION, "made": int(time.time()), "binance": bool(DLM_BINANCE), "files": files, "errors": lab_sanitize(errs)}
 
 
 def _gh(method, url, tok, **kw):

@@ -11,7 +11,11 @@ json.dump({"orders": [{"symbol": "BTC_USDT", "lv": 100.0, "real": {"status": "LI
            "trades": [{"symbol": "BTC_USDT", "entry": 100.0, "sl": 98.0, "pnl_r": 0.55, "pnl": 3.21, "risk_pct": 4.5, "balance_after": 512.3, "why": "маржа $29.53 превышает доступный баланс $1.62", "note": "5 USDT мало",
                        "real": {"status": "FILLED", "price": 100.01, "size": 12, "risk": 4.5, "margin": 50.0}}], "scan": {}}, open(V.DLM_STATE_FILE, "w"))
 json.dump({"pos": {"ETHUSDT": {"mode": "smc", "qty": 0.5, "entry": 2000.0, "risk": 3.0, "margin": 100.0, "sl_px": 1950.0, "notional": 1000}}}, open(V.BNO_FILE, "w"))
+V.log_error("binance algo STOP_MARKET ZKUSDT: Binance -4509: test reason — the order endpoint")
+V.log_error("telegram: HTTPSConnectionPool url: /bot123456789:AAHk3jsd8f7sdf8sd7f8sd7f8sdf7sd8f7s/sendMessage timeout; GET /fapi/v2/account?timestamp=1&signature=abcdef0123456789")
+V.log_error("free margin $12.50 too low")
 dat = V.lab_export_build(); s = json.dumps(dat, ensure_ascii=False)
+res["errors exported, secrets / money cut"] = "Binance -4509: test reason" in s and "AAHk3" not in s and "abcdef0123456789" not in s and "12.50" not in s
 res["money cut"] = all(k not in s for k in ('"size"', '"risk"', '"margin"', '"balance_after"', '"pnl"', '"qty"', '"notional"'))
 res["prices / R kept"] = '"pnl_r": 0.55' in s and '"risk_pct": 4.5' in s and '"sl_px": 1950.0' in s and '"price": 100.01' in s and '"lev": 10' in s
 res["money in texts cut"] = "29.53" not in s and "1.62" not in s and "5 USDT" not in s and "маржа $… превышает доступный баланс $…" in s and "BTC_USDT" in s
