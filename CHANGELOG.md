@@ -20898,3 +20898,29 @@ v0.99.731 - 🔎 "the price touched the level, the limit did not fill" recorded.
          it (% of the price), the first touch -> o["touch"], a log line when reached; the lab upload carries it.
          Tests: t_dlm_touch.py (a long touched by 0.01%, a short never reached, no candles -> nothing), t_dlm_binance.py,
          t_dlm_bot.py, t_lab_export.py — OK.
+v0.99.732 - 📏 HTF levels — a new module (the user: "думай над созданием нового индикатора… на гипотезах из гитхаба",
+         then "нужен симбиоз, агрессивный варик с только лонгами и возможно чуть меньше риск", "делай, но ещё раз всё
+         проверь, в том числе заглядывание в будущее и исполнение лимиток"). The hunt (tools/winrate): volume profile,
+         Fibonacci, Lorentzian Classification, ICT sessions, liquidity / inversion FVG / breakers, SMC on 2h-3d, the
+         cross-sectional momentum, the derivatives triggers, the classic / GitHub indicators — then a diversifier screen
+         (div_screen.py): only the higher charts' plain levels earned in the bundle's worst months. Longs only (the shorts
+         ~0R); two walk-forward models, a touch taken when either is above its q 0.995 threshold ("o": all HTF touches,
+         the 1-dATR exit's label; "n": the long touches, the traded exit's label — it carries to never-trained coins far
+         better). The bot's realistic pipeline (reach filter, the nearer-level order, cap 12, one per coin): 299 trades
+         2023-26, +0.75R, WR 66%, every year in plus (2025: 12 trades). In the bundle at 1.5% with the friction: the last
+         12 months $129.7k -> $196.3k, better in 94% of the 12-month windows (htf_money5.py).
+         The checks: look-ahead — the bot's own smc_candidates on the bars closed before each touch hour vs the research
+         (t_htf_parity.py): the levels / features the same (a coin's first weeks aside); found and fixed — the period
+         opens (week / month / year) were marked touched by the first hours of their period, which the research never
+         counts (the level exists from 6 h / 24 h in); the decision of both exported models on every 2026 trade and 400
+         random touches = the backtest's (t_htf_score_parity.py: 0 of 526 differ). The execution — every trade on
+         Binance's 1-min candles (audit_htf1m.py): the entry confirmed on 299 of 299, the minute walk = the hour walk, a
+         market entry at the touch (the minute's close + 0.05%) +0.79R vs +0.75R. So the bot enters as the research
+         fills: when the price is 0.1% through the level (the live price / Binance's 1-min low; the hour's candle at
+         the settle), at the market; the stop at a 4h close 1 dATR below, the exchange's emergency stop 3 dATR, take 3R,
+         out at 96 h. smc_candidates(want=...) returns the HTF families (SMC's own call unchanged). Real trades go with
+         P/R / SMC / EMA on Binance at BN_OTHERS_RISK["htf"] = 1.5% (the field "📏"); the autotrade switch starts off.
+         Model: vp_htf_model.json (the 2026 walk-forward models, the thresholds from their 2025 out-of-sample scores);
+         the backtest list: vp_bt_trades.json["htf"]. Tests: t_htf_bot.py (parity, the model, 7 of 7 2026 backtest
+         trades re-made by the bot to the same R, the risk field, the 0.1% trigger, Binance), t_mod_ui.py (+ the 📏 tab),
+         t_smc_bot.py and the rest of tools/winrate — OK.

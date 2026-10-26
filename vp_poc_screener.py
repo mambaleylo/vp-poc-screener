@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.731"
+APP_VERSION = "0.99.732"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1156,6 +1156,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones", "risk_pct_zm", "risk_pct_rbx", "rbx_enabled", "autotrade_rbx", "telegram_alerts_rbx", "rbx_part",
                   "cas_enabled", "autotrade_cas", "telegram_alerts_cas", "risk_pct_cas",   # v0.99.653
                   "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
+                  "htf_enabled", "autotrade_htf", "telegram_alerts_htf", "risk_pct_htf",   # v0.99.732
                   "dlm_enabled", "autotrade_dlm2", "telegram_alerts_dlm", "risk_pct_dlm2", "dlm_binance", "dlm_more_coins", "bn_others", "bn_cross",   # v0.99.679, v0.99.684, v0.99.686 (v0.99.687: the single mode and the ladder dropped; the 4h module's own autotrade / risk keys: it starts virtual at 4% (v0.99.688), the 15m one held up to 50%)
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
@@ -1239,6 +1240,7 @@ def get_settings():
         "telegram_alerts_rbx": TELEGRAM_ALERTS_RBX, "rbx_part": RBX_PART,
         "cas_enabled": CAS_ENABLED, "autotrade_cas": AUTOTRADE_ENABLED_CAS, "telegram_alerts_cas": TELEGRAM_ALERTS_CAS, "risk_pct_cas": MODULE_RISK_PCT.get("cas"),   # v0.99.653
         "smc_enabled": SMC_ENABLED, "autotrade_smc": AUTOTRADE_ENABLED_SMC, "telegram_alerts_smc": TELEGRAM_ALERTS_SMC, "risk_pct_smc": MODULE_RISK_PCT.get("smc"),   # v0.99.678
+        "htf_enabled": HTF_ENABLED, "autotrade_htf": AUTOTRADE_ENABLED_HTF, "telegram_alerts_htf": TELEGRAM_ALERTS_HTF, "risk_pct_htf": MODULE_RISK_PCT.get("htf"),   # v0.99.732
         "dlm_enabled": DLM_ENABLED, "autotrade_dlm2": AUTOTRADE_ENABLED_DLM, "telegram_alerts_dlm": TELEGRAM_ALERTS_DLM, "risk_pct_dlm2": MODULE_RISK_PCT.get("dlm"),   # v0.99.679, v0.99.687
         "dlm_binance": DLM_BINANCE,   # v0.99.684
         "bn_others": BN_OTHERS,   # v0.99.698
@@ -1530,6 +1532,7 @@ def apply_settings(updates):
     for _k, _g in (("rbx_enabled", "RBX_ENABLED"), ("autotrade_rbx", "AUTOTRADE_ENABLED_RBX"), ("telegram_alerts_rbx", "TELEGRAM_ALERTS_RBX"), ("rbx_part", "RBX_PART"),
                    ("cas_enabled", "CAS_ENABLED"), ("autotrade_cas", "AUTOTRADE_ENABLED_CAS"), ("telegram_alerts_cas", "TELEGRAM_ALERTS_CAS"),
                    ("smc_enabled", "SMC_ENABLED"), ("autotrade_smc", "AUTOTRADE_ENABLED_SMC"), ("telegram_alerts_smc", "TELEGRAM_ALERTS_SMC"),
+                   ("htf_enabled", "HTF_ENABLED"), ("autotrade_htf", "AUTOTRADE_ENABLED_HTF"), ("telegram_alerts_htf", "TELEGRAM_ALERTS_HTF"),   # v0.99.732
                    ("dlm_enabled", "DLM_ENABLED"), ("autotrade_dlm2", "AUTOTRADE_ENABLED_DLM"), ("telegram_alerts_dlm", "TELEGRAM_ALERTS_DLM"),
                    ("dlm_binance", "DLM_BINANCE"), ("dlm_more_coins", "DLM_MORE_COINS"), ("bn_others", "BN_OTHERS"), ("bn_cross", "BN_CROSS")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
         if _k in updates:
@@ -1563,7 +1566,7 @@ def apply_settings(updates):
             globals()[_g] = bool(updates[_k])
     if updates.get("emw_enabled"):
         EMW_BACKTEST_TRIGGER.set()
-    for _mod in ("neuro", "snr", "prv", "zones", "emw", "zm", "rbx", "cas", "smc", "dlm"):   # v0.99.435 — own risk % per module; empty / 0 = the common one
+    for _mod in ("neuro", "snr", "prv", "zones", "emw", "zm", "rbx", "cas", "smc", "dlm", "htf"):   # v0.99.435 — own risk % per module; empty / 0 = the common one
         _key = "risk_pct_dlm2" if _mod == "dlm" else f"risk_pct_{_mod}"   # v0.99.687 — ⚡ 4h: a new key, the 15m module's 50% not carried over
         if _key in updates and isinstance(updates[_key], bool):
             continue   # v0.99.678 — an old page sent the number field's "checked" (false): never a risk reset
@@ -7561,6 +7564,7 @@ LOOP_MAX_GAP_SEC = {
     "rbx_loop": 3 * 3600,   # v0.99.625 — once a day, beats every minute
     "cas_loop": 60 * 60,   # v0.99.653 — 🌊 EMA cascade
     "smc_loop": 60 * 60,   # v0.99.678 — 🧱 SMC, beats per coin while the hour's levels are counted
+    "htf_loop": 60 * 60,   # v0.99.732 — 📏 HTF, the same
     "dlm_loop": 30 * 60,   # v0.99.679 — ⚡ 15m deep limits, beats every 5 s and per coin while scanning
     "hdg_loop": 10 * 60,   # v0.99.628 — 🪞 hedge mirror, beats every 5 s
     "auto_update_loop": 30 * 60,   # v0.99.637 — beats every 10 min
@@ -7578,7 +7582,7 @@ LOOP_MAX_GAP_SEC = {
 LOOP_LABELS = {
     "scan_loop": "Volume скан", "msnr_live_loop": "MSNR живой скан",
     "lsw_live_loop": "Sweep живой скан", "snr_live_loop": "S/R живой скан",
-    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "cas_loop": "🌊 Каскад", "smc_loop": "🧱 SMC", "dlm_loop": "⚡ Лимитки 4ч+2ч", "hdg_loop": "🪞 Хедж", "auto_update_loop": "автообновление", "nx_loop": "Нейро",
+    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "cas_loop": "🌊 Каскад", "smc_loop": "🧱 SMC", "htf_loop": "📏 HTF-уровни", "dlm_loop": "⚡ Лимитки 4ч+2ч", "hdg_loop": "🪞 Хедж", "auto_update_loop": "автообновление", "nx_loop": "Нейро",
     "reconcile_loop": "сверка позиций (автоторговля)",
     "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
     "snr_backtest_loop": "S/R бэктест",
@@ -9199,7 +9203,7 @@ def kelly_risk(pairs):
             "auto_risk_n": n, "auto_risk_avg_r": round(mean, 3), "auto_risk_cautious_r": round(mean - se, 3)}
 
 
-MODULE_RISK_PCT = {"neuro": None, "snr": None, "prv": None, "zones": None, "emw": None, "zm": None, "rbx": None, "cas": None, "smc": None, "dlm": None}   # v0.99.435 — own risk % per module (None = the common one)
+MODULE_RISK_PCT = {"neuro": None, "snr": None, "prv": None, "zones": None, "emw": None, "zm": None, "rbx": None, "cas": None, "smc": None, "dlm": None, "htf": None}   # v0.99.435 — own risk % per module (None = the common one)
 RISK_PCT_MAX = 100.0   # v0.99.435 — user: "не ограничивай 50%"
 
 
@@ -26323,7 +26327,7 @@ def _zones_outbox_save():
 
 TELEGRAM_ALERTS_TRADE_RESULTS = os.environ.get("VP_TG_TRADE_RESULTS", "1") == "1"            # v0.99.457
 TELEGRAM_TRADE_RESULTS_REAL_ONLY = os.environ.get("VP_TG_TRADE_RESULTS_REAL", "0") == "1"
-_TRADE_MOD_NAMES = {"rbx": "📈 Пробой", "cas": "🌊 Каскад", "smc": "🧱 SMC", "dlm": "⚡ Лимитки 4ч+2ч", "zones_zm": "🎯 Сильные зоны", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "zones": "Зоны",
+_TRADE_MOD_NAMES = {"rbx": "📈 Пробой", "cas": "🌊 Каскад", "smc": "🧱 SMC", "htf": "📏 HTF-уровни", "dlm": "⚡ Лимитки 4ч+2ч", "zones_zm": "🎯 Сильные зоны", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "zones": "Зоны",
                     "zones_own": "Зоны · 🔎 наш поиск", "zones_appr": "Зоны · движение к зоне", "zones_pb": "Зоны · 🧪 откат"}
 
 
@@ -32319,6 +32323,7 @@ def model_refresh_once():
                                          ("P/R", PRX_MODEL_FILE, PRX_MODEL_URL, PRX_MODEL_VER, _prx_lock, _PRX),
                                          ("🌊 Каскад", CAS_MODEL_FILE, CAS_MODEL_URL, CAS_MODEL_VER, _cas_lock, _CAS),
                                          ("🧱 SMC", SMC_MODEL_FILE, SMC_MODEL_URL, SMC_MODEL_VER, _smc_lock, _SMC),
+                                         ("📏 HTF-уровни", HTF_MODEL_FILE, HTF_MODEL_URL, HTF_MODEL_VER, _htf_lock, _HTF),   # v0.99.732
                                          ("⚡ Лимитки 4ч+2ч", DLM_MODEL_FILE, DLM_MODEL_URL, DLM_MODEL_VER, _dlm_lock, _DLM)):
         try:
             local = 0
@@ -32330,7 +32335,7 @@ def model_refresh_once():
             r = requests.get(url.format(ref="main"), params={"nocache": int(time.time())}, timeout=120)
             r.raise_for_status()
             m = r.json()
-            if m.get("ver") != ver or not (m.get("models") or m.get("streams")) or int(m.get("trained_to") or 0) <= local:
+            if m.get("ver") != ver or not (m.get("models") or m.get("streams") or m.get("models_o")) or int(m.get("trained_to") or 0) <= local:
                 continue
             tmp = fn + ".new"
             with open(tmp, "w") as f:
@@ -33671,9 +33676,10 @@ def _smc_round(lv):
     return 0.0
 
 
-def smc_candidates(h1, h4, d1, bh1, bd1, t_hour):
+def smc_candidates(h1, h4, d1, bh1, bd1, t_hour, want=None):
     """the untouched levels of every family at the start of the hour t_hour with the features of each.
-    h1 / h4 / d1: the coin's closed bars before t_hour; bh1 / bd1: BTC's. -> [{"fam", "side", "lv", "f": [..]}]"""
+    h1 / h4 / d1: the coin's closed bars before t_hour; bh1 / bd1: BTC's. -> [{"fam", "side", "lv", "f": [..]}]
+    want: the family indices to return (v0.99.732 — 📏 HTF's 0..22); None = SMC's (index >= SMC_FIRST)"""
     if len(h1) < 500 or len(d1) < 30 or len(bh1) < 200 or len(bd1) < 60:
         return []
     day0 = t_hour // 86400 * 86400
@@ -33768,14 +33774,17 @@ def smc_candidates(h1, h4, d1, bh1, bd1, t_hour):
     out = []
     for fi, fam in enumerate(SMC_FAMS):
         v = lv.get(fam)
-        if fi < SMC_FIRST or v is None or v <= 0:
+        if (fi < SMC_FIRST if want is None else fi not in want) or v is None or v <= 0:
             continue
         sc_ = SMC_SCOPE[fi]
         ps = starts[sc_]
         # the period's hours so far: the research's first-touch state machine
         k0 = bisect.bisect_left(hT, ps)
+        # v0.99.732 — a period's own open is a level only from 6 h (the week / month) / 24 h (the year) in, as the research
+        # (lv_engine: NaN before, those hours never count as a touch); counting them marked 📏 HTF's opens touched at once
+        k1 = bisect.bisect_left(hT, {"wopen": w0 + 6 * 3600, "mopen": m0 + 6 * 3600, "yopen": y0 + 24 * 3600}.get(fam, 0))
         done = False
-        for j in range(max(k0, 1), len(h1)):
+        for j in range(max(k0, k1, 1), len(h1)):
             pc = hC[j - 1]
             if pc > v and (hO[j] <= v or hL[j] <= v * 0.999):
                 done = True; break
@@ -34138,6 +34147,355 @@ def api_smc_status():
         return jsonify(smc_stats())
     except Exception as e:
         log_error(f"smc status: {e}")
+        return jsonify({"err": f"статистика не посчиталась: {e}"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v0.99.732 — 📏 HTF levels (the user: "дальше думай над созданием нового индикатора… на гипотезах из гитхаба", then
+# "нужен симбиоз, агрессивный варик с только лонгами и возможно чуть меньше риск"). The diversifier hunt (tools/winrate
+# div_screen.py): of every tested family only the higher charts' plain levels — yesterday's low / middle, the daily SMA
+# 20/50/100/200 and Bollinger lines, last week's / month's levels, the period opens — earned in the bundle's worst months.
+# Longs only (the shorts ~0R). Two walk-forward models, a touch taken when EITHER is above its q 0.995 threshold: "o" (all
+# HTF touches, the plain 1-dATR exit's label) and "n" (the long touches, the traded exit's label: it carries to the 84
+# never-trained coins far better). The bot's realistic pipeline (the reach filter, the nearer-level order, cap 12, one per
+# coin): 299 trades 2023–26, +0.75R, WR 66%, every year in plus; 1-min Binance check (audit_htf1m.py): the entry confirmed
+# on every trade, the minute walk = the hour walk, a market entry at the touch +0.79R. In the bundle at 1.5% (port with
+# the friction): the last 12 months $129.7k -> $196.3k, better in 94% of the 12-month windows (98% from Dec 2024). The
+# levels and features: smc_candidates (the research's lv_engine, parity t_htf_parity.py) with want = families 0..22.
+# A touch = the price 0.1% through the level (the research's fill rule), the trade at the market; the stop on a 4h close
+# 1 dATR below, the exchange's emergency stop 3 dATR, take 3R, out at 96 h, no break-even.
+HTF_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_htf_model.json")
+HTF_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_htf_model.json"
+HTF_MODEL_VER = 1
+HTF_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_htf_state.json")
+HTF_ENABLED = os.environ.get("VP_HTF", "1") == "1"
+AUTOTRADE_ENABLED_HTF = os.environ.get("VP_AUTOTRADE_HTF", "0") == "1"
+TELEGRAM_ALERTS_HTF = os.environ.get("VP_TG_ALERTS_HTF", "1") == "1"
+HTF_RISK_DEFAULT = 0.25   # % on Gate when the module's own field is empty; on Binance BN_OTHERS_RISK["htf"]
+HTF_POLL_SEC = 10
+HTF_NAME = {"pdh": "максимум вчера", "pdl": "минимум вчера", "pdm": "середина вчера", "d_sma20": "SMA20 дня", "d_sma50": "SMA50 дня",
+            "d_sma100": "SMA100 дня", "d_sma200": "SMA200 дня", "d_bbu": "верх Боллинджера дня", "d_bbl": "низ Боллинджера дня",
+            "pwh": "максимум прошлой недели", "pwl": "минимум прошлой недели", "pwm": "середина прошлой недели", "wopen": "открытие недели",
+            "w_sma10": "SMA10 недели", "w_sma20": "SMA20 недели", "w_sma50": "SMA50 недели", "w_bbu": "верх Боллинджера недели",
+            "w_bbl": "низ Боллинджера недели", "pmh": "максимум прошлого месяца", "pml": "минимум прошлого месяца",
+            "pmm": "середина прошлого месяца", "mopen": "открытие месяца", "yopen": "открытие года"}
+_HTF = {"model": None, "err": None, "trades": [], "armed": [], "armed_at": None, "loaded": False, "scan": None}
+_htf_lock = threading.Lock()
+
+
+def htf_model():
+    with _htf_lock:
+        m = _HTF["model"]
+    if m and m.get("ver") == HTF_MODEL_VER:
+        return m
+    m = None
+    try:
+        if os.path.exists(HTF_MODEL_FILE):
+            with open(HTF_MODEL_FILE) as f:
+                m = json.load(f)
+            if m.get("ver") != HTF_MODEL_VER or m.get("feats") != SMC_FNAMES or m.get("fams") != SMC_FAMS:
+                m = None
+    except Exception as e:
+        log_error(f"htf model read: {e}")
+        m = None
+    if not m:
+        try:
+            r = requests.get(HTF_MODEL_URL.format(ref="main"), params={"nocache": int(time.time())}, timeout=120)
+            r.raise_for_status()
+            m = r.json()
+            if m.get("ver") != HTF_MODEL_VER or not m.get("models_o") or not m.get("models_n"):
+                raise RuntimeError(f"версия модели {m.get('ver')} вместо {HTF_MODEL_VER}")
+            if m.get("feats") != SMC_FNAMES or m.get("fams") != SMC_FAMS:
+                raise RuntimeError("признаки модели не совпадают с кодом бота — нужно обновить бота")
+            tmp = HTF_MODEL_FILE + ".new"
+            with open(tmp, "w") as f:
+                json.dump(m, f, separators=(",", ":"))
+            os.replace(tmp, HTF_MODEL_FILE)
+        except Exception as e:
+            with _htf_lock:
+                _HTF["err"] = f"модель не скачалась: {e}"
+            log_error(f"htf model download: {e}")
+            return None
+    with _htf_lock:
+        _HTF.update({"model": m, "err": None})
+    return m
+
+
+def htf_load():
+    try:
+        if os.path.exists(HTF_STATE_FILE):
+            with open(HTF_STATE_FILE) as f:
+                d = json.load(f)
+            with _htf_lock:
+                _HTF["trades"] = d.get("trades") or []
+                _HTF["armed"] = d.get("armed") or []
+                _HTF["armed_at"] = d.get("armed_at")
+                _HTF["scan"] = d.get("scan")
+    except Exception as e:
+        log_error(f"htf state load: {e}")
+    _HTF["loaded"] = True
+
+
+def htf_save():
+    try:
+        with _htf_lock:
+            data = json.dumps({"trades": _HTF["trades"][-600:], "armed": _HTF["armed"], "armed_at": _HTF["armed_at"], "scan": _HTF["scan"]})
+        tmp = HTF_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(data)
+        os.replace(tmp, HTF_STATE_FILE)
+    except Exception as e:
+        log_error(f"htf state save: {e}")
+
+
+def htf_scores(m, f):
+    """(the "o" model's score, the "n" model's score) of one level's features"""
+    so = sum(zm_tree_pred(t_, f) for t_ in m["models_o"]) / len(m["models_o"])
+    sn = sum(zm_tree_pred(t_, f) for t_ in m["models_n"]) / len(m["models_n"])
+    return so, sn
+
+
+def htf_pick(m, so, sn):
+    """the research's rule: either model's percentile >= q  <=>  its score > its threshold -> "o" / "n" / "on" / "" """
+    return ("o" if so > float(m["thr_o"]) else "") + ("n" if sn > float(m["thr_n"]) else "")
+
+
+def htf_arm(late=False):
+    """at the start of an hour: the untouched long HTF levels of the bot coins in reach, scored by both models; the ones
+    either model takes are armed for this hour. late (a restart well into the hour): a level already reached stays out"""
+    m = htf_model()
+    if not m:
+        return
+    now = time.time()
+    t_hour = int(now // 3600 * 3600)
+    bh1 = _zm_closed("BTC_USDT", "1h", 3600, 1000, t_hour)
+    bd1 = _zm_closed("BTC_USDT", "1d", 86400, 3000, t_hour)
+    rule = m.get("rule") or {}
+    want = set(int(x) for x in m.get("htf_fams") or range(23))
+    trig_f = 1 - float(rule.get("trig_pct", 0.1)) / 100
+    armed, coins, cands, best = [], 0, 0, []
+    for sym in _research_syms(RESEARCH_COINS_127, mode="htf"):
+        heartbeat("htf_loop")
+        try:
+            h1 = _zm_closed(sym, "1h", 3600, 1000, t_hour)
+            h4 = _zm_closed(sym, "4h", 4 * 3600, 1000, t_hour)
+            d1 = _zm_closed(sym, "1d", 86400, 3000, t_hour)
+            cs = smc_candidates(h1, h4, d1, bh1, bd1, t_hour, want=want)
+            coins += 1
+            if not cs:
+                continue
+            px = h1[-1]["close"]
+            for c in cs:
+                if c["side"] <= 0:
+                    continue   # long only
+                if abs(px - c["lv"]) / px * 100 > float(rule.get("reach_datr", 1.5)) * c["datr"]:
+                    continue
+                cands += 1
+                so, sn = htf_scores(m, c["f"])
+                by = htf_pick(m, so, sn)
+                best.append((max(so / float(m["thr_o"]) if float(m["thr_o"]) > 0 else 0, sn / float(m["thr_n"]) if float(m["thr_n"]) > 0 else 0), sym, c))
+                if not by:
+                    continue
+                lv = c["lv"]; trig = lv * trig_f
+                if late and limit_touched_since(sym, 1, trig, t_hour):
+                    continue
+                risk = lv * float(rule.get("stop_datr", 1.0)) * c["datr"] / 100
+                armed.append({"symbol": sym, "fam": c["fam"], "side": 1, "lv": lv, "trig": trig, "so": round(so, 3), "sn": round(sn, 3), "by": by,
+                              "datr": round(c["datr"], 4), "sl": lv - risk, "tp": lv + float(rule.get("take_r", 3.0)) * risk, "hour": t_hour,
+                              "px": px, "dist": round((lv - px) / px * 100, 2)})
+        except Exception as e:
+            log_error(f"htf levels {sym}: {e}")
+    armed.sort(key=lambda a: a["dist"], reverse=True)   # the nearest first
+    best.sort(key=lambda x: -x[0])
+    near = [{"symbol": sym, "fam": c["fam"], "pct": round(100 * x)} for x, sym, c in best[:8]]
+    with _htf_lock:
+        _HTF["armed"], _HTF["armed_at"] = armed, t_hour
+        _HTF["scan"] = {"t": int(now), "coins": coins, "levels": cands, "armed": len(armed), "near": near}
+    htf_save()
+
+
+def _htf_can_open(sym):
+    m = _HTF.get("model") or {}
+    with _htf_lock:
+        opn = [t for t in _HTF["trades"] if t["status"] == "OPEN"]
+    if any(t["symbol"] == sym for t in opn):
+        return False
+    return len(opn) < int(m.get("side_cap") or 12)
+
+
+def htf_fire(a, t_touch, live_px=None, how=None):
+    """the price 0.1% through an armed level: the signal (and the real trade at the market when the switch is on)"""
+    if not _htf_can_open(a["symbol"]):
+        return
+    m = _HTF.get("model") or {}
+    rule = m.get("rule") or {}
+    hold = int(rule.get("hold_h", 96))
+    tr = {"id": f"htf_{a['symbol']}_{a['fam']}_{a['hour']}", "symbol": a["symbol"], "fam": a["fam"], "side": 1, "direction": "LONG",
+          "entry": a["lv"], "sl": a["sl"], "tp": a["tp"], "by": a.get("by"), "so": a.get("so"), "sn": a.get("sn"), "t_in": int(t_touch),
+          "hour": a["hour"], "until": int(a["hour"] + hold * 3600), "hold": hold, "status": "OPEN", "result": None,
+          "r": None, "exit": None, "t_out": None, "real": False, "live_px": live_px, "rv": HTF_MODEL_VER, "px": live_px or a["lv"], "trig": how}
+    risk_plan = abs(a["lv"] - a["sl"]) or 1e-12
+    if live_px and live_px - a["lv"] > risk_plan:   # the price a whole R above the level already: no real trade
+        tr["late"] = round((live_px - a["lv"]) / risk_plan, 2)
+    ch, hx = _close_stop_rule(m)
+    if ch:
+        tr.update({"ch": ch, "hs": a["lv"] - hx * risk_plan})
+    if AUTOTRADE_ENABLED_HTF and live_px and not tr.get("late"):
+        try:
+            res = execute_autotrade("htf", a["symbol"], "LONG", live_px, tr.get("hs", a["sl"]), a["tp"], extra={"htf": HTF_NAME.get(a["fam"], a["fam"]), "kx": hx},
+                                    risk_pct_override=(MODULE_RISK_PCT.get("htf") or HTF_RISK_DEFAULT) * hx)
+            tr["real"] = (res or {}).get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+            tr["autotrade"] = {"status": (res or {}).get("status"), "detail": str((res or {}).get("detail") or "")[:200]}
+        except Exception as e:
+            log_error(f"htf autotrade {a['symbol']}: {e}")
+    with _htf_lock:
+        if any(t["id"] == tr["id"] for t in _HTF["trades"]):
+            return
+        _HTF["trades"].append(tr)
+    htf_save()
+    if TELEGRAM_ALERTS_HTF:
+        pct = lambda p: (p - a["lv"]) / a["lv"] * 100
+        send_telegram(f"📏 {a['symbol'].replace('_USDT', '')} LONG · HTF: {HTF_NAME.get(a['fam'], a['fam'])} — цена прошла уровень на 0.1%\n"
+                      f"вход {a['lv']:.6g} · стоп по закрытию 4ч {a['sl']:.6g} ({pct(a['sl']):+.1f}%) · аварийный {tr.get('hs', a['sl']):.6g} ({pct(tr.get('hs', a['sl'])):+.1f}%)"
+                      f" · тейк {a['tp']:.6g} ({pct(a['tp']):+.1f}%) · держать до {hold} ч\n"
+                      + ("💰 сделка на бирже" if tr["real"] else (f"без сделки: цена уже на {tr['late']}R выше уровня" if tr.get("late") else "без сделки (только сигнал)")),
+                      category="htf")
+
+
+def htf_touched(symbol, trig, px, since):
+    """the price at / below the trigger: the module's live price, or Binance's 1-min low since `since` -> "px" / "binance" / None"""
+    if px and px <= trig:
+        return "px"
+    bn = binance_recent(symbol, max(since, time.time() - 200))
+    if bn and bn[0] <= trig:
+        return "binance"
+    return None
+
+
+def htf_watch_tick():
+    """every HTF_POLL_SEC: the armed levels of this hour against the price"""
+    with _htf_lock:
+        armed, hour = list(_HTF["armed"]), _HTF["armed_at"]
+    now = time.time()
+    if not armed or hour is None or now >= hour + 3600:
+        return
+    px = mod_px_map("htf")
+    for a in armed:
+        p = px.get(a["symbol"])
+        how = htf_touched(a["symbol"], a["trig"], p, hour)
+        if how and p:
+            htf_fire(a, now, p, how)
+
+
+def htf_settle(now=None):
+    """after each hour: armed levels whose 1h candle went 0.1% through but were not caught live (the record must match the
+    research) and the open trades walked on the 1h candles — the emergency stop by a touch, the stop at a 4h close, no take
+    in the entry hour, out at 96 h"""
+    now = now or time.time()
+    with _htf_lock:
+        armed, hour = list(_HTF["armed"]), _HTF["armed_at"]
+    if armed and hour is not None and now >= hour + 3600:
+        for a in armed:
+            try:
+                cs = [c for c in mod_candles("htf", a["symbol"], "1h", hour, hour) if c["time"] == hour]
+                if any(c["low"] <= a["trig"] for c in cs):
+                    htf_fire(a, hour)
+            except Exception as e:
+                log_error(f"htf settle {a['symbol']}: {e}")
+        with _htf_lock:
+            if _HTF["armed_at"] == hour:
+                _HTF["armed"] = []
+    with _htf_lock:
+        opn = [t for t in _HTF["trades"] if t["status"] == "OPEN"]
+    changed = False
+    for t in opn:
+        try:
+            cs = [c for c in mod_candles("htf", t["symbol"], "1h", t["hour"], int(now)) if c["time"] + 3600 <= now and c["time"] >= t["hour"]]
+            if not cs:
+                continue
+            fill, sl, tp = t["entry"], t["sl"], t["tp"]
+            risk = abs(fill - sl) or 1e-12
+            hold = int(t.get("hold") or 96)
+            ch = int(t.get("ch") or 0)
+            hx = abs(fill - t["hs"]) / risk if ch and t.get("hs") is not None else 1.0
+            res = _cs_walk(cs, 1, fill, sl, tp, hold, ch, hx, 0.0)
+            if not res:
+                continue
+            kind, ex, k, _took = res
+            if kind == "LOSS" and ch and ex != t.get("hs") and t.get("real") and AUTOTRADE_ENABLED_HTF:   # the close stop: out at the market
+                log_error(f"htf close stop {t['symbol']}: {close_position_for_mode('htf', t['symbol'], t['direction'])}")
+            r = (ex - fill) / risk - (SMC_FEE + SMC_FUND * (k + 1) / 24) * fill / risk
+            if kind == "TIME_EXIT" and t.get("real") and AUTOTRADE_ENABLED_HTF:
+                log_error(f"htf time exit {t['symbol']}: {close_position_for_mode('htf', t['symbol'], t['direction'])}")
+            elif t.get("real") and AUTOTRADE_ENABLED_HTF:
+                bno_settle_close("htf", t, kind)
+            with _htf_lock:
+                t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k]["time"] + 3600), "r": round(r, 3)})
+            changed = True
+            notify_trade_result("htf", t["symbol"], t["direction"], fill, ex, kind, round(r, 3), real=bool(t.get("real")),
+                                note=f"HTF: {HTF_NAME.get(t.get('fam'), t.get('fam'))}")
+        except Exception as e:
+            log_error(f"htf trade {t.get('symbol')}: {e}")
+    if changed:
+        htf_save()
+
+
+def htf_loop():
+    time.sleep(110)
+    htf_load()
+    try:
+        htf_model()
+    except Exception as e:
+        log_error(f"htf_loop model: {e}")
+    last_hour = None
+    while True:
+        heartbeat("htf_loop")
+        try:
+            if HTF_ENABLED:
+                now = time.time()
+                h = int(now // 3600 * 3600)
+                if h != last_hour and now - h >= 25:   # a new hour: settle the past one, arm this one
+                    htf_settle(now)
+                    htf_arm(late=now - h >= 20 * 60)
+                    last_hour = h
+                with live_http():
+                    htf_watch_tick()
+        except Exception as e:
+            log_error(f"htf_loop: {e}")
+            with _htf_lock:
+                _HTF["err"] = str(e)[:200]
+        time.sleep(HTF_POLL_SEC)
+
+
+def htf_stats():
+    m = _HTF.get("model") or {}
+    with _htf_lock:
+        trades = list(_HTF["trades"])
+        armed = list(_HTF["armed"])
+        scan, err = _HTF.get("scan"), _HTF.get("err")
+    fin = [t for t in trades if t["status"] == "CLOSED" and t.get("r") is not None]
+    rs = [t["r"] for t in fin]
+    t0 = min((t["t_in"] for t in trades), default=None)
+    weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
+    return {"on": HTF_ENABLED, "auto": AUTOTRADE_ENABLED_HTF, "tg": TELEGRAM_ALERTS_HTF,
+            "risk": MODULE_RISK_PCT.get("htf") or (BN_OTHERS_RISK["htf"] if bn_routed("htf") else HTF_RISK_DEFAULT), "bn": bn_routed("htf"),
+            "model": {k: m.get(k) for k in ("ver", "q", "thr_o", "thr_n", "trained_to", "rule", "research", "side_cap")} if m else None,
+            "names": HTF_NAME, "err": err, "scan": scan, "armed": armed[:40], "armed_n": len(armed),
+            "open": [dict(t, why=mod_why_virtual(t, AUTOTRADE_ENABLED_HTF)) for t in trades if t["status"] == "OPEN"][-30:],
+            "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
+            "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
+            "live_check": live_vs_bt("htf", [t["r"] for t in fin if t.get("rv") == HTF_MODEL_VER]),
+            "last": [{k: t.get(k) for k in ("symbol", "side", "fam", "t_in", "hour", "r", "result", "real", "entry", "sl", "tp", "exit", "t_out", "by")}
+                     | {"why": mod_why_virtual(t, AUTOTRADE_ENABLED_HTF)}
+                     for t in sorted(fin, key=lambda t: -t["t_in"])[:30]]}
+
+
+@app.route("/api/htf/status")
+def api_htf_status():
+    try:
+        return jsonify(htf_stats())
+    except Exception as e:
+        log_error(f"htf status: {e}")
         return jsonify({"err": f"статистика не посчиталась: {e}"})
 
 
@@ -35666,8 +36024,8 @@ def bn_size(direction, e, sl_x, cap, mmr, equity, risk, bsym, tb, mt, safety=Non
         lev2 = max(1, min(int(cap), BN_CROSS_LEV))
         margin, lev = margin * lev / lev2, lev2
     return margin, lev, skip
-BN_OTHERS_MODES = ("prv", "smc", "emw")
-BN_OTHERS_RISK = {"prv": 3.0, "smc": 2.5, "emw": 2.0}   # v0.99.727 — SMC 2.5% + EMA 2% (port_risk2/3.py: with the cross margin and SMC's break-even the bundle is better in every 12-month window, with and without friction); v0.99.718 — P/R 3% with cross margin (port_717*.py); v0.99.712 — EMA 1% (port_w709.py: every number better); v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
+BN_OTHERS_MODES = ("prv", "smc", "emw", "htf")
+BN_OTHERS_RISK = {"prv": 3.0, "smc": 2.5, "emw": 2.0, "htf": 1.5}   # v0.99.732 — 📏 HTF 1.5% (htf_money5.py: with the friction the last 12 months $129.7k -> $196.3k, better in 94% of the windows; 2% adds ~nothing). v0.99.727 — SMC 2.5% + EMA 2% (port_risk2/3.py: with the cross margin and SMC's break-even the bundle is better in every 12-month window, with and without friction); v0.99.718 — P/R 3% with cross margin (port_717*.py); v0.99.712 — EMA 1% (port_w709.py: every number better); v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
 BNO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_bn_others.json")
 _BNO = {"pos": {}}   # Gate contract -> the Binance position this bot opened for P/R / SMC / EMA
 _bno_lock = threading.Lock()
@@ -35960,7 +36318,7 @@ def dlm_bn_place(o):
     if bnf_positions().get(bsym):   # v0.99.715 — waits (the position may close before the price comes), the reason by whose it is
         with _bno_lock:
             m_ = (_BNO["pos"].get(sym) or {}).get("mode")
-        o["hold"] = (f"по монете открыта сделка {({'prv': 'P/R', 'smc': '🧱 SMC', 'emw': '📈 EMA'}).get(m_, m_)} на Binance — одна позиция на монету" if m_
+        o["hold"] = (f"по монете открыта сделка {({'prv': 'P/R', 'smc': '🧱 SMC', 'emw': '📈 EMA', 'htf': '📏 HTF'}).get(m_, m_)} на Binance — одна позиция на монету" if m_
                      else "по монете на Binance уже есть позиция (не этого бота или открытая вручную) — одна позиция на монету")
         o["real"] = None
         return
@@ -36386,7 +36744,7 @@ def dlm_bn_adopt(now=None):
             elif stp or tpo:
                 d_sl = abs(entry - stp[2] / scl) if stp else 0; d_tp = abs(tpo[2] / scl - entry) if tpo else 0
                 ratio = d_tp / d_sl if d_sl else 0
-                mode = min((("prv", 0.75), ("smc", 1.5), ("emw", 2.0)), key=lambda m_: abs(m_[1] - ratio))[0] if ratio else "smc"
+                mode = min((("prv", 0.75), ("htf", 1.0), ("smc", 1.5), ("emw", 2.0)), key=lambda m_: abs(m_[1] - ratio))[0] if ratio else "smc"   # v0.99.732 — 📏 HTF: take 3R / the emergency stop 3R
                 rec = {"mode": mode, "bsym": bsym, "scl": scl, "side": s, "qty": abs(p["amt"]), "entry": p["entry"], "lev": None, "risk": None, "dual": dual,
                        "tick": info.get("tick"), "step": info.get("step"), "min_qty": info.get("min_qty"), "t": int(now), "adopted": True,
                        "sl_kind": stp[0] if stp else None, "sl_id": stp[1] if stp else None, "tp_kind": tpo[0] if tpo else None, "tp_id": tpo[1] if tpo else None,
@@ -36395,7 +36753,7 @@ def dlm_bn_adopt(now=None):
                     _BNO["pos"][sym] = rec
                 bno_save()
                 changed = True
-                lines.append(f"{ {'prv': 'P/R', 'smc': '🧱 SMC', 'emw': '📈 EMA'}[mode] } {sym.replace('_USDT', '')}: позиция подхвачена — стоп и тейк на бирже; "
+                lines.append(f"{ {'prv': 'P/R', 'smc': '🧱 SMC', 'emw': '📈 EMA', 'htf': '📏 HTF'}[mode] } {sym.replace('_USDT', '')}: позиция подхвачена — стоп и тейк на бирже; "
                              f"выход по времени и по закрытию свечи этот бот по ней не ведёт (их запись на старом телефоне)")
             else:
                 lines.append(f"⚠️ {bsym}: позиция без стопа на бирже и без записи бота — поставьте стоп сами")
@@ -40738,6 +41096,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="rbx" style="color:#ffb74d;">📈 Пробой</div>
   <div class="tab" data-tab="cas" style="color:#4dd0e1;">🌊 Каскад</div>
   <div class="tab" data-tab="smc" style="color:#a1887f;">🧱 SMC</div>
+  <div class="tab" data-tab="htf" style="color:#9ccc65;">📏 HTF</div>
   <div class="tab" data-tab="dlm" style="color:#ffd54f;">⚡ Лимитки</div>
   <div class="tab" data-tab="hdg" style="color:#b39ddb;">🪞 Хедж</div>
   <div class="tab" data-tab="signals">Volume</div>
@@ -40762,6 +41121,7 @@ INDEX_HTML = """<!doctype html>
   <div id="rbxPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="casPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="smcPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="htfPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="dlmPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="hdgPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="snrPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
@@ -41020,6 +41380,23 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
+    <details class="settingsGroup" style="--mod-color:#9ccc65;"><summary class="settingsGroupTitle">📏 HTF-уровни</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (1ч — 127 монет, только лонги)</div>
+          <div class="sub">в начале часа: уровни старших графиков под ценой — минимум и середина вчерашнего дня, SMA 20/50/100/200 и линии Боллинджера дня, уровни прошлой недели и месяца, открытия периодов. Две модели оценивают первое касание, берётся то, что выбрала любая из них (~0.5% лучших); вход — когда цена прошла уровень на 0.1%. Стоп по закрытию 4ч-свечи за 1 дневным ATR, аварийный 3 ATR, тейк 3R, выход через 96 ч; не больше 12 сделок сразу</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setHtf"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ 📏 HTF в Telegram</div>
+          <div class="sub">новая сделка и её итог</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgHtf"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+
     <details class="settingsGroup" style="--mod-color:#4dd0e1;"><summary class="settingsGroupTitle">🌊 Каскад EMA</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -41264,6 +41641,7 @@ INDEX_HTML = """<!doctype html>
           <input type="number" id="setRiskPctCas" min="0.1" max="100" step="0.1" placeholder="🌊 0.5" title="🌊 Каскад: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctDlm" min="0.1" max="100" step="0.05" placeholder="⚡ 4.5" title="⚡ Лимитки 4ч+2ч: пусто — 4.5% на сделку, до 20 сделок сразу; больше 10% не берётся" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSmc" min="0.1" max="100" step="0.05" placeholder="🧱 2.5" title="🧱 SMC: пусто — 2.5% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctHtf" min="0.1" max="100" step="0.05" placeholder="📏 1.5" title="📏 HTF-уровни: пусто — 1.5% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
         </div>
       </div>
       <div class="settingRow subRow">
@@ -41359,6 +41737,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳ 📏 HTF-уровни</div>
+          <div class="sub">реальный лонг по рынку, когда цена прошла уровень на 0.1% (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 3 дневных ATR и тейк 3R сразу на бирже, выход по закрытию 4ч-свечи за 1 дневным ATR, через 96 ч бот закрывает сделку. Риск — поле «📏» выше (пусто = 1.5% на Binance)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeHtf"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ ⚡ Лимитки 4ч+2ч</div>
           <div class="sub">настоящие лимитки на бирже из вкладки ⚡ (до 20 позиций, с лимитками — до 26, по монете без чужой позиции); исполнилась — стоп триггером и тейк лимиткой «только закрытие», через 5 дней 8 ч бот закрывает остаток. Риск — поле «⚡» выше (пусто = 4.5%, больше 10% не берётся); не хватает свободной маржи — риск сделки уменьшается</div>
         </div>
@@ -41447,6 +41832,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('rbxPanel').style.display = activeTab === 'rbx' ? 'block' : 'none';
     document.getElementById('casPanel').style.display = activeTab === 'cas' ? 'block' : 'none';
     document.getElementById('smcPanel').style.display = activeTab === 'smc' ? 'block' : 'none';
+    document.getElementById('htfPanel').style.display = activeTab === 'htf' ? 'block' : 'none';
     document.getElementById('dlmPanel').style.display = activeTab === 'dlm' ? 'block' : 'none';
     document.getElementById('hdgPanel').style.display = activeTab === 'hdg' ? 'block' : 'none';
     document.getElementById('snrPanel').style.display = activeTab === 'snr' ? 'block' : 'none';
@@ -41466,6 +41852,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'rbx') refreshRbx();
     if (activeTab === 'cas') refreshCas();
     if (activeTab === 'smc') refreshSmc();
+    if (activeTab === 'htf') refreshHtf();
     if (activeTab === 'dlm') refreshDlm();
     if (activeTab === 'hdg') refreshHdg();
     if (activeTab === 'snr') refreshSnr();
@@ -44549,8 +44936,14 @@ const BT_CH = {'1d': 'день', '12h': '12ч', '1h': '1ч', '2h': '2ч', '4h': 
 const BT_EMA_TF = {'4h': '4ч', '1d': 'день', '1w': 'неделя', '1M': 'месяц'};
 const BT_SMC = {fvg4_bull: 'FVG 4ч ↑', fvg4_bear: 'FVG 4ч ↓', fvgd_bull: 'FVG дня ↑', fvgd_bear: 'FVG дня ↓', fvgw_bull: 'FVG недели ↑', fvgw_bear: 'FVG недели ↓',
   swd_low: 'свинг-минимум дня', swd_high: 'свинг-максимум дня', sww_low: 'свинг-минимум недели', sww_high: 'свинг-максимум недели',
-  obd_bull: 'ордерблок дня ↑', obd_bear: 'ордерблок дня ↓', ob4_bull: 'ордерблок 4ч ↑', ob4_bear: 'ордерблок 4ч ↓'};   // v0.99.678 — 🧱
-const BT_SMC_GRP = {fvg4: 'FVG 4ч', fvgd: 'FVG день', fvgw: 'FVG неделя', swd: 'свинг дня', sww: 'свинг недели', obd: 'ордерблок дня', ob4: 'ордерблок 4ч'};
+  obd_bull: 'ордерблок дня ↑', obd_bear: 'ордерблок дня ↓', ob4_bull: 'ордерблок 4ч ↑', ob4_bear: 'ордерблок 4ч ↓',   // v0.99.678 — 🧱
+  pdh: 'максимум вчера', pdl: 'минимум вчера', pdm: 'середина вчера', d_sma20: 'SMA20 дня', d_sma50: 'SMA50 дня', d_sma100: 'SMA100 дня', d_sma200: 'SMA200 дня',
+  d_bbu: 'верх Боллинджера дня', d_bbl: 'низ Боллинджера дня', pwh: 'максимум прошлой недели', pwl: 'минимум прошлой недели', pwm: 'середина прошлой недели',
+  wopen: 'открытие недели', w_sma10: 'SMA10 недели', w_sma20: 'SMA20 недели', w_sma50: 'SMA50 недели', w_bbu: 'верх Боллинджера недели', w_bbl: 'низ Боллинджера недели',
+  pmh: 'максимум прошлого месяца', pml: 'минимум прошлого месяца', pmm: 'середина прошлого месяца', mopen: 'открытие месяца', yopen: 'открытие года'};   // v0.99.732 — 📏
+const BT_SMC_GRP = {fvg4: 'FVG 4ч', fvgd: 'FVG день', fvgw: 'FVG неделя', swd: 'свинг дня', sww: 'свинг недели', obd: 'ордерблок дня', ob4: 'ордерблок 4ч',
+  d: 'SMA / Боллинджер дня', w: 'SMA / Боллинджер недели', pdh: 'максимум вчера', pdl: 'минимум вчера', pdm: 'середина вчера', pwh: 'максимум недели',
+  pwl: 'минимум недели', pwm: 'середина недели', wopen: 'открытие недели', pmh: 'максимум месяца', pml: 'минимум месяца', pmm: 'середина месяца', mopen: 'открытие месяца', yopen: 'открытие года'};
 const btLabel = t => t.lvl ? (BT_SMC[t.lvl] || t.lvl) : (t.tf ? `EMA ${t.n} · ${BT_EMA_TF[t.tf] || t.tf}` : (BT_CH[t.c] || t.c) + (t.st ? (String(t.st).startsWith('close') ? ' · от закрытия' : ' · за тенью') : ''));   // v0.99.689 — ⚡ the stream
 const btKey = t => t.lvl ? t.lvl.split('_')[0] : (t.tf || t.c);
 const BT_KIND = {fail: 'ложный пробой', FAILED: 'ложный пробой', be: 'безубыток после частичной', be2: 'безубыток после +2R', BREAKEVEN: 'безубыток', stop: 'стоп', hard: 'аварийный стоп', STOP_CLOSE: 'стоп по закрытию', HARD_STOP: 'аварийный стоп', take: 'тейк', trend: 'конец тренда', time: 'по времени', LOSS: 'стоп', WIN: 'тейк', TREND_END: 'конец тренда',
@@ -44697,7 +45090,7 @@ function btFromPrx(t) {
 }
 async function btChart(o) {
   const coin = (o.s || '').replace('_USDT', ''), side = o.d > 0 ? 'ЛОНГ' : 'ШОРТ';
-  document.getElementById('vgiModalTitle').textContent = `${coin} | ${o.mod === 'rbx' ? '📈 Пробой' : (o.mod === 'emx' ? '📐' : (o.mod === 'cas' ? '🌊 Каскад' : (o.mod === 'smc' ? '🧱 SMC' : (o.mod === 'dlm' ? '⚡ Лимитка' : 'P/R'))))} ${btLabel(o)} | ${side}${o.live ? '' : ' · бэктест'}`;
+  document.getElementById('vgiModalTitle').textContent = `${coin} | ${o.mod === 'rbx' ? '📈 Пробой' : (o.mod === 'emx' ? '📐' : (o.mod === 'cas' ? '🌊 Каскад' : (o.mod === 'smc' ? '🧱 SMC' : (o.mod === 'htf' ? '📏 HTF' : (o.mod === 'dlm' ? '⚡ Лимитка' : 'P/R')))))} ${btLabel(o)} | ${side}${o.live ? '' : ' · бэктест'}`;
   document.getElementById('vgiModalParams').textContent = 'загрузка...';
   vgiModal.classList.add('open');
   window._vgiLast = null;
@@ -44720,7 +45113,7 @@ async function btChart(o) {
 function btGateFillNote(o, d) {   // v0.99.668 — the user's IO: a limit filled by Binance's wick that Gate's candles never reached
   if (o.live || d.src !== 'gate' || (d.c && d.c !== o.c) || o.e == null || !(d.bars || []).length) return '';
   const sec = ({'15m': 0.25, '1h': 1, '2h': 2, '4h': 4, '12h': 12, '1d': 24}[o.c] || 1) * 3600;
-  const w1 = o.mod === 'dlm' ? o.t + 3 * ({'4h': 14400, '2h': 7200}[o.c] || 900) : (o.mod === 'emx' || o.mod === 'smc') ? o.t : (o.mod === 'prv' ? o.t + 2 * 3600 : (o.mod === 'rbx' ? (o.f || o.t) : null));
+  const w1 = o.mod === 'dlm' ? o.t + 3 * ({'4h': 14400, '2h': 7200}[o.c] || 900) : (o.mod === 'emx' || o.mod === 'smc' || o.mod === 'htf') ? o.t : (o.mod === 'prv' ? o.t + 2 * 3600 : (o.mod === 'rbx' ? (o.f || o.t) : null));
   if (w1 == null) return '';
   const win = d.bars.filter(b => b.time >= o.t && b.time <= w1);
   if (!win.length) return '';
@@ -44931,6 +45324,59 @@ async function refreshSmc() {   // v0.99.678 — 🧱 SMC: the model on the firs
   h += btSection('smc', 'Сделки бэктеста — 2022–2026 (каждый год модель не видела)');
   h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как нашёлся</summary><div class="zsub">Задача была — сделки регулярнее, не редкими пачками. Проверены (честно: модель каждого года училась только на прошлых годах, ещё 84 монеты в обучение не входили вовсе): максимумы / минимумы / середины прошлого дня, недели и месяца, открытия недели, месяца и года, SMA и полосы Боллинджера на дне и неделе; сигналы по открытому интересу, фандингу, перекосу лонгов / шортов толпы и тейкеров, отрыву монеты от BTC, объёмным всплескам; 12 классических индикаторов на 4ч и дне (Supertrend, Parabolic SAR, Ichimoku, MACD, дивергенции RSI, Stochastic, ADX, Heikin-Ashi, NR7, CCI, Боллинджер, Келтнер) и уровни SMC. Сами по себе почти все около нуля; после отбора моделью устойчиво держатся только уровни SMC — плюс в каждом году и на чужих монетах. В одиночку они слабее 📐 EMA, но сделки идут почти вдвое чаще и в большем числе недель. Вывод по «пачкам»: сильные сигналы у всех индикаторов бывают в моменты больших движений всего рынка; если брать лучшие сигналы каждого дня, результат падает до +0.1–0.2R. Поэтому SMC — добавка к EMA и P/R с небольшим риском: вместе ~22 сделки в месяц, сделка в ~55% недель, рост при той же просадке не хуже.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
+}
+
+async function refreshHtf() {   // v0.99.732 — 📏 HTF: two models on the first touches of the higher charts' plain levels, longs only
+  const panel = document.getElementById('htfPanel');
+  let d;
+  try { d = await (await fetch('/api/htf/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
+  const card = (title, body) => `<div class="zcard"><div class="zh">${title}</div>${body}</div>`;
+  const tile = (l, v, n) => `<div class="ztile"><div class="zl">${l}</div><div class="zv">${v}</div>${n ? `<div class="zn">${n}</div>` : ''}</div>`;
+  const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  const coin = s => (s || '').replace('_USDT', '');
+  const hm = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
+  const nm = f => (d.names || {})[f] || f;
+  const m = d.model, rs = (m && m.research) || {}, rule = (m && m.rule) || {};
+  const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? '<span class="pill pos">торгует</span>' : '<span class="pill">сигналы</span>');
+  let h = '';
+  let top = `<div class="dim hintx">Уровни старших графиков, известные заранее, под ценой: минимум и середина вчерашнего дня, SMA 20 / 50 / 100 / 200 и линии Боллинджера дня, уровни прошлой недели и месяца, открытия недели, месяца и года. Только лонги. Две модели оценивают первое касание уровня — берётся то, что выбрала любая из них (лучшие ~${m && m.q ? +((1 - m.q) * 100).toFixed(1) : 0.5}% у каждой). Вход — по рынку, когда цена прошла уровень на ${rule.trig_pct || 0.1}%.</div>`;
+  if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
+  else {
+    const ys = rs.years || {};
+    const all = Object.values(ys).filter(x => x && x.n);
+    const n = all.reduce((a, x) => a + x.n, 0), avg = n ? all.reduce((a, x) => a + x.avg * x.n, 0) / n : null;
+    const dd = Math.max(0, ...all.map(x => x.dd || 0));
+    top += `<div class="dim" style="font-size:var(--fs-xs);">обучена до ${new Date(m.trained_to * 1000).toLocaleDateString('ru-RU')}</div>
+      <div class="zsub">Проверка на истории 127 монет — каждый год модели его не видели. Результат на сделку:</div>
+      ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y, sub: `${x.n} сделок · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2026'}; }), v => sgR(+(+v).toFixed(2)))}
+      <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${rs.per_month || '—'}</b> сделок в месяц</span><span>WR <b>${rs.wr || '—'}%</b></span><span>просадка до <b>${dd}R</b></span></div>
+      <div class="zsub">Стоп — если ${rule.stop_close_h || 4}-часовая свеча закрылась на <b>${rule.stop_datr || 1} дневной ATR</b> ниже уровня (аварийный стоп на бирже — ${(rule.stop_datr || 1) * (rule.hard_x || 3)} ATR), тейк — <b>${rule.take_r || 3} риска</b>, через ${rule.hold_h || 96} ч выход. Не больше ${m.side_cap || 12} сделок сразу, по монете — одна. Сделки бывают неровно: в 2025 модели почти молчали (касания в тот год были убыточны в целом), в 2026 — ~3 в неделю.</div>
+      ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «📏» в настройках риска (пусто = ${d.risk}%).</div>`}`;
+  }
+  h += card(`📏 HTF-уровни ${pill}`, top);
+  const sc = d.scan, armed = d.armed || [], near = (sc && sc.near) || [];
+  const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;">
+      <b>${coin(a.symbol)}</b> <span class="win">↑</span> <span class="dim">${nm(a.fam)}${a.dist != null ? ' · ' + a.dist + '%' : (a.pct != null ? ' · ' + a.pct + '%' : '')}</span></span>`;
+  h += card('🔎 Этот час', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, `монет · уровней рядом ${sc.levels}`)}${tile('уровней', d.armed_n || 0, 'ждут касания в этом часе')}${tile('сделок', (d.open || []).length, 'открыто')}</div>
+    ${armed.length ? `<div class="zsub" style="margin-top:8px;">уровни этого часа (расстояние от цены):</div><div>${armed.map(chip).join('')}</div>`
+      : (near.length ? `<div class="zsub" style="margin-top:8px;">ближе всех к порогу (100% — сигнал):</div><div>${near.map(chip).join('')}</div>` : '')}
+    <div class="dim" style="font-size:var(--fs-xs);">${hm(sc.t)} · ${Date.now() / 1000 - sc.t > 3700 ? '⏳ скан старше часа — бот был выключен; после старта он сканирует сразу' : 'следующий пересчёт в начале часа'}</div>`
+    : `<div class="dim" style="font-size:var(--fs-sm);">первый пересчёт — в начале ближайшего часа</div>`);
+  const op = d.open || [];
+  const row = (t, i) => `<div onclick="btLiveOpen('htf', ${i})" style="padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;">
+      <span><b>${coin(t.symbol)}</b> <span class="win">лонг</span><span class="dim"> · ${nm(t.fam)}${t.real ? ' · 💰 на бирже' : ' · виртуально'}</span></span>
+      <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry)} · до ${hm(t.until)}</span></div>${!t.real && t.why ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:2px;">не на бирже: ${t.why}</div>` : ''}</div>`;
+  h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.auto ? 'реальные + виртуальные' : 'виртуально')}</div>
+    ${op.length ? `<div style="margin-top:8px;">${op.slice(-30).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
+    ${liveCheckHtml(d.live_check)}
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length}${lastSplit(d.last)})</summary>${d.last.map((t, i) => btRowHtml(btFromHtf(t), `btLiveOpen('htf', ${Math.min(30, op.length) + i})`)).join('')}</details>` : ''}`);
+  window._btLive.htf = op.slice(-30).reverse().map(btFromHtf).concat((d.last || []).map(btFromHtf));
+  h += btSection('htf', 'Сделки бэктеста — 2023–2026 (каждый год модели не видели)');
+  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как нашёлся</summary><div class="zsub">Искали индикатор, который зарабатывает именно в те месяцы, когда связка (⚡, P/R, SMC, EMA) проседает. Проверены идеи с GitHub и TradingView: профиль объёма, Фибоначчи, Lorentzian Classification, сессии ICT, ликвидность, инверсные FVG, брейкеры, SMC на других таймфреймах, моментум по монетам, сигналы деривативов, классические индикаторы. В худшие месяцы связки держались только простые уровни старших графиков (+0.47R там при +0.63R в среднем). Шорты у них около нуля — остались лонги. Проверка без подглядывания: уровни и признаки бота, посчитанные только по закрытым свечам, совпадают с исследованием; на минутных свечах Binance вход подтвердился во всех 299 сделках, исход — тот же, что на часовых; вход по рынку при касании не хуже лимитки. В связке с риском 1.5% (с издержками): за последние 12 месяцев $129.7 тыс. → $196.3 тыс. со $100, лучше в 94% годовых окон.</div></details>`;
+  setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
+}
+function btFromHtf(t) {   // v0.99.732 — a live 📏 trade -> the chart's trade (1h candles)
+  return {mod: 'htf', s: t.symbol, d: 1, c: '1h', lvl: t.fam, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true, vnote: btVnote(t)};
 }
 
 async function dlmSetEx(on) {   // v0.99.684 — the exchange of the real limits
@@ -46066,6 +46512,7 @@ async function refreshAll() {
   if (activeTab === 'rbx') await refreshRbx();
   if (activeTab === 'cas') await refreshCas();
   if (activeTab === 'smc') await refreshSmc();
+  if (activeTab === 'htf') await refreshHtf();
   if (activeTab === 'dlm') await refreshDlm();
   if (activeTab === 'hdg') await refreshHdg();
   if (activeTab === 'snr') await refreshSnr();
@@ -46426,6 +46873,9 @@ const setInputs = {
   dlm_more_coins: document.getElementById('setDlmMoreCoins'),   // v0.99.686
   autotrade_smc: document.getElementById('setAutotradeSmc'),
   telegram_alerts_smc: document.getElementById('setTgSmc'),
+  htf_enabled: document.getElementById('setHtf'),   // v0.99.732
+  autotrade_htf: document.getElementById('setAutotradeHtf'),
+  telegram_alerts_htf: document.getElementById('setTgHtf'),
   autotrade_zones_zm: document.getElementById('setAutotradeZonesZm'),
   telegram_alerts_zones_zm: document.getElementById('setTgZonesZm'),
 };
@@ -46441,6 +46891,7 @@ const setValueInputs = {
   risk_pct_cas: document.getElementById('setRiskPctCas'),
   risk_pct_dlm2: document.getElementById('setRiskPctDlm'),
   risk_pct_smc: document.getElementById('setRiskPctSmc'),   // v0.99.678 — these number fields were in the checkbox map: a typed risk was sent as false and reset to the default
+  risk_pct_htf: document.getElementById('setRiskPctHtf'),   // v0.99.732
   zones_tp_pct: document.getElementById('setZonesTpPct'),
   zones_max_days: document.getElementById('setZonesMaxDays'),
   snr_top_n: document.getElementById('setSnrTopN'),
@@ -47928,6 +48379,7 @@ if __name__ == "__main__":
     threading.Thread(target=rbx_loop, daemon=True).start()   # v0.99.625 — 📈 range breakout
     threading.Thread(target=cas_loop, daemon=True).start()   # v0.99.653 — 🌊 EMA cascade
     threading.Thread(target=smc_loop, daemon=True).start()   # v0.99.678 — 🧱 SMC levels
+    threading.Thread(target=htf_loop, daemon=True).start()   # v0.99.732 — 📏 HTF levels
     threading.Thread(target=dlm_loop, daemon=True).start()   # v0.99.679 — ⚡ 15m deep limits
     threading.Thread(target=bno_loop, daemon=True).start()   # v0.99.698 — P/R, SMC, EMA positions on Binance
     threading.Thread(target=hdg_loop, daemon=True).start()   # v0.99.628 — 🪞 hedge mirror
