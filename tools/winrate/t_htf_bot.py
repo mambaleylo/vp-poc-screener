@@ -3,7 +3,7 @@
 families match the code; (3) at the hour of 2026 backtest trades the bot arms that level (candles mocked from Binance
 history), the hour's candle 0.1% through it opens the trade, the settle walks it to the backtest list's R; (4) the risk
 field is a number field; (5) the trigger: the price at the level -> nothing, 0.1% through -> the touch; (6) on Binance
-with the others (BN_OTHERS_MODES, 1.5%)."""
+with the others (BN_OTHERS_MODES, 2% since v0.99.737)."""
 import sys, bisect, json, time, numpy as np
 from common import V
 import lv_engine as LE
@@ -126,6 +126,6 @@ print("(5) price 99.95 ->", r1, "· 99.90 ->", r2, "· Binance 1-min low 99.85 -
 ok &= r1 is None and r2 == "px" and r3 == "binance"
 # (6) Binance
 print("(6) on Binance with the others:", "htf" in V.BN_OTHERS_MODES, V.BN_OTHERS_RISK.get("htf"))
-ok &= "htf" in V.BN_OTHERS_MODES and V.BN_OTHERS_RISK.get("htf") == 1.5
+ok &= "htf" in V.BN_OTHERS_MODES and V.BN_OTHERS_RISK.get("htf") == 2.0
 print("ALL OK" if ok else "FAILED")
 sys.exit(0 if ok else 1)

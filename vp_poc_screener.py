@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.736"
+APP_VERSION = "0.99.737"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28512,7 +28512,7 @@ _PROC_START = time.time()
 # the years, the median drawdown. "bundle" = ⚡ 4.5% + P/R 3% + SMC 2.5% + EMA 2% (on Binance together, v0.99.727), "dlm" = ⚡ alone
 EXPECT_YEAR = {"dlm": {"p10": 1620, "p50": 7804, "p90": 27800, "dd": 65, "last12": 22216},   # v0.99.718: cross 10x, the open risk <= 90%, ⚡ 4.5% (port_717d.py); v0.99.704: x the daily WaveTrend (port_osc3.py)
                "bundle": {"p10": 2949, "p50": 40219, "p90": 216119, "dd": 59, "last12": 146001},
-               "bundle_htf": {"p10": 3410, "p50": 41745, "p90": 255999, "dd": 58, "last12": 223594}}   # v0.99.735: + 📏 HTF 1.5% (port_htf_hdr.py, the list htf_bt_v1, the same way as "bundle")   # v0.99.727: SMC 2.5% + EMA 2% (port_risk4.py); v0.99.719: + SMC's break-even after +2R (port_be5.py, the SMC rows from the list); v0.99.718: ⚡ 4.5 + P/R 3 + SMC 1.5 + EMA 1, cross 10x, the open risk <= 90% (port_717d.py)   # v0.99.712: EMA 1% (port_w709.py); v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
+               "bundle_htf": {"p10": 3533, "p50": 42250, "p90": 275666, "dd": 58, "last12": 225726}}   # v0.99.737: HTF 2%; v0.99.735: + 📏 HTF 1.5% (port_htf_hdr.py, the list htf_bt_v1, the same way as "bundle")   # v0.99.727: SMC 2.5% + EMA 2% (port_risk4.py); v0.99.719: + SMC's break-even after +2R (port_be5.py, the SMC rows from the list); v0.99.718: ⚡ 4.5 + P/R 3 + SMC 1.5 + EMA 1, cross 10x, the open risk <= 90% (port_717d.py)   # v0.99.712: EMA 1% (port_w709.py); v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
 
 
 @app.route("/api/boot")
@@ -36030,7 +36030,7 @@ def bn_size(direction, e, sl_x, cap, mmr, equity, risk, bsym, tb, mt, safety=Non
         margin, lev = margin * lev / lev2, lev2
     return margin, lev, skip
 BN_OTHERS_MODES = ("prv", "smc", "emw", "htf")
-BN_OTHERS_RISK = {"prv": 3.0, "smc": 2.5, "emw": 2.0, "htf": 1.5}   # v0.99.732 — 📏 HTF 1.5% (htf_money5.py: with the friction the last 12 months $129.7k -> $196.3k, better in 94% of the windows; 2% adds ~nothing). v0.99.727 — SMC 2.5% + EMA 2% (port_risk2/3.py: with the cross margin and SMC's break-even the bundle is better in every 12-month window, with and without friction); v0.99.718 — P/R 3% with cross margin (port_717*.py); v0.99.712 — EMA 1% (port_w709.py: every number better); v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
+BN_OTHERS_RISK = {"prv": 3.0, "smc": 2.5, "emw": 2.0, "htf": 2.0}   # v0.99.737 — 📏 HTF 2% (htf_lab6r.py: with the friction better in 95% of the 12-month windows, 98% since Dec 2024, the median x1.03, the worst window x0.97; less ⚡ or a higher open-risk cap — worse). v0.99.732 — 📏 HTF 1.5% (htf_money5.py: with the friction the last 12 months $129.7k -> $196.3k, better in 94% of the windows; 2% adds ~nothing). v0.99.727 — SMC 2.5% + EMA 2% (port_risk2/3.py: with the cross margin and SMC's break-even the bundle is better in every 12-month window, with and without friction); v0.99.718 — P/R 3% with cross margin (port_717*.py); v0.99.712 — EMA 1% (port_w709.py: every number better); v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
 BNO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_bn_others.json")
 _BNO = {"pos": {}}   # Gate contract -> the Binance position this bot opened for P/R / SMC / EMA
 _bno_lock = threading.Lock()
@@ -41646,7 +41646,7 @@ INDEX_HTML = """<!doctype html>
           <input type="number" id="setRiskPctCas" min="0.1" max="100" step="0.1" placeholder="🌊 0.5" title="🌊 Каскад: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctDlm" min="0.1" max="100" step="0.05" placeholder="⚡ 4.5" title="⚡ Лимитки 4ч+2ч: пусто — 4.5% на сделку, до 20 сделок сразу; больше 10% не берётся" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSmc" min="0.1" max="100" step="0.05" placeholder="🧱 2.5" title="🧱 SMC: пусто — 2.5% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctHtf" min="0.1" max="100" step="0.05" placeholder="📏 1.5" title="📏 HTF-уровни: пусто — 1.5% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctHtf" min="0.1" max="100" step="0.05" placeholder="📏 2" title="📏 HTF-уровни: пусто — 2% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
         </div>
       </div>
       <div class="settingRow subRow">
@@ -41743,7 +41743,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ 📏 HTF-уровни</div>
-          <div class="sub">реальный лонг по рынку, когда цена прошла уровень на 0.1% (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 3 дневных ATR и тейк 3R сразу на бирже, выход по закрытию 4ч-свечи за 1 дневным ATR, через 96 ч бот закрывает сделку. Риск — поле «📏» выше (пусто = 1.5% на Binance)</div>
+          <div class="sub">реальный лонг по рынку, когда цена прошла уровень на 0.1% (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 3 дневных ATR и тейк 3R сразу на бирже, выход по закрытию 4ч-свечи за 1 дневным ATR, через 96 ч бот закрывает сделку. Риск — поле «📏» выше (пусто = 2% на Binance)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeHtf"><span class="switchSlider"></span></label>
       </div>

@@ -20947,3 +20947,12 @@ v0.99.732 - 📏 HTF levels — a new module (the user: "думай над со�
 - «📤 Сделки в GitHub» (the lab upload): 📏 HTF's state (its trades, armed levels, scans) goes too, the money fields cut as
   for the others — its live trades can be checked against the backtest in the lab.
 - t_lab_export: the HTF file exported, its money cut, the counts.
+
+## v0.99.737
+- 📏 HTF risk on Binance by default 2% (was 1.5%): HTF lab round 6 (htf_lab6r.py, the bundle's money with friction) —
+  better in 95% of the 12-month windows, 98% since Dec 2024, the median ×1.03, the worst window ×0.97; less ⚡ risk or a
+  higher open-risk cap than 90% were worse. The 📏 field set by hand keeps its value.
+- The header with HTF (port_htf_hdr.py at 2%): bad year ~$3.5k · usual ~$42.3k · good ~$276k · drawdowns ~58%.
+- The lab rounds 5–6 scripts (no bot change from them): exits / deeper limit entries / filters / caps (htf_lab5*.py),
+  shorts with their own model, level-memory features, quarterly retraining (htf_lab6*.py) — none beat the deployed rule
+  on the check coins.
