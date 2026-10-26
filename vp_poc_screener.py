@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.732"
+APP_VERSION = "0.99.733"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -32355,14 +32355,18 @@ BT_TRADES_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/ma
 _bt_cache = {"d": None, "t": 0}
 
 
-def bt_trades():
+def bt_trades(need=None):
     """v0.99.637 — the research's backtest trades shown in the tabs (📈 breakout, P/R): the file next to the bot,
-    fetched from the repo when missing or a day old"""
-    if _bt_cache["d"] is not None and time.time() - _bt_cache["t"] < 3600:
+    fetched from the repo when missing or a day old. v0.99.733: `need` — a module's list missing from the file (a copy
+    fetched before the list was published) refetches it, at most once in 10 min"""
+    miss = (need and _bt_cache["d"] is not None and need not in _bt_cache["d"] and time.time() - _bt_cache.get("miss", 0) >= 600)
+    if miss:
+        _bt_cache["miss"] = time.time()
+    if _bt_cache["d"] is not None and time.time() - _bt_cache["t"] < 3600 and not miss:
         return _bt_cache["d"]
     d = None
     try:
-        fresh = (os.path.exists(BT_TRADES_FILE) and time.time() - os.path.getmtime(BT_TRADES_FILE) < 86400
+        fresh = (not miss and os.path.exists(BT_TRADES_FILE) and time.time() - os.path.getmtime(BT_TRADES_FILE) < 86400
                  and os.path.getmtime(BT_TRADES_FILE) >= os.path.getmtime(os.path.abspath(__file__)))   # v0.99.640: a bot update refetches it
         if not fresh:
             r = requests.get(BT_TRADES_URL, params={"nocache": int(time.time())}, timeout=60)
@@ -32385,7 +32389,7 @@ def bt_trades():
 def api_bt_trades():
     mod = request.args.get("mod", "rbx")
     try:
-        d = bt_trades() or {}
+        d = bt_trades(need=mod) or {}
         tr = sorted(d.get(mod) or [], key=lambda x: -x["t"])
         return jsonify({"trades": tr, "made": d.get("made")})
     except Exception as e:
@@ -32398,7 +32402,7 @@ RBX_RULE_VER = 667   # 667 — the crowd filter; 663 — the limit entry; v0.99.
 def live_vs_bt(mod, rs):
     """v0.99.648 — the live closed trades under the current rule vs the backtest's (the same module's list): the live
     average against the backtest's minus 1.64 standard errors; under 20 trades — too early to judge"""
-    bt = [float(t["r"]) for t in ((bt_trades() or {}).get(mod) or []) if t.get("r") is not None]
+    bt = [float(t["r"]) for t in ((bt_trades(need=mod) or {}).get(mod) or []) if t.get("r") is not None]
     if len(bt) < 30:
         return None
     mu = sum(bt) / len(bt); sd = (sum((x - mu) ** 2 for x in bt) / len(bt)) ** 0.5

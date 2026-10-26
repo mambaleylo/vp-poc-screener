@@ -20924,3 +20924,10 @@ v0.99.732 - 📏 HTF levels — a new module (the user: "думай над со�
          the backtest list: vp_bt_trades.json["htf"]. Tests: t_htf_bot.py (parity, the model, 7 of 7 2026 backtest
          trades re-made by the bot to the same R, the risk field, the 0.1% trigger, Binance), t_mod_ui.py (+ the 📏 tab),
          t_smc_bot.py and the rest of tools/winrate — OK.
+
+## v0.99.733
+- 📏 HTF: the tab's backtest list was empty («сделок нет»). The 299 trades were in the file locally, but a test run of the bot
+  replaced it with the older GitHub copy before the commit, so v0.99.732 shipped without the list. The list is back.
+- The bot: when a tab asks for a module's backtest list and the downloaded file lacks it (a copy fetched before the list was
+  published), the file is fetched again — at most once in 10 min — instead of waiting a day.
+- Tests never download over the repo's backtest file; t_bt_refetch checks the refetch and that the file has the HTF list.
