@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.733"
+APP_VERSION = "0.99.734"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -44952,6 +44952,7 @@ const btLabel = t => t.lvl ? (BT_SMC[t.lvl] || t.lvl) : (t.tf ? `EMA ${t.n} · $
 const btKey = t => t.lvl ? t.lvl.split('_')[0] : (t.tf || t.c);
 const BT_KIND = {fail: 'ложный пробой', FAILED: 'ложный пробой', be: 'безубыток после частичной', be2: 'безубыток после +2R', BREAKEVEN: 'безубыток', stop: 'стоп', hard: 'аварийный стоп', STOP_CLOSE: 'стоп по закрытию', HARD_STOP: 'аварийный стоп', take: 'тейк', trend: 'конец тренда', time: 'по времени', LOSS: 'стоп', WIN: 'тейк', TREND_END: 'конец тренда',
   TIME_EXIT: 'по времени', BREAKEVEN: 'безубыток', TIME: 'по времени'};
+const BT_KIND_SHORT = {hard: 'авар. стоп', HARD_STOP: 'авар. стоп', STOP_CLOSE: 'стоп закр.', time: 'время', TIME: 'время', TIME_EXIT: 'время', be: 'б/у', be2: 'б/у +2R', BREAKEVEN: 'б/у', fail: 'ложн. пробой', FAILED: 'ложн. пробой', trend: 'тренд', TREND_END: 'тренд'};
 function btSection(mod, title) {
   const body = window._btData[mod] ? btListHtml(mod) : '<div class="dim">загружаю…</div>';
   return `<details class="zcard" ontoggle="btLoad(this, '${mod}')"><summary class="zh" style="margin:0;cursor:pointer;">📜 ${title}</summary><div id="btBox_${mod}" style="margin-top:6px;">${body}</div></details>`;
@@ -45055,8 +45056,9 @@ async function btGateStart(mod) {
 function btRowHtml(t, onclick) {
   const d = new Date(((t._byClose && t.x) || t.t) * 1000).toLocaleDateString('ru-RU', {day: '2-digit', month: '2-digit', year: '2-digit'});
   const r = t.r == null ? '<span class="dim">открыта</span>' : `<span class="${t.r > 0 ? 'win' : (t.r < 0 ? 'loss' : '')}">${t.r > 0 ? '+' : ''}${(+t.r).toFixed(2)}R</span>`;
-  return `<div onclick="${onclick}" style="padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;">
-    <span><span class="dim">${d}</span> <b>${(t.s || '').replace('_USDT', '')}</b> <span class="${t.d > 0 ? 'win' : 'loss'}">${t.d > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${btLabel(t)}${t.k ? ' · ' + (BT_KIND[t.k] || t.k) : ''}</span></span>
+  const kind = t.k ? (BT_KIND_SHORT[t.k] || BT_KIND[t.k] || t.k) : '';   // v0.99.734 — one line per trade: short exit names, the level cut with "…"
+  return `<div onclick="${onclick}" style="padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;">
+    <span title="${btLabel(t)}${t.k ? ' · ' + (BT_KIND[t.k] || t.k) : ''}" style="flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><span class="dim">${d}</span> <b>${(t.s || '').replace('_USDT', '')}</b> <span class="${t.d > 0 ? 'win' : 'loss'}">${t.d > 0 ? 'лонг' : 'шорт'}</span> <span class="dim">${kind ? kind + ' · ' : ''}${btLabel(t)}</span></span>
     <span style="white-space:nowrap;">${t._usd != null ? `${t._cut != null && t._cut < 0.95 ? `<span class="dim">${Math.round(t._cut * 100)}% размера · </span>` : ''}<span class="${t._usd > 0 ? 'win' : (t._usd < 0 ? 'loss' : '')}">${t._usd >= 0 ? '+' : '−'}$${Math.abs(t._usd).toFixed(t._bal < 1000 ? 2 : 0)}</span> <span class="dim">→ $${Math.round(t._bal).toLocaleString('ru-RU')}</span> · ` : (t._skip ? `<span class="dim">${t._skip}</span> · ` : '')}${r} ›</span></div>${t.vnote ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:2px;">${t.vnote}</div>` : ''}</div>`;
 }
 function btOpen(mod, i) { const t = (window._btData[mod] || [])[i]; if (t) btChart(Object.assign({mod}, t, mod === 'dlm' && t.sl2 != null && t.hs == null ? {hs: t.sl2} : {})); }   // v0.99.693 — ⚡ the 3 ATR emergency stop of the list drawn

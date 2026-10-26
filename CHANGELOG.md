@@ -20931,3 +20931,8 @@ v0.99.732 - 📏 HTF levels — a new module (the user: "думай над со�
 - The bot: when a tab asks for a module's backtest list and the downloaded file lacks it (a copy fetched before the list was
   published), the file is fetched again — at most once in 10 min — instead of waiting a day.
 - Tests never download over the repo's backtest file; t_bt_refetch checks the refetch and that the file has the HTF list.
+
+## v0.99.734
+- Backtest lists (every tab): one line per trade on a phone. The exit goes before the level and is short
+  («время», «авар. стоп», «б/у»); a long level name is cut with «…» (the full text on hover); the R always visible.
+- t_bt_oneline: rows of the 📏 HTF and 🧱 SMC lists at 412 px are one line, no page errors.
