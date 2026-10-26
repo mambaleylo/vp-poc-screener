@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.740"
+APP_VERSION = "0.99.741"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -34520,10 +34520,13 @@ def api_htf_status():
 # re-made on bars cut at the signal (fc_trunc.py, 39/40 exact, the 40th — a coin < 90 days old, skipped here as there).
 # v0.99.740 — the rule re-chosen on the 84 check coins (cfl_lab.py, cfl_lab2.py, cfl_money.py): longs only (against the sell
 # signals), out after 96 h, the take 4R, <= 20 at once -> +0.72R a trade (the check coins +0.62R); the real trades by a switch, off.
+# v0.99.741 — the close stop (cfl_lab3/4.py, cfl_money2.py): out when a 1d candle (00:00 UTC) closes 0.75 daily ATR below the entry,
+# the exchange holding only the emergency stop 1.5 daily ATR; the take 4R of the 0.75 -> +1.06R a trade (the check coins +0.77R), an entry
+# 1–2 h later ~the same. The bundle's money: no sure gain (better in 58% of the windows, the check coins 39%) — the real trades stay off.
 # Virtual only: no exchange orders; the tab compares the live trades with the backtest list.
 CFL_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_cfl_model.json")
 CFL_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_cfl_model.json"
-CFL_MODEL_VER = 1
+CFL_MODEL_VER = 2   # v0.99.741 — the close stop (a v1 file: the touch stop)
 CFL_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_cfl_state.json")
 CFL_ENABLED = os.environ.get("VP_CFL", "1") == "1"
 TELEGRAM_ALERTS_CFL = os.environ.get("VP_TG_ALERTS_CFL", "1") == "1"
@@ -35086,8 +35089,9 @@ def cfl_open(c, t_close, m):
         tr["rt"] = True
     if AUTOTRADE_ENABLED_CFL and live and tr.get("entry") and not tr.get("late") and not tr.get("rt"):   # v0.99.740 — the real trade at the market
         try:
-            res = execute_autotrade("cfl", sym, tr["direction"], live, tr["sl"], tr["tp"], extra={"cfl": cfl_fam_ru(c["fam"]), "kx": 1.0},
-                                    risk_pct_override=MODULE_RISK_PCT.get("cfl") or CFL_RISK_DEFAULT)
+            hx = float(tr.get("hx") or 1.0)
+            res = execute_autotrade("cfl", sym, tr["direction"], live, tr.get("hs", tr["sl"]), tr["tp"], extra={"cfl": cfl_fam_ru(c["fam"]), "kx": hx},
+                                    risk_pct_override=(MODULE_RISK_PCT.get("cfl") or CFL_RISK_DEFAULT) * hx)
             tr["real"] = (res or {}).get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
             tr["autotrade"] = {"status": (res or {}).get("status"), "detail": str((res or {}).get("detail") or "")[:200]}
         except Exception as e:
@@ -35099,6 +35103,7 @@ def cfl_open(c, t_close, m):
     if TELEGRAM_ALERTS_CFL:
         send_telegram(f"🔄 {sym.replace('_USDT', '')} {tr['direction']} · Классика наоборот: против сигнала «{cfl_fam_ru(c['fam'])}» "
                       f"({'лонг' if c['S'] > 0 else 'шорт'})\n" + (f"вход {tr['entry']:.6g} · стоп {tr['sl']:.6g} · тейк {tr['tp']:.6g} · " if tr.get("entry") else "")
+                      + (f"аварийный {tr['hs']:.6g} · стоп по закрытию дня · " if tr.get("hs") else "")
                       + f"до {tr['hold']} ч\n" + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"), category="cfl")
     return True
 
@@ -35106,10 +35111,14 @@ def cfl_open(c, t_close, m):
 def cfl_set_fill(tr, fill_bn, r):
     fill = fill_bn / tr["scl"]; risk = fill * float(r.get("stop_datr", 1.0)) * tr["datr"] / 100
     tr.update({"entry": fill, "sl": fill - tr["side"] * risk, "tp": fill + tr["side"] * float(r.get("take_r", 3.0)) * risk})
+    ch, hx = _close_stop_rule({"rule": r})   # v0.99.741 — the stop at the 1d close, the emergency one (hx x the stop) on the exchange
+    if ch:
+        tr.update({"ch": ch, "hx": hx, "hs": fill - tr["side"] * hx * risk})
 
 
 def cfl_settle(now=None):
-    """the open trades walked on Binance's 1h candles: the stop by a touch, the take not in the entry hour, out at the rule's hold"""
+    """the open trades walked on Binance's 1h candles (_cs_walk, as HTF / SMC): the emergency stop by a touch, the take not in
+    the entry hour, the stop at the 1d close (v0.99.741; a trade opened with the touch stop keeps it), out at the rule's hold"""
     now = now or time.time()
     m = _CFL.get("model") or {}
     r = m.get("rule") or {}
@@ -35127,20 +35136,15 @@ def cfl_settle(now=None):
                 cfl_set_fill(t, o0 * t["scl"], r); changed = True
             fill, sl, tp, s = t["entry"], t["sl"], t["tp"], t["side"]
             risk = abs(fill - sl) or 1e-12; hold = int(t.get("hold") or 72)
-            res = None
-            for k, (tt, o, hh, ll, cc) in enumerate(cs[:hold]):
-                if (ll <= sl) if s > 0 else (hh >= sl):
-                    gap = (o <= sl) if s > 0 else (o >= sl)
-                    res = ("LOSS", o if (gap and k > 0) else sl, k); break
-                if k > 0 and ((hh >= tp) if s > 0 else (ll <= tp)):
-                    res = ("WIN", tp, k); break
-            if res is None and len(cs) >= hold:
-                res = ("TIME_EXIT", cs[hold - 1][4], hold - 1)
+            ch, hx = int(t.get("ch") or 0), float(t.get("hx") or 1.0)
+            res = _cs_walk([{"time": tt, "open": o, "high": hh, "low": ll, "close": cc} for tt, o, hh, ll, cc in cs], s, fill, sl, tp, hold, ch, hx)
             if not res:
                 continue
-            kind, ex, k = res
+            kind, ex, k, _took = res
             rr = s * (ex - fill) / risk - (SMC_FEE + SMC_FUND * (k + 1) / 24) * fill / risk
-            if kind == "TIME_EXIT" and t.get("real"):
+            if kind == "LOSS" and ch and ex != t.get("hs") and t.get("real"):   # the close stop: out at the market
+                log_error(f"cfl close stop {t['symbol']}: {close_position_for_mode('cfl', t['symbol'], t['direction'])}")
+            elif kind == "TIME_EXIT" and t.get("real"):
                 log_error(f"cfl time exit {t['symbol']}: {close_position_for_mode('cfl', t['symbol'], t['direction'])}")
             elif t.get("real"):
                 bno_settle_close("cfl", t, kind)
@@ -35197,7 +35201,7 @@ def cfl_stats():
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
             "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
             "live_check": live_vs_bt("cfl", [t["r"] for t in fin if t.get("rv") == CFL_MODEL_VER]),
-            "last": [{k: t.get(k) for k in ("symbol", "side", "fam", "t_in", "hour", "r", "result", "real", "entry", "sl", "tp", "exit", "t_out", "score")}
+            "last": [{k: t.get(k) for k in ("symbol", "side", "fam", "t_in", "hour", "r", "result", "real", "entry", "sl", "hs", "tp", "exit", "t_out", "score")}
                      | {"why": mod_why_virtual(t, AUTOTRADE_ENABLED_CFL)}
                      for t in sorted(fin, key=lambda t: -t["t_in"])[:30]]}
 
@@ -37457,7 +37461,7 @@ def dlm_bn_adopt(now=None):
             elif stp or tpo:
                 d_sl = abs(entry - stp[2] / scl) if stp else 0; d_tp = abs(tpo[2] / scl - entry) if tpo else 0
                 ratio = d_tp / d_sl if d_sl else 0
-                mode = min((("prv", 0.75), ("htf", 1.0), ("smc", 1.5), ("emw", 2.0), ("cfl", 4.0)), key=lambda m_: abs(m_[1] - ratio))[0] if ratio else "smc"   # v0.99.732 — 📏 HTF: take 3R / the emergency stop 3R
+                mode = min((("prv", 0.75), ("htf", 1.0), ("smc", 1.5), ("emw", 2.0)), key=lambda m_: abs(m_[1] - ratio))[0] if ratio else "smc"   # v0.99.732 — 📏 HTF: take 3R / the emergency stop 3R
                 rec = {"mode": mode, "bsym": bsym, "scl": scl, "side": s, "qty": abs(p["amt"]), "entry": p["entry"], "lev": None, "risk": None, "dual": dual,
                        "tick": info.get("tick"), "step": info.get("step"), "min_qty": info.get("min_qty"), "t": int(now), "adopted": True,
                        "sl_kind": stp[0] if stp else None, "sl_id": stp[1] if stp else None, "tp_kind": tpo[0] if tpo else None, "tp_id": tpo[1] if tpo else None,
@@ -42116,7 +42120,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">Работа (4ч и день — 127 монет)</div>
-          <div class="sub">на закрытии каждой 4ч-свечи: сигналы 12 классических индикаторов, модель выбирает лучшие ~0.3%; сделка — лонг против сигнала на продажу по рынку на открытии следующего часа; стоп 1 дневной ATR, тейк 4R, выход через 96 ч; не больше 20 сразу. Реальные сделки — переключатель «↳ 🔄 Классика» в автоторговле (по умолчанию выключен)</div>
+          <div class="sub">на закрытии каждой 4ч-свечи: сигналы 12 классических индикаторов, модель выбирает лучшие ~0.3%; сделка — лонг против сигнала на продажу по рынку на открытии следующего часа; стоп — закрытие дневной свечи (00:00 UTC) на 0.75 дневного ATR ниже входа, аварийный 1.5 ATR, тейк 4R, выход через 96 ч; не больше 20 сразу. Реальные сделки — переключатель «↳ 🔄 Классика» в автоторговле (по умолчанию выключен)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setCfl"><span class="switchSlider"></span></label>
       </div>
@@ -42478,7 +42482,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ 🔄 Классика наоборот</div>
-          <div class="sub">реальный лонг по рынку сразу после закрытия 4ч-свечи (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): стоп 1 дневной ATR и тейк 4R сразу на бирже, через 96 ч бот закрывает сделку; цена ушла от открытия часа дальше 1R или бот был выключен — без сделки. Риск — поле «🔄» выше (пусто = 1% на Binance). Пока модуль новый — по умолчанию выключено</div>
+          <div class="sub">реальный лонг по рынку сразу после закрытия 4ч-свечи (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 1.5 дневного ATR и тейк 4R сразу на бирже, выход по закрытию дневной свечи (00:00 UTC) за 0.75 ATR, через 96 ч бот закрывает сделку; цена ушла от открытия часа дальше 1R или бот был выключен — без сделки. Риск — поле «🔄» выше (пусто = 1% на Binance). Пока модуль новый — по умолчанию выключено</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeCfl"><span class="switchSlider"></span></label>
       </div>
@@ -46148,7 +46152,7 @@ async function refreshCfl() {   // v0.99.739 — 🔄 Классика наоб�
       <div class="zsub">Проверка на истории 127 монет — каждый год модель его не видела. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y, sub: `${x.n} сделок · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2026'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span>WR <b>${rs.wr || '—'}%</b></span><span>на ${rs.check_coins || 84} чужих монетах <b>${rs.check && rs.check.avg != null ? sgR(rs.check.avg) : '—'}</b></span></div>
-      <div class="zsub">Стоп — <b>${rule.stop_datr || 1} дневной ATR</b> от входа, тейк — <b>${rule.take_r || 3} риска</b>, через ${rule.hold_h || 72} ч выход. Не больше ${rule.side_cap || 12} сделок ${rule.side ? 'сразу' : 'в одну сторону'}, по монете${rule.side ? '' : ' и стороне'} — одна. Монеты моложе ${rule.min_age_d || 90} дней не берутся.</div>`;
+      <div class="zsub">Стоп — ${rule.stop_close_h ? `<b>закрытие ${rule.stop_close_h >= 24 ? 'дневной свечи (00:00 UTC)' : rule.stop_close_h + 'ч-свечи'}</b> на ${rule.stop_datr} дневного ATR ниже входа, аварийный — <b>${+(rule.stop_datr * rule.hard_x).toFixed(2)} ATR</b> касанием` : `<b>${rule.stop_datr || 1} дневной ATR</b> от входа`}, тейк — <b>${rule.take_r || 3} риска</b>, через ${rule.hold_h || 72} ч выход. Не больше ${rule.side_cap || 12} сделок ${rule.side ? 'сразу' : 'в одну сторону'}, по монете${rule.side ? '' : ' и стороне'} — одна. Монеты моложе ${rule.min_age_d || 90} дней не берутся.</div>`;
   }
   h += card(`🔄 Классика наоборот ${pill}`, top);
   const sc = d.scan, near = (sc && sc.near) || [];
@@ -46168,11 +46172,11 @@ async function refreshCfl() {   // v0.99.739 — 🔄 Классика наоб�
     ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length}${lastSplit(d.last)})</summary>${d.last.map((t, i) => btRowHtml(btFromCfl(t), `btLiveOpen('cfl', ${Math.min(30, op.length) + i})`)).join('')}</details>` : ''}`);
   window._btLive.cfl = op.slice(-30).reverse().map(btFromCfl).concat((d.last || []).map(btFromCfl));
   h += btSection('cfl', 'Сделки бэктеста — 2023–2026 (каждый год модель не видела)');
-  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как нашёлся</summary><div class="zsub">Проверяли обратную сторону всех семейств индикаторов, которые уже тестировали. У большинства она хуже прямой; у классики — лучше: модель на сделках против сигнала +0.4R против +0.2R по сигналу, плюс в каждом году (включая тихий 2023). Порог — по последним 180 дням (годовой выкидывал 2023-й). Потом подобрали выход и сторону, проверяя на 84 чужих монетах: лонги (против сигналов на продажу) сильнее шортов, 96 ч лучше 72, тейк 4R лучше 3R, лимит 20 сделок — так +0.72R на сделку (чужие монеты +0.62R). Проверки: заглядывания в будущее нет (сигналы и признаки, пересчитанные на свечах, обрезанных на сигнале, совпали точно); соседние пороги и окна дают похожее; вход на час позже — почти то же. ⚠️ В связке худший год прибавляет немного (+5–15%), поэтому реальная торговля по умолчанию выключена — сначала 1–2 месяца сравнения с бэктестом.</div></details>`;
+  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как нашёлся</summary><div class="zsub">Проверяли обратную сторону всех семейств индикаторов, которые уже тестировали. У большинства она хуже прямой; у классики — лучше: модель на сделках против сигнала +0.4R против +0.2R по сигналу, плюс в каждом году (включая тихий 2023). Порог — по последним 180 дням (годовой выкидывал 2023-й). Потом подобрали выход и сторону, проверяя на 84 чужих монетах: лонги (против сигналов на продажу) сильнее шортов, 96 ч лучше 72, тейк 4R лучше 3R, лимит 20 сделок — так +0.72R на сделку (чужие монеты +0.62R). Потом стоп: по закрытию дневной свечи за 0.75 ATR с аварийным 1.5 ATR — +1.06R (чужие +0.77R); безубыток, трейлинг, частичный тейк, лимитка на вход — хуже. Проверки: заглядывания в будущее нет (сигналы и признаки, пересчитанные на свечах, обрезанных на сигнале, совпали точно); соседние пороги и окна дают похожее; вход на час позже — почти то же. ⚠️ В связке денег надёжно не прибавляет (худший год +10–20%, лучшие годы −15–25%, окон лучше меньше половины на чужих монетах), поэтому реальная торговля по умолчанию выключена — сначала 1–2 месяца сравнения с бэктестом.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
 function btFromCfl(t) {   // v0.99.739 — a live 🔄 trade -> the chart's trade (1h candles)
-  return {mod: 'cfl', s: t.symbol, d: t.side, c: '1h', lvl: t.fam, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+  return {mod: 'cfl', s: t.symbol, d: t.side, c: '1h', lvl: t.fam, t: t.hour || t.t_in, e: t.entry, sl: t.sl, hs: t.hs, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
 }
 
 async function dlmSetEx(on) {   // v0.99.684 — the exchange of the real limits

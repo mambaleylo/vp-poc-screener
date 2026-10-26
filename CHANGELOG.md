@@ -20996,3 +20996,20 @@ v0.99.740 — 🔄 Классика наоборот: the rule re-chosen on the 
   from the hour's open or the close is older than 15 min. Its own risk field «🔄» (empty = 1% on Binance, 0.25% on Gate).
 - Tests: t_cfl_bot.py — (5) the switch off by default; on -> execute_autotrade with the trade's own stop / take; the late
   and the old ones not; the settings row renders unchecked.
+
+v0.99.741 — 🔄 Классика наоборот: the stop at the 1d close
+- The lab (tools/winrate/cfl_lab3.py, cfl_lab4.py, cfl_money2.py; on the deployed longs / 96 h / 4R / cap 20): the stop's length
+  (0.5–2.5 daily ATR by a touch), the close stop (4h / 8h / 12h / 1d close, the soft 0.5–0.9, the emergency 1.5–2.5), break-even,
+  a trailing stop, a partial take, the take 3–8R / none, the hold 72–168 h, a limit entry, the shorts. Best a trade and robust:
+  out at a 1d close (00:00 UTC) 0.75 daily ATR below the entry, the emergency stop 1.5 ATR by a touch, the take 4R of the 0.75 —
+  409 trades +1.06R (each year > +0.78R), the check coins +0.77R; an entry 1–2 h later +1.03–1.05R. Break-even, trailing, a
+  partial take, a limit entry — worse.
+- The bundle's money (module 1%): no sure gain — the bad year (p10) $3.3k -> $3.9k, the median $39.1k -> $43.9k, the top
+  (p90) $230k -> $195k; better in 58% of the 12-month windows, with the check coins' list 39% — the real trades stay off.
+- The bot: the trade's emergency stop (hs) and the close stop (the rule's stop_close_h / hard_x, HTF's _close_stop_rule) at
+  the fill; the settle with the shared _cs_walk (the emergency stop by a touch, the take not in the entry hour, the 1d close);
+  a real trade (when switched on) — the exchange's stop the emergency one, the risk x 2 so the soft stop loses the risk %, a
+  close stop out at the market. The model file v2 (the same model and seed, the new rule); a v1 trade keeps its touch stop.
+  The 🔄 adoption ratio dropped (4R / 2 = EMA's 2.0).
+- Tests: t_cfl_bot.py — (3) 8/8 backtest trades of every exit kind (close stop, emergency, take, time) re-made by the bot;
+  (5) the real call with the emergency stop, kx 2 and the risk x 2.

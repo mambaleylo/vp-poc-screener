@@ -1,10 +1,12 @@
-"""🔄 Классика наоборот v1 export: the 2026 walk-forward model on the flipped E2 label (the classic indicator events of
+"""🔄 Классика наоборот v1 export (v0.99.741: the close stop): the 2026 walk-forward model on the flipped E2 label (the classic indicator events of
 ev3_engine, the ev2 features without ls_z / tk_z / top_z — the live bot cannot rebuild their 30-day z), LightGBM x2
 seeds with lv_wf's params, trained on the bot coins' events closed 14 days before 2026 — exactly the model that scored
 the 2026 trades of the research (checked against fc_red_sc.npz). The rolling threshold's seed: per day (UTC) the count of
 the bot coins' scored events and their 300 best scores, the 194 days before the export; the bot adds its own days.
 The backtest list: the rolling rule (q 0.997 of the scores of the 180 days ending 14 days before) 2023-26, bot coins,
->= 90 days after the listing, LONGS only (against the bearish signals), take 4R, 96 h, cap 20 (cfl_lab*.py), one per coin & side, the score order within the hour."""
+>= 90 days after the listing, LONGS only (against the bearish signals), take 4R, 96 h, cap 20 (cfl_lab*.py), one per coin & side, the score order within the hour.
+v0.99.741 (cfl_lab3/4.py, cfl_money2.py): the stop 0.75 daily ATR at the 1d close (00:00 UTC), the emergency stop 1.5 daily ATR by a touch
+(the exchange's), the take 4R of the 0.75 — the bot's _cs_walk order: the emergency stop, the take (not in the entry hour), the close."""
 import sys, json, glob, math, numpy as np, lightgbm as lgb, warnings; warnings.filterwarnings("ignore")
 sys.argv = ["x"]
 import lv_engine as LE, ev3_engine as E3, ev2_engine as E2
@@ -68,17 +70,20 @@ print("порог по дням: расхождений с точным кван
 age0 = {}
 cand = np.where(BOT & np.isfinite(ref) & (T >= ts(2023)) & (-SIDE == 1))[0]   # v1: longs only (the shorts ~0R)
 cand = cand[ref[cand] >= np.array([days.get(int(t // 86400), np.inf) for t in T[cand]])]
-def walk(O, H, L, C, jE, s, fill, datr, hold=96):
-    risk = fill * datr / 100; stop = fill - s * risk; tp = fill + s * 4 * risk
+SK, HX, TK, CH = 0.75, 2.0, 4.0, 24   # the soft stop (daily ATR), the emergency stop (x the soft), the take (R), the close TF (h)
+def walk(Tb, O, H, L, C, jE, s, fill, datr, hold=96):
+    risk = fill * SK * datr / 100; stop = fill - s * risk; hs = fill - s * HX * risk; tp = fill + s * TK * risk
     e = min(len(C), jE + hold); k = e - 1 - jE; ex = C[e - 1]; kind = "time"
     for q in range(e - jE):
         b = jE + q
-        if (s > 0 and L[b] <= stop) or (s < 0 and H[b] >= stop):
-            gap = (s > 0 and O[b] <= stop) or (s < 0 and O[b] >= stop); ex = O[b] if (gap and q > 0) else stop; k = q; kind = "stop"; break
+        if (s > 0 and L[b] <= hs) or (s < 0 and H[b] >= hs):
+            gap = (s > 0 and O[b] <= hs) or (s < 0 and O[b] >= hs); ex = O[b] if (gap and q > 0) else hs; k = q; kind = "hard"; break
         if q > 0 and ((s > 0 and H[b] >= tp) or (s < 0 and L[b] <= tp)):
             ex = tp; k = q; kind = "take"; break
+        if (Tb[b] + 3600) % (CH * 3600) == 0 and ((s > 0 and C[b] <= stop) or (s < 0 and C[b] >= stop)):
+            ex = C[b]; k = q; kind = "stop"; break
     fee = (0.001 + 0.0003 * (k + 1) / 24) * fill / risk
-    return s * (ex - fill) / risk - fee, k + 1, kind, ex, stop, tp
+    return s * (ex - fill) / risk - fee, k + 1, kind, ex, stop, tp, hs
 info = {}
 for k in sorted(set(SYM[cand])):
     Tb, O, H, L, C, V = LE.load_np(Dd["names"][k])
@@ -86,8 +91,8 @@ for k in sorted(set(SYM[cand])):
         if T[i] - Tb[0] < 90 * 86400: continue
         jE = int(J[i]) + 1
         if jE >= len(C): continue
-        r, nb, kind, ex, stop, tp = walk(O, H, L, C, jE, -int(SIDE[i]), float(O[jE]), float(DA[i]))
-        info[i] = (r, nb, kind, ex, stop, tp, float(O[jE]))
+        r, nb, kind, ex, stop, tp, hs = walk(Tb, O, H, L, C, jE, -int(SIDE[i]), float(O[jE]), float(DA[i]))
+        info[i] = (r, nb, kind, ex, stop, tp, float(O[jE]), hs)
 c2 = np.array(sorted(info), np.int64)
 oo = c2[np.lexsort((-ref[c2], T[c2]))]
 busy, act, sel = {}, [], []
@@ -99,9 +104,9 @@ for i in oo:
     end = t + int(info[i][1]) * 3600; busy[key] = end; act.append((end, SIDE[i])); sel.append(i)
 out = []
 for i in sel:
-    r, nb, kind, ex, stop, tp, fill = info[i]; gs, scl = gate_sym(Dd["names"][SYM[i]]); fm = E3.FAMS[int(F[i, 0])]
+    r, nb, kind, ex, stop, tp, fill, hs = info[i]; gs, scl = gate_sym(Dd["names"][SYM[i]]); fm = E3.FAMS[int(F[i, 0])]
     out.append({"s": gs, "d": -int(SIDE[i]), "c": "1h", "tf": fm.split("_")[-1], "lvl": fm, "t": int(T[i]) + 3600, "e": round(fill / scl, 10),
-                "sl": round(stop / scl, 10), "tp": round(tp / scl, 10), "x": int(T[i]) + 3600 + int(nb) * 3600, "xp": round(ex / scl, 10), "r": round(float(r), 3), "k": kind})
+                "sl": round(stop / scl, 10), "hs": round(hs / scl, 10), "tp": round(tp / scl, 10), "x": int(T[i]) + 3600 + int(nb) * 3600, "xp": round(ex / scl, 10), "r": round(float(r), 3), "k": kind})
 out.sort(key=lambda x: x["t"])
 rr = np.array([x["r"] for x in out]); tt2 = np.array([x["t"] for x in out]); years = {}
 for Y in range(2023, 2027):
@@ -109,10 +114,10 @@ for Y in range(2023, 2027):
     if m.any(): years[str(Y)] = {"n": int(m.sum()), "avg": round(float(rr[m].mean()), 3), "wr": round(float((rr[m] > 0).mean() * 100), 1), "sum": round(float(rr[m].sum()), 1)}
 print("список", len(out), "ср.R", round(float(rr.mean()), 3), "WR", round(float((rr > 0).mean() * 100), 1), years, flush=True)
 sp = json.load(open("lv/split.json"))
-M = {"ver": 1, "feats": E2.FNAMES, "zero": ZERO, "fams": E3.FAMS, "coins": sp["bot"], "models": trees, "trained_to": int(CUT),
-     "rule": {"q": 0.997, "win_d": 180, "lag_d": 14, "stop_datr": 1.0, "take_r": 4.0, "hold_h": 96, "cooldown_h": 24, "min_age_d": 90, "side_cap": 20, "side": 1},
+M = {"ver": 2, "feats": E2.FNAMES, "zero": ZERO, "fams": E3.FAMS, "coins": sp["bot"], "models": trees, "trained_to": int(CUT),
+     "rule": {"q": 0.997, "win_d": 180, "lag_d": 14, "stop_datr": SK, "stop_close_h": CH, "hard_x": HX, "take_r": TK, "hold_h": 96, "cooldown_h": 24, "min_age_d": 90, "side_cap": 20, "side": 1},
      "seed": seed, "seed_to": int(NOW),
      "research": {"years": years, "avg": round(float(rr.mean()), 3), "wr": round(float((rr > 0).mean() * 100), 1), "n": len(out),
-                  "check": {"avg": 0.62, "wr": None}, "check_coins": 84}}
+                  "check": {"avg": 0.77, "wr": None}, "check_coins": 84}}
 json.dump(M, open("vp_cfl_model.json", "w"), separators=(",", ":")); json.dump(out, open("cfl_bt_v1.json", "w"), separators=(",", ":"))
 print("файл модели", len(json.dumps(M)) // 1024, "КБ")
