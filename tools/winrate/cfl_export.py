@@ -4,7 +4,7 @@ seeds with lv_wf's params, trained on the bot coins' events closed 14 days befor
 the 2026 trades of the research (checked against fc_red_sc.npz). The rolling threshold's seed: per day (UTC) the count of
 the bot coins' scored events and their 300 best scores, the 194 days before the export; the bot adds its own days.
 The backtest list: the rolling rule (q 0.997 of the scores of the 180 days ending 14 days before) 2023-26, bot coins,
->= 90 days after the listing, cap 12 a side, one per coin & side, the score order within the hour."""
+>= 90 days after the listing, LONGS only (against the bearish signals), take 4R, 96 h, cap 20 (cfl_lab*.py), one per coin & side, the score order within the hour."""
 import sys, json, glob, math, numpy as np, lightgbm as lgb, warnings; warnings.filterwarnings("ignore")
 sys.argv = ["x"]
 import lv_engine as LE, ev3_engine as E3, ev2_engine as E2
@@ -66,10 +66,10 @@ for d in range(ts(2023) // 86400, NOW // 86400):
     if not (abs(ex - mine) < 1e-9 or (np.isinf(ex) and np.isinf(mine))): mism += 1
 print("порог по дням: расхождений с точным квантилем", mism, flush=True)
 age0 = {}
-cand = np.where(BOT & np.isfinite(ref) & (T >= ts(2023)))[0]
+cand = np.where(BOT & np.isfinite(ref) & (T >= ts(2023)) & (-SIDE == 1))[0]   # v1: longs only (the shorts ~0R)
 cand = cand[ref[cand] >= np.array([days.get(int(t // 86400), np.inf) for t in T[cand]])]
-def walk(O, H, L, C, jE, s, fill, datr, hold=72):
-    risk = fill * datr / 100; stop = fill - s * risk; tp = fill + s * 3 * risk
+def walk(O, H, L, C, jE, s, fill, datr, hold=96):
+    risk = fill * datr / 100; stop = fill - s * risk; tp = fill + s * 4 * risk
     e = min(len(C), jE + hold); k = e - 1 - jE; ex = C[e - 1]; kind = "time"
     for q in range(e - jE):
         b = jE + q
@@ -95,7 +95,7 @@ for i in oo:
     t = T[i]; key = (SYM[i], SIDE[i])
     if busy.get(key, 0) > t: continue
     act = [a for a in act if a[0] > t]
-    if sum(1 for a in act if a[1] == SIDE[i]) >= 12: continue
+    if sum(1 for a in act if a[1] == SIDE[i]) >= 20: continue
     end = t + int(info[i][1]) * 3600; busy[key] = end; act.append((end, SIDE[i])); sel.append(i)
 out = []
 for i in sel:
@@ -110,9 +110,9 @@ for Y in range(2023, 2027):
 print("список", len(out), "ср.R", round(float(rr.mean()), 3), "WR", round(float((rr > 0).mean() * 100), 1), years, flush=True)
 sp = json.load(open("lv/split.json"))
 M = {"ver": 1, "feats": E2.FNAMES, "zero": ZERO, "fams": E3.FAMS, "coins": sp["bot"], "models": trees, "trained_to": int(CUT),
-     "rule": {"q": 0.997, "win_d": 180, "lag_d": 14, "stop_datr": 1.0, "take_r": 3.0, "hold_h": 72, "cooldown_h": 24, "min_age_d": 90, "side_cap": 12},
+     "rule": {"q": 0.997, "win_d": 180, "lag_d": 14, "stop_datr": 1.0, "take_r": 4.0, "hold_h": 96, "cooldown_h": 24, "min_age_d": 90, "side_cap": 20, "side": 1},
      "seed": seed, "seed_to": int(NOW),
      "research": {"years": years, "avg": round(float(rr.mean()), 3), "wr": round(float((rr > 0).mean() * 100), 1), "n": len(out),
-                  "check": {"avg": 0.20, "wr": None}, "check_coins": 84}}
+                  "check": {"avg": 0.62, "wr": None}, "check_coins": 84}}
 json.dump(M, open("vp_cfl_model.json", "w"), separators=(",", ":")); json.dump(out, open("cfl_bt_v1.json", "w"), separators=(",", ":"))
 print("файл модели", len(json.dumps(M)) // 1024, "КБ")

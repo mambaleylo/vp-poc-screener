@@ -1,8 +1,9 @@
-"""v0.99.739 — 🔄 Классика наоборот in the bot: (1) the bot's pure-Python indicators / features / score on the bars the
+"""v0.99.739, v0.99.740 — 🔄 Классика наоборот in the bot: (1) the bot's pure-Python indicators / features / score on the bars the
 live bot sees (1h 3000, 4h 1500, 1d 1000 — here built from the research's Binance 1h bars, cut at the signal's close,
 the next hour's open only) == the research's events (ev3/<SYM>.npz) and the 2026 model's scores (fc_red_sc.npz) for
 backtest trades of 2026; (2) the rolling threshold from the model file's seed == numpy's quantile; (3) the scan opens
-those trades (virtual) and the settle walks them to the backtest list's R; (4) the tab renders, no page errors."""
+those trades (virtual) and the settle walks them to the backtest list's R; (4) the tab renders, no page errors; (5) the real
+trades: off by default, the switch on -> execute_autotrade with the trade's own stop / take, the late / old ones not."""
 import sys, json, glob, time, threading, numpy as np
 from common import V
 import lv_engine as LE, ev3_engine as E3, ev2_engine as E2
@@ -11,6 +12,7 @@ from bt_trades import gate_sym
 ok = True
 m = V.cfl_model()
 ok &= bool(m) and m["feats"] == V.CFL_FNAMES and m["fams"] == V.CFL_FAMS
+ok &= m["rule"].get("side") == 1 and all(t["d"] == 1 for t in json.load(open("/home/user/vp-poc-screener/vp_bt_trades.json"))["cfl"])
 print("(0) model", bool(m), m and len(m["models"]), m and m["rule"])
 BARS = {}
 def bars(sym):
@@ -90,11 +92,11 @@ for p in picks[:6]:
     c["datr"] = float(z["datr"][k])
     T_, O_, H_, L_b, C_, V_ = bars(sym)
     def fake_kl(bs, interval, n, sym=sym):
-        a = int(np.searchsorted(T_, t_close)); b = min(len(T_), a + 80)
+        a = int(np.searchsorted(T_, t_close)); b = min(len(T_), a + 110)
         return [list(map(int, T_[a:b])), list(map(float, O_[a:b])), list(map(float, H_[a:b])), list(map(float, L_b[a:b])), list(map(float, C_[a:b])), list(map(float, V_[a:b]))]
     V.cfl_klines = fake_kl
     V.cfl_open(c, t_close, m)
-    V.cfl_settle(t_close + 80 * 3600)
+    V.cfl_settle(t_close + 110 * 3600)
     tr = V._CFL["trades"][0]; r = tr.get("r")
     scl = gate_sym(sym)[1]
     same += r is not None and abs(r - p["r"]) < 0.01 and abs(tr["entry"] - p["e"]) / p["e"] < 1e-9
@@ -118,8 +120,32 @@ with sync_playwright() as pw:
     pg.evaluate("document.getElementById('btBox_cfl').closest('details').open = true"); pg.wait_for_timeout(2500)
     nrow = pg.locator("#btBox_cfl div[onclick]").count()
     pg.screenshot(path="ui_cfl.png", full_page=True)
+    sw = pg.evaluate("(() => { const e = document.getElementById('setAutotradeCfl'), r = document.getElementById('setRiskPctCfl'); return [!!e, e && e.checked, !!r, r && r.placeholder]; })()")
     b.close()
-tab_ok = "Классика наоборот" in txt and "против: Боллинджер 4ч" in txt and "Последний скан" in txt and nrow > 10 and not errs
-print("(4) вкладка:", tab_ok, "строк бэктеста", nrow, errs[:2])
+tab_ok = ("Классика наоборот" in txt and "против: Боллинджер 4ч" in txt and "Последний скан" in txt and "только лонги" in txt and "+0.62R" in txt
+          and nrow > 10 and not errs and sw == [True, False, True, "🔄 1"])
+print("(4) вкладка:", tab_ok, "строк бэктеста", nrow, "переключатель", sw, errs[:2])
 ok &= tab_ok
+# (5) the real trades
+calls = []
+V.execute_autotrade = lambda *a, **k: calls.append((a, k)) or {"status": "OPENED", "detail": "mock"}
+ok5 = V.AUTOTRADE_ENABLED_CFL is False and V.get_settings()["autotrade_cfl"] is False and "autotrade_cfl" in V.SETTINGS_KEYS
+p = picks[0]; sym = inv[p["s"]]
+def mk(live_k, late=False):
+    V._CFL["trades"] = []
+    c = {"bsym": sym, "fam": p["lvl"], "S": -1, "score": 9.0, "datr": 4.0, "fill": p["e"], "live": p["e"] * live_k}
+    t_close = int(time.time()) - (3600 if late else 60)
+    V.cfl_open(c, t_close, m)
+    return V._CFL["trades"][-1]
+tr = mk(1.002); ok5 &= not calls and tr["real"] is False and V.mod_why_virtual(tr, False).startswith("автоторговля модуля выключена")
+V.AUTOTRADE_ENABLED_CFL = True
+tr = mk(1.002); ok5 &= len(calls) == 1 and tr["real"] is True
+a, k = calls[-1]
+ok5 &= a[0] == "cfl" and a[2] == "LONG" and abs(a[3] - p["e"] * 1.002) < 1e-12 and a[4] == tr["sl"] and a[5] == tr["tp"] and k["extra"]["kx"] == 1.0
+ok5 &= abs((tr["tp"] - tr["entry"]) / (tr["entry"] - tr["sl"]) - 4.0) < 1e-9 and tr["hold"] == 96
+tr = mk(1.06); ok5 &= len(calls) == 1 and tr.get("late") and not tr["real"]   # 6% away with a 4% stop: > 1R
+tr = mk(1.0, late=True); ok5 &= len(calls) == 1 and tr.get("rt") and not tr["real"]   # an old close: the record only
+V.AUTOTRADE_ENABLED_CFL = False
+print("(5) реальные сделки: по умолчанию выкл, при вкл — вызов с тем же стопом/тейком, поздние и старые — нет:", bool(ok5), len(calls))
+ok &= bool(ok5)
 print("ALL OK" if ok else "FAILED"); sys.exit(0 if ok else 1)

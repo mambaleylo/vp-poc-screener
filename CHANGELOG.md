@@ -20982,3 +20982,17 @@ v0.99.732 - 📏 HTF levels — a new module (the user: "думай над со�
   the threshold = numpy's quantile; 6/6 backtest trades re-made), the tab «🔄 Классика» (the scan, the virtual trades,
   the live check, the backtest list of 409 trades +0.49R), settings (on / Telegram), heartbeat, model refresh, lab upload.
 - Tests: t_dlm_ui's backtest mock takes the module argument (broken since v0.99.733's bt_trades(need=)).
+
+v0.99.740 — 🔄 Классика наоборот: the rule re-chosen on the check coins, the real trades by a switch (off)
+- The lab (tools/winrate/cfl_lab.py, cfl_lab2.py, cfl_money.py; judged on the 84 check coins the model never traded):
+  longs only (against the sell signals) beat both sides, out after 96 h beats 72 h, the take 4R beats 3R, <= 20 at
+  once beats 12; an entry an hour later keeps ~the same. The model and the threshold seed re-exported for that rule
+  (cfl_export.py): 417 trades 2023–2026, +0.72R a trade, WR 62.6% (each year > +0.55R); the check coins +0.62R.
+  In the bundle money sim (the module at 1%): the bad year (p10) $3.3k -> $3.8k but the median $39.1k -> $36.4k, better in
+  45% of the 12-month windows; with the check coins' list $3.5k / $35.9k, better in 31% — hence the real trades off.
+- The bot: the scan opens longs only; a switch «↳ 🔄 Классика наоборот» in the autotrade settings (off by default) sends
+  the trade at the market right after the 4h close (Binance with the P/R / SMC / EMA routing, else Gate) with the stop
+  1 daily ATR and the take 4R on the exchange, the bot closing it at 96 h; no real trade when the price is a whole R
+  from the hour's open or the close is older than 15 min. Its own risk field «🔄» (empty = 1% on Binance, 0.25% on Gate).
+- Tests: t_cfl_bot.py — (5) the switch off by default; on -> execute_autotrade with the trade's own stop / take; the late
+  and the old ones not; the settings row renders unchecked.
