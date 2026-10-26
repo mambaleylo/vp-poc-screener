@@ -11,5 +11,5 @@ def hdr(A, rk):
     l = f(ts(2025, 10), ts(2026, 10))
     return {"p10": int(np.percentile(y, 10)), "p50": int(np.median(y)), "p90": int(np.percentile(y, 90)), "dd": int(round(np.median(dd) * 100)), "last12": int(l[0])}, l[2].astype(int).tolist()
 print("bundle", *hdr(BASE, [4.5, 3, 2.5, 2, 0]), flush=True)
-print("bundle_htf 1.5", *hdr(np.vstack([BASE, rows("htf_bt_v1.json")]), [4.5, 3, 2.5, 2, 1.5]), flush=True)
+print("bundle_htf k24 2.0", *hdr(np.vstack([BASE, rows("htf_bt_v2_k24.json")]), [4.5, 3, 2.5, 2, 2.0]), flush=True)
 print("bundle_htf 2.0", *hdr(np.vstack([BASE, rows("htf_bt_v1.json")]), [4.5, 3, 2.5, 2, 2.0]), flush=True)

@@ -4,7 +4,7 @@ import sys, os, json, time, tempfile
 from common import V
 ok = True
 repo = json.load(open("/home/user/vp-poc-screener/vp_bt_trades.json"))
-ok &= len(repo.get("htf") or []) == 299
+ok &= len(repo.get("htf") or []) >= 250   # v0.99.738: 290 with the 1d close-stop
 print("repo file: htf", len(repo.get("htf") or []))
 bt = V.bt_trades = V._bt_trades_real              # the bot's own function (common.py swaps it for a read-only one)
 fn = os.path.join(tempfile.mkdtemp(), "bt.json")

@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.737"
+APP_VERSION = "0.99.738"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28512,7 +28512,7 @@ _PROC_START = time.time()
 # the years, the median drawdown. "bundle" = ⚡ 4.5% + P/R 3% + SMC 2.5% + EMA 2% (on Binance together, v0.99.727), "dlm" = ⚡ alone
 EXPECT_YEAR = {"dlm": {"p10": 1620, "p50": 7804, "p90": 27800, "dd": 65, "last12": 22216},   # v0.99.718: cross 10x, the open risk <= 90%, ⚡ 4.5% (port_717d.py); v0.99.704: x the daily WaveTrend (port_osc3.py)
                "bundle": {"p10": 2949, "p50": 40219, "p90": 216119, "dd": 59, "last12": 146001},
-               "bundle_htf": {"p10": 3533, "p50": 42250, "p90": 275666, "dd": 58, "last12": 225726}}   # v0.99.737: HTF 2%; v0.99.735: + 📏 HTF 1.5% (port_htf_hdr.py, the list htf_bt_v1, the same way as "bundle")   # v0.99.727: SMC 2.5% + EMA 2% (port_risk4.py); v0.99.719: + SMC's break-even after +2R (port_be5.py, the SMC rows from the list); v0.99.718: ⚡ 4.5 + P/R 3 + SMC 1.5 + EMA 1, cross 10x, the open risk <= 90% (port_717d.py)   # v0.99.712: EMA 1% (port_w709.py); v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
+               "bundle_htf": {"p10": 3691, "p50": 42441, "p90": 264007, "dd": 58, "last12": 231706}}   # v0.99.738: HTF stop on the 1d close (port_htf_hdr.py, htf_bt_v2_k24); v0.99.737: HTF 2%; v0.99.735: + 📏 HTF 1.5% (port_htf_hdr.py, the list htf_bt_v1, the same way as "bundle")   # v0.99.727: SMC 2.5% + EMA 2% (port_risk4.py); v0.99.719: + SMC's break-even after +2R (port_be5.py, the SMC rows from the list); v0.99.718: ⚡ 4.5 + P/R 3 + SMC 1.5 + EMA 1, cross 10x, the open risk <= 90% (port_717d.py)   # v0.99.712: EMA 1% (port_w709.py); v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
 
 
 @app.route("/api/boot")
@@ -34361,7 +34361,7 @@ def htf_fire(a, t_touch, live_px=None, how=None):
     if TELEGRAM_ALERTS_HTF:
         pct = lambda p: (p - a["lv"]) / a["lv"] * 100
         send_telegram(f"📏 {a['symbol'].replace('_USDT', '')} LONG · HTF: {HTF_NAME.get(a['fam'], a['fam'])} — цена прошла уровень на 0.1%\n"
-                      f"вход {a['lv']:.6g} · стоп по закрытию 4ч {a['sl']:.6g} ({pct(a['sl']):+.1f}%) · аварийный {tr.get('hs', a['sl']):.6g} ({pct(tr.get('hs', a['sl'])):+.1f}%)"
+                      f"вход {a['lv']:.6g} · стоп по закрытию {'дня' if ch >= 24 else f'{ch}ч'} {a['sl']:.6g} ({pct(a['sl']):+.1f}%) · аварийный {tr.get('hs', a['sl']):.6g} ({pct(tr.get('hs', a['sl'])):+.1f}%)"
                       f" · тейк {a['tp']:.6g} ({pct(a['tp']):+.1f}%) · держать до {hold} ч\n"
                       + ("💰 сделка на бирже" if tr["real"] else (f"без сделки: цена уже на {tr['late']}R выше уровня" if tr.get("late") else "без сделки (только сигнал)")),
                       category="htf")
@@ -41743,7 +41743,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ 📏 HTF-уровни</div>
-          <div class="sub">реальный лонг по рынку, когда цена прошла уровень на 0.1% (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 3 дневных ATR и тейк 3R сразу на бирже, выход по закрытию 4ч-свечи за 1 дневным ATR, через 96 ч бот закрывает сделку. Риск — поле «📏» выше (пусто = 2% на Binance)</div>
+          <div class="sub">реальный лонг по рынку, когда цена прошла уровень на 0.1% (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 3 дневных ATR и тейк 3R сразу на бирже, выход по закрытию дневной свечи (00:00 UTC) за 1 дневным ATR, через 96 ч бот закрывает сделку. Риск — поле «📏» выше (пусто = 2% на Binance)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeHtf"><span class="switchSlider"></span></label>
       </div>
@@ -45357,7 +45357,7 @@ async function refreshHtf() {   // v0.99.732 — 📏 HTF: two models on the fir
       <div class="zsub">Проверка на истории 127 монет — каждый год модели его не видели. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y, sub: `${x.n} сделок · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2026'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span><b>~${rs.per_month || '—'}</b> сделок в месяц</span><span>WR <b>${rs.wr || '—'}%</b></span><span>просадка до <b>${dd}R</b></span></div>
-      <div class="zsub">Стоп — если ${rule.stop_close_h || 4}-часовая свеча закрылась на <b>${rule.stop_datr || 1} дневной ATR</b> ниже уровня (аварийный стоп на бирже — ${(rule.stop_datr || 1) * (rule.hard_x || 3)} ATR), тейк — <b>${rule.take_r || 3} риска</b>, через ${rule.hold_h || 96} ч выход. Не больше ${m.side_cap || 12} сделок сразу, по монете — одна. Сделки бывают неровно: в 2025 модели почти молчали (касания в тот год были убыточны в целом), в 2026 — ~3 в неделю.</div>
+      <div class="zsub">Стоп — если ${(rule.stop_close_h || 4) >= 24 ? 'дневная (00:00 UTC)' : (rule.stop_close_h || 4) + '-часовая'} свеча закрылась на <b>${rule.stop_datr || 1} дневной ATR</b> ниже уровня (аварийный стоп на бирже — ${(rule.stop_datr || 1) * (rule.hard_x || 3)} ATR), тейк — <b>${rule.take_r || 3} риска</b>, через ${rule.hold_h || 96} ч выход. Не больше ${m.side_cap || 12} сделок сразу, по монете — одна. Сделки бывают неровно: в 2025 модели почти молчали (касания в тот год были убыточны в целом), в 2026 — ~3 в неделю.</div>
       ${d.auto ? '' : `<div class="zbanner warn">Риск на сделку — поле «📏» в настройках риска (пусто = ${d.risk}%).</div>`}`;
   }
   h += card(`📏 HTF-уровни ${pill}`, top);

@@ -20956,3 +20956,12 @@ v0.99.732 - 📏 HTF levels — a new module (the user: "думай над со�
 - The lab rounds 5–6 scripts (no bot change from them): exits / deeper limit entries / filters / caps (htf_lab5*.py),
   shorts with their own model, level-memory features, quarterly retraining (htf_lab6*.py) — none beat the deployed rule
   on the check coins.
+
+## v0.99.738
+- 📏 HTF: the soft stop on the **1d close** (00:00 UTC) instead of the 4h close (the model's rule stop_close_h 24; the
+  emergency stop 3 dATR on the exchange as before). HTF lab round 7 (htf_lab7*.py): win rate 66% -> 69% on the bot coins,
+  61% -> 65% on the 84 check coins, avg R +0.75 -> +0.78 (+0.60 -> +0.69 check); the bundle's money with friction even
+  (the windows x1.00, the last 12 months +$5k). The models are the same; trained_to + 1 s so the running bots take the rule.
+  The backtest list re-walked (290 trades, htf_export_k24.py), the header with HTF re-computed (bad ~$3.7k · usual ~$42.4k ·
+  good ~$264k). The texts of the tab / settings / Telegram say the 1d close.
+- The lab scripts of the last rounds (quiet-market lifters, pairs, new hypotheses, the opposite sides, win rate).
