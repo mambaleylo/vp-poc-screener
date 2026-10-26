@@ -20942,3 +20942,8 @@ v0.99.732 - 📏 HTF levels — a new module (the user: "думай над со�
   HTF 1.5%, the same money sim as the bundle's numbers, port_htf_hdr.py): bad year ~$3.4k · usual ~$41.7k · good ~$256k ·
   drawdowns ~58%, the last 12 months $224k (without HTF: $2.9k / $40.2k / $216k / 59%, $146k).
 - t_hdr_htf: ⚡ alone / the bundle / the bundle + HTF by the settings.
+
+## v0.99.736
+- «📤 Сделки в GitHub» (the lab upload): 📏 HTF's state (its trades, armed levels, scans) goes too, the money fields cut as
+  for the others — its live trades can be checked against the backtest in the lab.
+- t_lab_export: the HTF file exported, its money cut, the counts.

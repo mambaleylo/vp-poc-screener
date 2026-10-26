@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.735"
+APP_VERSION = "0.99.736"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28390,7 +28390,7 @@ def lab_sanitize(x):
 
 def lab_export_build():
     files = {}
-    for path in (DLM_STATE_FILE, PRX_STATE_FILE, SMC_STATE_FILE, EMX_STATE_FILE, BNO_FILE):
+    for path in (DLM_STATE_FILE, PRX_STATE_FILE, SMC_STATE_FILE, EMX_STATE_FILE, HTF_STATE_FILE, BNO_FILE):   # v0.99.736 — 📏 HTF too
         try:
             with open(path) as f:
                 files[os.path.basename(path)] = lab_sanitize(json.load(f))
