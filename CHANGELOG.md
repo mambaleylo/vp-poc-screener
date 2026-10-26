@@ -20936,3 +20936,9 @@ v0.99.732 - 📏 HTF levels — a new module (the user: "думай над со�
 - Backtest lists (every tab): one line per trade on a phone. The exit goes before the level and is short
   («время», «авар. стоп», «б/у»); a long level name is cut with «…» (the full text on hover); the R always visible.
 - t_bt_oneline: rows of the 📏 HTF and 🧱 SMC lists at 412 px are one line, no page errors.
+
+## v0.99.735
+- The header's yearly expectation: with 📏 HTF's real trades on, the bundle with HTF (⚡ 4.5 + P/R 3 + SMC 2.5 + EMA 2 +
+  HTF 1.5%, the same money sim as the bundle's numbers, port_htf_hdr.py): bad year ~$3.4k · usual ~$41.7k · good ~$256k ·
+  drawdowns ~58%, the last 12 months $224k (without HTF: $2.9k / $40.2k / $216k / 59%, $146k).
+- t_hdr_htf: ⚡ alone / the bundle / the bundle + HTF by the settings.

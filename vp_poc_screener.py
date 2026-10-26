@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.734"
+APP_VERSION = "0.99.735"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28511,14 +28511,15 @@ _PROC_START = time.time()
 # account, the bot's leverage, the honest pools; tools/winrate port_expect.py): the worst 10% / the median / the best 10% of
 # the years, the median drawdown. "bundle" = ⚡ 4.5% + P/R 3% + SMC 2.5% + EMA 2% (on Binance together, v0.99.727), "dlm" = ⚡ alone
 EXPECT_YEAR = {"dlm": {"p10": 1620, "p50": 7804, "p90": 27800, "dd": 65, "last12": 22216},   # v0.99.718: cross 10x, the open risk <= 90%, ⚡ 4.5% (port_717d.py); v0.99.704: x the daily WaveTrend (port_osc3.py)
-               "bundle": {"p10": 2949, "p50": 40219, "p90": 216119, "dd": 59, "last12": 146001}}   # v0.99.727: SMC 2.5% + EMA 2% (port_risk4.py); v0.99.719: + SMC's break-even after +2R (port_be5.py, the SMC rows from the list); v0.99.718: ⚡ 4.5 + P/R 3 + SMC 1.5 + EMA 1, cross 10x, the open risk <= 90% (port_717d.py)   # v0.99.712: EMA 1% (port_w709.py); v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
+               "bundle": {"p10": 2949, "p50": 40219, "p90": 216119, "dd": 59, "last12": 146001},
+               "bundle_htf": {"p10": 3410, "p50": 41745, "p90": 255999, "dd": 58, "last12": 223594}}   # v0.99.735: + 📏 HTF 1.5% (port_htf_hdr.py, the list htf_bt_v1, the same way as "bundle")   # v0.99.727: SMC 2.5% + EMA 2% (port_risk4.py); v0.99.719: + SMC's break-even after +2R (port_be5.py, the SMC rows from the list); v0.99.718: ⚡ 4.5 + P/R 3 + SMC 1.5 + EMA 1, cross 10x, the open risk <= 90% (port_717d.py)   # v0.99.712: EMA 1% (port_w709.py); v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
 
 
 @app.route("/api/boot")
 def api_boot():
     """v0.99.469 — the page reloads itself when this changes (a restart / update); v0.99.700 — the yearly expectation
     for the header (the bundle when P/R, SMC, EMA trade with ⚡ on Binance)"""
-    k = "bundle" if BN_OTHERS else "dlm"
+    k = ("bundle_htf" if AUTOTRADE_ENABLED_HTF else "bundle") if BN_OTHERS else "dlm"   # v0.99.735 — 📏 HTF's real trades on -> the bundle with it
     return jsonify({"boot": _PROC_START, "version": APP_VERSION, "expect": dict(EXPECT_YEAR[k], kind=k)})
 
 
@@ -44182,7 +44183,7 @@ if ('serviceWorker' in navigator) { try { navigator.serviceWorker.register('/sw.
     const r = await (await fetch('/api/boot', {cache: 'no-store'})).json(), e = r.expect;
     if (!e) return;
     const k = v => v >= 1000 ? '$' + (v / 1000).toFixed(v >= 10000 ? 0 : 1).replace('.', ',') + 'k' : '$' + v;
-    document.getElementById('hdrExpect').innerHTML = `📈 ${e.kind === 'bundle' ? '⚡ + P/R + SMC + EMA' : '⚡'} за год со $100 по истории: плохой год ~${k(e.p10)} · обычный ~${k(e.p50)} · хороший ~${k(e.p90)} · просадки ~${e.dd}% · вживую ждите меньше`;
+    document.getElementById('hdrExpect').innerHTML = `📈 ${e.kind === 'bundle_htf' ? '⚡ + P/R + SMC + EMA + HTF' : (e.kind === 'bundle' ? '⚡ + P/R + SMC + EMA' : '⚡')} за год со $100 по истории: плохой год ~${k(e.p10)} · обычный ~${k(e.p50)} · хороший ~${k(e.p90)} · просадки ~${e.dd}% · вживую ждите меньше`;
   } catch (err) {}
 })();
 
