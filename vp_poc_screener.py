@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.738"
+APP_VERSION = "0.99.739"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1157,6 +1157,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "cas_enabled", "autotrade_cas", "telegram_alerts_cas", "risk_pct_cas",   # v0.99.653
                   "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
                   "htf_enabled", "autotrade_htf", "telegram_alerts_htf", "risk_pct_htf",   # v0.99.732
+                  "cfl_enabled", "telegram_alerts_cfl",   # v0.99.739
                   "dlm_enabled", "autotrade_dlm2", "telegram_alerts_dlm", "risk_pct_dlm2", "dlm_binance", "dlm_more_coins", "bn_others", "bn_cross",   # v0.99.679, v0.99.684, v0.99.686 (v0.99.687: the single mode and the ladder dropped; the 4h module's own autotrade / risk keys: it starts virtual at 4% (v0.99.688), the 15m one held up to 50%)
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
@@ -1241,6 +1242,7 @@ def get_settings():
         "cas_enabled": CAS_ENABLED, "autotrade_cas": AUTOTRADE_ENABLED_CAS, "telegram_alerts_cas": TELEGRAM_ALERTS_CAS, "risk_pct_cas": MODULE_RISK_PCT.get("cas"),   # v0.99.653
         "smc_enabled": SMC_ENABLED, "autotrade_smc": AUTOTRADE_ENABLED_SMC, "telegram_alerts_smc": TELEGRAM_ALERTS_SMC, "risk_pct_smc": MODULE_RISK_PCT.get("smc"),   # v0.99.678
         "htf_enabled": HTF_ENABLED, "autotrade_htf": AUTOTRADE_ENABLED_HTF, "telegram_alerts_htf": TELEGRAM_ALERTS_HTF, "risk_pct_htf": MODULE_RISK_PCT.get("htf"),   # v0.99.732
+        "cfl_enabled": CFL_ENABLED, "telegram_alerts_cfl": TELEGRAM_ALERTS_CFL,   # v0.99.739
         "dlm_enabled": DLM_ENABLED, "autotrade_dlm2": AUTOTRADE_ENABLED_DLM, "telegram_alerts_dlm": TELEGRAM_ALERTS_DLM, "risk_pct_dlm2": MODULE_RISK_PCT.get("dlm"),   # v0.99.679, v0.99.687
         "dlm_binance": DLM_BINANCE,   # v0.99.684
         "bn_others": BN_OTHERS,   # v0.99.698
@@ -1533,6 +1535,7 @@ def apply_settings(updates):
                    ("cas_enabled", "CAS_ENABLED"), ("autotrade_cas", "AUTOTRADE_ENABLED_CAS"), ("telegram_alerts_cas", "TELEGRAM_ALERTS_CAS"),
                    ("smc_enabled", "SMC_ENABLED"), ("autotrade_smc", "AUTOTRADE_ENABLED_SMC"), ("telegram_alerts_smc", "TELEGRAM_ALERTS_SMC"),
                    ("htf_enabled", "HTF_ENABLED"), ("autotrade_htf", "AUTOTRADE_ENABLED_HTF"), ("telegram_alerts_htf", "TELEGRAM_ALERTS_HTF"),   # v0.99.732
+                   ("cfl_enabled", "CFL_ENABLED"), ("telegram_alerts_cfl", "TELEGRAM_ALERTS_CFL"),   # v0.99.739
                    ("dlm_enabled", "DLM_ENABLED"), ("autotrade_dlm2", "AUTOTRADE_ENABLED_DLM"), ("telegram_alerts_dlm", "TELEGRAM_ALERTS_DLM"),
                    ("dlm_binance", "DLM_BINANCE"), ("dlm_more_coins", "DLM_MORE_COINS"), ("bn_others", "BN_OTHERS"), ("bn_cross", "BN_CROSS")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
         if _k in updates:
@@ -7565,6 +7568,7 @@ LOOP_MAX_GAP_SEC = {
     "cas_loop": 60 * 60,   # v0.99.653 — 🌊 EMA cascade
     "smc_loop": 60 * 60,   # v0.99.678 — 🧱 SMC, beats per coin while the hour's levels are counted
     "htf_loop": 60 * 60,   # v0.99.732 — 📏 HTF, the same
+    "cfl_loop": 60 * 60,   # v0.99.739 — 🔄 Классика наоборот
     "dlm_loop": 30 * 60,   # v0.99.679 — ⚡ 15m deep limits, beats every 5 s and per coin while scanning
     "hdg_loop": 10 * 60,   # v0.99.628 — 🪞 hedge mirror, beats every 5 s
     "auto_update_loop": 30 * 60,   # v0.99.637 — beats every 10 min
@@ -7582,7 +7586,7 @@ LOOP_MAX_GAP_SEC = {
 LOOP_LABELS = {
     "scan_loop": "Volume скан", "msnr_live_loop": "MSNR живой скан",
     "lsw_live_loop": "Sweep живой скан", "snr_live_loop": "S/R живой скан",
-    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "cas_loop": "🌊 Каскад", "smc_loop": "🧱 SMC", "htf_loop": "📏 HTF-уровни", "dlm_loop": "⚡ Лимитки 4ч+2ч", "hdg_loop": "🪞 Хедж", "auto_update_loop": "автообновление", "nx_loop": "Нейро",
+    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "cas_loop": "🌊 Каскад", "smc_loop": "🧱 SMC", "htf_loop": "📏 HTF-уровни", "cfl_loop": "🔄 Классика наоборот", "dlm_loop": "⚡ Лимитки 4ч+2ч", "hdg_loop": "🪞 Хедж", "auto_update_loop": "автообновление", "nx_loop": "Нейро",
     "reconcile_loop": "сверка позиций (автоторговля)",
     "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
     "snr_backtest_loop": "S/R бэктест",
@@ -26327,7 +26331,7 @@ def _zones_outbox_save():
 
 TELEGRAM_ALERTS_TRADE_RESULTS = os.environ.get("VP_TG_TRADE_RESULTS", "1") == "1"            # v0.99.457
 TELEGRAM_TRADE_RESULTS_REAL_ONLY = os.environ.get("VP_TG_TRADE_RESULTS_REAL", "0") == "1"
-_TRADE_MOD_NAMES = {"rbx": "📈 Пробой", "cas": "🌊 Каскад", "smc": "🧱 SMC", "htf": "📏 HTF-уровни", "dlm": "⚡ Лимитки 4ч+2ч", "zones_zm": "🎯 Сильные зоны", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "zones": "Зоны",
+_TRADE_MOD_NAMES = {"rbx": "📈 Пробой", "cas": "🌊 Каскад", "smc": "🧱 SMC", "htf": "📏 HTF-уровни", "cfl": "🔄 Классика наоборот", "dlm": "⚡ Лимитки 4ч+2ч", "zones_zm": "🎯 Сильные зоны", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "zones": "Зоны",
                     "zones_own": "Зоны · 🔎 наш поиск", "zones_appr": "Зоны · движение к зоне", "zones_pb": "Зоны · 🧪 откат"}
 
 
@@ -28390,7 +28394,7 @@ def lab_sanitize(x):
 
 def lab_export_build():
     files = {}
-    for path in (DLM_STATE_FILE, PRX_STATE_FILE, SMC_STATE_FILE, EMX_STATE_FILE, HTF_STATE_FILE, BNO_FILE):   # v0.99.736 — 📏 HTF too
+    for path in (DLM_STATE_FILE, PRX_STATE_FILE, SMC_STATE_FILE, EMX_STATE_FILE, HTF_STATE_FILE, CFL_STATE_FILE, BNO_FILE):   # v0.99.736 — 📏 HTF too; v0.99.739 — 🔄
         try:
             with open(path) as f:
                 files[os.path.basename(path)] = lab_sanitize(json.load(f))
@@ -32325,6 +32329,7 @@ def model_refresh_once():
                                          ("🌊 Каскад", CAS_MODEL_FILE, CAS_MODEL_URL, CAS_MODEL_VER, _cas_lock, _CAS),
                                          ("🧱 SMC", SMC_MODEL_FILE, SMC_MODEL_URL, SMC_MODEL_VER, _smc_lock, _SMC),
                                          ("📏 HTF-уровни", HTF_MODEL_FILE, HTF_MODEL_URL, HTF_MODEL_VER, _htf_lock, _HTF),   # v0.99.732
+                                         ("🔄 Классика наоборот", CFL_MODEL_FILE, CFL_MODEL_URL, CFL_MODEL_VER, _cfl_lock, _CFL),   # v0.99.739
                                          ("⚡ Лимитки 4ч+2ч", DLM_MODEL_FILE, DLM_MODEL_URL, DLM_MODEL_VER, _dlm_lock, _DLM)):
         try:
             local = 0
@@ -34502,6 +34507,681 @@ def api_htf_status():
     except Exception as e:
         log_error(f"htf status: {e}")
         return jsonify({"err": f"статистика не посчиталась: {e}"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v0.99.739 — 🔄 Классика наоборот (virtual only): the 12 classic indicators of the research (Supertrend, Parabolic SAR,
+# Ichimoku, MACD, RSI divergence, Stochastic, ADX, Heikin-Ashi, NR7, CCI, Bollinger, Keltner) on Binance's 4h and 1d
+# candles of the 127 bot coins; a signal seen at its candle's close is scored by the 2026 walk-forward model trained on
+# the OPPOSITE side's outcome (tools/winrate/flip*.py, fc_*.py, cfl_export.py) and the trade goes against the signal at the
+# next hour's open: the stop 1 daily ATR, the take 3R (not in the entry hour), out after 72 h. Taken when the score is
+# >= q 0.997 of the scores of the 180 days ending 14 days before (the bot's own days added to the model file's seed);
+# <= 12 a side, one per coin and side, the higher score first. The research's look-ahead check: the events and features
+# re-made on bars cut at the signal (fc_trunc.py, 39/40 exact, the 40th — a coin < 90 days old, skipped here as there).
+# Virtual only: no exchange orders; the tab compares the live trades with the backtest list.
+CFL_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_cfl_model.json")
+CFL_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_cfl_model.json"
+CFL_MODEL_VER = 1
+CFL_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_cfl_state.json")
+CFL_ENABLED = os.environ.get("VP_CFL", "1") == "1"
+TELEGRAM_ALERTS_CFL = os.environ.get("VP_TG_ALERTS_CFL", "1") == "1"
+CFL_FNAMES = ["fam", "side", "datr", "hour", "dow", "r4", "r24", "r72", "r7d", "b24", "b7d", "b_e50", "rsi_d", "rsi_h",
+              "d_e50", "d_e200", "pos30", "pos90", "pos365", "vol24", "atr_h", "oi4", "oi24", "ls_z", "tk_z", "fund",
+              "resid_z", "volx", "wick", "top_z", "ema_near"]
+CFL_IND = ["st_flip", "psar_flip", "ichi", "macd_x", "rsi_div", "stoch_x", "adx_go", "ha_flip", "nr7", "cci_back", "bb_back", "kelt_brk"]
+CFL_FAMS = [f"{a}_{tf}" for a in CFL_IND for tf in ("4h", "1d")]
+CFL_IND_RU = {"st_flip": "Supertrend", "psar_flip": "Parabolic SAR", "ichi": "Ишимоку", "macd_x": "MACD", "rsi_div": "дивергенция RSI",
+              "stoch_x": "стохастик", "adx_go": "ADX", "ha_flip": "Heikin-Ashi", "nr7": "NR7", "cci_back": "CCI", "bb_back": "Боллинджер",
+              "kelt_brk": "Келтнер"}
+CFL_W1, CFL_W4, CFL_WD = 3000, 1500, 1000   # the research's look at a coin, checked (cfl_ref.py): 1h for the beta to BTC, 4h / 1d for the paths
+_CFL = {"model": None, "err": None, "trades": [], "days": {}, "cool": {}, "first": {}, "scan": None, "last_bar": None, "loaded": False}
+_cfl_lock = threading.Lock()
+_NAN = float("nan")
+
+
+def cfl_fam_ru(fam):
+    ind, tf = fam.rsplit("_", 1)
+    return f"{CFL_IND_RU.get(ind, ind)} {'4ч' if tf == '4h' else 'день'}"
+
+
+def cfl_model():
+    with _cfl_lock:
+        m = _CFL["model"]
+    if m and m.get("ver") == CFL_MODEL_VER:
+        return m
+    m = None
+    try:
+        if os.path.exists(CFL_MODEL_FILE):
+            with open(CFL_MODEL_FILE) as f:
+                m = json.load(f)
+            if m.get("ver") != CFL_MODEL_VER or m.get("feats") != CFL_FNAMES or m.get("fams") != CFL_FAMS:
+                m = None
+    except Exception as e:
+        log_error(f"cfl model read: {e}")
+        m = None
+    if not m:
+        try:
+            r = requests.get(CFL_MODEL_URL.format(ref="main"), params={"nocache": int(time.time())}, timeout=120)
+            r.raise_for_status()
+            m = r.json()
+            if m.get("ver") != CFL_MODEL_VER or not m.get("models"):
+                raise RuntimeError(f"версия модели {m.get('ver')} вместо {CFL_MODEL_VER}")
+            if m.get("feats") != CFL_FNAMES or m.get("fams") != CFL_FAMS:
+                raise RuntimeError("признаки модели не совпадают с кодом бота — нужно обновить бота")
+            tmp = CFL_MODEL_FILE + ".new"
+            with open(tmp, "w") as f:
+                json.dump(m, f, separators=(",", ":"))
+            os.replace(tmp, CFL_MODEL_FILE)
+        except Exception as e:
+            with _cfl_lock:
+                _CFL["err"] = f"модель не скачалась: {e}"
+            log_error(f"cfl model download: {e}")
+            return None
+    with _cfl_lock:
+        _CFL.update({"model": m, "err": None})
+    return m
+
+
+def cfl_load():
+    try:
+        if os.path.exists(CFL_STATE_FILE):
+            with open(CFL_STATE_FILE) as f:
+                d = json.load(f)
+            with _cfl_lock:
+                for k in ("trades", "days", "cool", "first", "scan", "last_bar"):
+                    if d.get(k) is not None:
+                        _CFL[k] = d[k]
+    except Exception as e:
+        log_error(f"cfl state load: {e}")
+    _CFL["loaded"] = True
+
+
+def cfl_save():
+    try:
+        with _cfl_lock:
+            data = json.dumps({k: _CFL[k] for k in ("trades", "days", "cool", "first", "scan", "last_bar")} | {"trades": _CFL["trades"][-600:]},
+                              separators=(",", ":"))
+        tmp = CFL_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(data)
+        os.replace(tmp, CFL_STATE_FILE)
+    except Exception as e:
+        log_error(f"cfl state save: {e}")
+
+
+# ---- the research's indicators (ev3_engine / lv_engine), pure Python ----
+def _cfl_ema3(x, n):   # ev3_engine.ema_: from the first value
+    k = 2 / (n + 1); out = []; e = 0.0
+    for i, v in enumerate(x):
+        e = v if i == 0 else e + k * (v - e); out.append(e)
+    return out
+
+
+def _cfl_ema(x, n):   # lv_engine.ema: nan for the first n - 1
+    out = _cfl_ema3(x, n)
+    for i in range(min(len(x), n - 1)):
+        out[i] = _NAN
+    return out
+
+
+def _cfl_tr(H, L, C):
+    return [max(H[i] - L[i], abs(H[i] - (C[i - 1] if i else C[0])), abs(L[i] - (C[i - 1] if i else C[0]))) for i in range(len(C))]
+
+
+def _cfl_atr3(H, L, C, n=14):   # ev3_engine.atr_
+    tr = _cfl_tr(H, L, C); out = []; a = 0.0
+    for i, t in enumerate(tr):
+        a = t if i == 0 else (a * (n - 1) + t) / n; out.append(a)
+    return out
+
+
+def _cfl_watr(H, L, C, n=14):   # lv_engine.wilder_atr
+    tr = _cfl_tr(H, L, C); out = [_NAN] * len(C)
+    if len(C) > n:
+        a = sum(tr[:n]) / n; out[n - 1] = a
+        for i in range(n, len(C)):
+            a = (a * (n - 1) + tr[i]) / n; out[i] = a
+    return out
+
+
+def _cfl_rsi(C, n=14):   # lv_engine.rsi
+    up = [0.0] + [max(C[i] - C[i - 1], 0.0) for i in range(1, len(C))]
+    dn = [0.0] + [max(C[i - 1] - C[i], 0.0) for i in range(1, len(C))]
+    out = [50.0] * len(C)
+    au = sum(up[1:n + 1]) / n if len(C) > n else 0.0
+    ad = sum(dn[1:n + 1]) / n if len(C) > n else 0.0
+    for i in range(n + 1, len(C)):
+        au = (au * (n - 1) + up[i]) / n; ad = (ad * (n - 1) + dn[i]) / n
+        out[i] = 100 - 100 / (1 + au / ad) if ad > 0 else 100.0
+    return out
+
+
+def _cfl_rsi3(C, n=14):   # ev3_engine.rsi_
+    up = [0.0] + [max(C[i] - C[i - 1], 0.0) for i in range(1, len(C))]
+    dn = [0.0] + [max(C[i - 1] - C[i], 0.0) for i in range(1, len(C))]
+    au, ad = _cfl_ema3(up, 2 * n - 1), _cfl_ema3(dn, 2 * n - 1)
+    return [100 - 100 / (1 + a / max(d, 1e-12)) for a, d in zip(au, ad)]
+
+
+def _cfl_rmax(x, n):
+    return [max(x[i - n + 1:i + 1]) if i >= n - 1 else _NAN for i in range(len(x))]
+
+
+def _cfl_rmin(x, n):
+    return [min(x[i - n + 1:i + 1]) if i >= n - 1 else _NAN for i in range(len(x))]
+
+
+def _cfl_fmax(a, b):
+    return b if a != a else (a if b != b else max(a, b))
+
+
+def _cfl_fmin(a, b):
+    return b if a != a else (a if b != b else min(a, b))
+
+
+def cfl_tf_events(O, H, L, C):
+    """ev3_engine.tf_events on one TF's bars -> [(bar index, indicator id, side)]"""
+    n = len(C); ev = []
+    if n < 60:
+        return ev
+    prev = lambda x: [x[0]] + x[:-1]
+    def add(mask, k, s):
+        for i, v in enumerate(mask):
+            if v and i >= 52:
+                ev.append((i, k, s))
+    atr = _cfl_atr3(H, L, C)
+    # Supertrend (10 bars' ATR is the research's 14 -> as there: atr_(14), multiplier 3)
+    dirn = [1.0] * n; up = [0.0] * n; dnb = [0.0] * n
+    for i in range(n):
+        hl = (H[i] + L[i]) / 2; u = hl - 3.0 * atr[i]; d = hl + 3.0 * atr[i]
+        if i == 0:
+            up[i], dnb[i] = u, d; continue
+        up[i] = max(u, up[i - 1]) if C[i - 1] > up[i - 1] else u
+        dnb[i] = min(d, dnb[i - 1]) if C[i - 1] < dnb[i - 1] else d
+        if dirn[i - 1] < 0 and C[i] > dnb[i - 1]: dirn[i] = 1.0
+        elif dirn[i - 1] > 0 and C[i] < up[i - 1]: dirn[i] = -1.0
+        else: dirn[i] = dirn[i - 1]
+    pd_ = prev(dirn)
+    add([dirn[i] > 0 and pd_[i] < 0 for i in range(n)], 0, 1); add([dirn[i] < 0 and pd_[i] > 0 for i in range(n)], 0, -1)
+    # Parabolic SAR 0.02 / 0.2
+    ps = [1.0] * n; sar = L[0]; ep = H[0]; af = 0.02; upw = True
+    for i in range(1, n):
+        sar = sar + af * (ep - sar)
+        if upw:
+            sar = min(sar, L[i - 1], L[i - 2] if i > 1 else L[i - 1])
+            if L[i] < sar:
+                upw = False; sar = ep; ep = L[i]; af = 0.02
+            elif H[i] > ep:
+                ep = H[i]; af = min(af + 0.02, 0.2)
+        else:
+            sar = max(sar, H[i - 1], H[i - 2] if i > 1 else H[i - 1])
+            if H[i] > sar:
+                upw = True; sar = ep; ep = H[i]; af = 0.02
+            elif L[i] < ep:
+                ep = L[i]; af = min(af + 0.02, 0.2)
+        ps[i] = 1.0 if upw else -1.0
+    pp = prev(ps)
+    add([ps[i] > 0 and pp[i] < 0 for i in range(n)], 1, 1); add([ps[i] < 0 and pp[i] > 0 for i in range(n)], 1, -1)
+    # Ichimoku: the close out of the cloud (spans shifted 26 forward = the values of 26 bars ago) with Tenkan on its side
+    h9, l9, h26, l26, h52, l52 = _cfl_rmax(H, 9), _cfl_rmin(L, 9), _cfl_rmax(H, 26), _cfl_rmin(L, 26), _cfl_rmax(H, 52), _cfl_rmin(L, 52)
+    ten = [(a + b) / 2 for a, b in zip(h9, l9)]; kij = [(a + b) / 2 for a, b in zip(h26, l26)]
+    sa = [_NAN] * 26 + [(ten[i] + kij[i]) / 2 for i in range(n - 26)]
+    sb = [_NAN] * 26 + [(h52[i] + l52[i]) / 2 for i in range(n - 26)]
+    top = [_cfl_fmax(a, b) for a, b in zip(sa, sb)]; bot = [_cfl_fmin(a, b) for a, b in zip(sa, sb)]
+    pc, pt, pb = prev(C), prev(top), prev(bot)
+    add([C[i] > top[i] and pc[i] <= pt[i] and ten[i] > kij[i] for i in range(n)], 2, 1)
+    add([C[i] < bot[i] and pc[i] >= pb[i] and ten[i] < kij[i] for i in range(n)], 2, -1)
+    # MACD 12 / 26 / 9: the cross below / above zero
+    e12, e26 = _cfl_ema3(C, 12), _cfl_ema3(C, 26); macd = [a - b for a, b in zip(e12, e26)]; sig = _cfl_ema3(macd, 9)
+    pm, ps_ = prev(macd), prev(sig)
+    add([macd[i] > sig[i] and pm[i] <= ps_[i] and macd[i] < 0 for i in range(n)], 3, 1)
+    add([macd[i] < sig[i] and pm[i] >= ps_[i] and macd[i] > 0 for i in range(n)], 3, -1)
+    # RSI divergence on pivots (3 bars each side, confirmed 3 bars later)
+    r = _cfl_rsi3(C)
+    for arr, s in ((L, 1), ([-h for h in H], -1)):
+        piv = [i for i in range(3, n - 3) if arr[i] == min(arr[i - 3:i + 4])]
+        for a, b in zip(piv[:-1], piv[1:]):
+            if 5 <= b - a <= 40 and arr[b] < arr[a] and s * (r[b] - r[a]) > 0 and ((r[b] < 40) if s > 0 else (r[b] > 60)):
+                i = b + 3
+                if 52 <= i < n:
+                    ev.append((i, 4, s))
+    # Stochastic 14 / 3 / 3
+    hh, ll = _cfl_rmax(H, 14), _cfl_rmin(L, 14)
+    raw = [100 * (C[i] - ll[i]) / (hh[i] - ll[i]) if hh[i] > ll[i] else _NAN for i in range(n)]
+    k_ = [(raw[i] + (raw[i - 1] if i >= 1 else 0.0) + (raw[i - 2] if i >= 2 else 0.0)) / 3 for i in range(n)]
+    kz = [0.0 if v != v else v for v in k_]
+    d_ = [(kz[i] + (kz[i - 1] if i >= 1 else 0.0) + (kz[i - 2] if i >= 2 else 0.0)) / 3 for i in range(n)]
+    pk, pdd = prev(k_), prev(d_)
+    add([k_[i] > d_[i] and pk[i] <= pdd[i] and k_[i] < 20 for i in range(n)], 5, 1)
+    add([k_[i] < d_[i] and pk[i] >= pdd[i] and k_[i] > 80 for i in range(n)], 5, -1)
+    # ADX crossing 25
+    pH, pL = prev(H), prev(L)
+    upm = [max(H[i] - pH[i], 0.0) for i in range(n)]; dnm = [max(pL[i] - L[i], 0.0) for i in range(n)]
+    pdm = [u if u > d else 0.0 for u, d in zip(upm, dnm)]; mdm = [d if d > u else 0.0 for u, d in zip(upm, dnm)]
+    pdi = [100 * a / max(t, 1e-12) for a, t in zip(_cfl_ema3(pdm, 27), atr)]; mdi = [100 * a / max(t, 1e-12) for a, t in zip(_cfl_ema3(mdm, 27), atr)]
+    dx = [100 * abs(a - b) / max(a + b, 1e-12) for a, b in zip(pdi, mdi)]; adx = _cfl_ema3(dx, 27); pa = prev(adx)
+    cr = [adx[i] > 25 and pa[i] <= 25 for i in range(n)]
+    add([cr[i] and pdi[i] > mdi[i] for i in range(n)], 6, 1); add([cr[i] and mdi[i] > pdi[i] for i in range(n)], 6, -1)
+    # Heikin-Ashi: 3+ of one colour, then the other without the wick against it
+    hc = [(O[i] + H[i] + L[i] + C[i]) / 4 for i in range(n)]; ho = [0.0] * n; ho[0] = (O[0] + C[0]) / 2
+    for i in range(1, n):
+        ho[i] = (ho[i - 1] + hc[i - 1]) / 2
+    g = [hc[i] > ho[i] for i in range(n)]
+    add([i >= 3 and g[i] and not g[i - 3] and not g[i - 2] and not g[i - 1] and min(ho[i], hc[i]) <= L[i] + 1e-12 for i in range(n)], 7, 1)
+    add([i >= 3 and not g[i] and g[i - 3] and g[i - 2] and g[i - 1] and max(ho[i], hc[i]) >= H[i] - 1e-12 for i in range(n)], 7, -1)
+    # NR7 inside bar, then the close beyond it
+    rng = [H[i] - L[i] for i in range(n)]
+    nr7 = [i >= 7 and rng[i] <= min(rng[i - 6:i + 1]) and H[i] <= pH[i] and L[i] >= pL[i] for i in range(n)]
+    pn = prev(nr7)
+    add([pn[i] and C[i] > pH[i] for i in range(n)], 8, 1); add([pn[i] and C[i] < pL[i] for i in range(n)], 8, -1)
+    # CCI 20: back over -100 after < -200 (10 bars)
+    tp = [(H[i] + L[i] + C[i]) / 3 for i in range(n)]
+    ma = [sum(tp[max(0, i - 19):i + 1]) / 20 for i in range(n)]
+    md = [sum(abs(v - ma[i]) for v in tp[max(0, i - 19):i + 1]) / len(tp[max(0, i - 19):i + 1]) for i in range(n)]
+    cci = [(tp[i] - ma[i]) / max(0.015 * md[i], 1e-12) for i in range(n)]; pcc = prev(cci)
+    add([i > 0 and cci[i] > -100 and pcc[i] <= -100 and min(cci[max(0, i - 10):i]) < -200 for i in range(n)], 9, 1)
+    add([i > 0 and cci[i] < 100 and pcc[i] >= 100 and max(cci[max(0, i - 10):i]) > 200 for i in range(n)], 9, -1)
+    # Bollinger 20 / 2: the close back inside
+    sm = [sum(C[max(0, i - 19):i + 1]) / 20 for i in range(n)]
+    sd = []
+    for i in range(n):
+        w = C[max(0, i - 19):i + 1]; mu = sum(w) / len(w); sd.append(math.sqrt(sum((v - mu) ** 2 for v in w) / len(w)))
+    lb = [sm[i] - 2 * sd[i] for i in range(n)]; ub = [sm[i] + 2 * sd[i] for i in range(n)]; plb, pub = prev(lb), prev(ub)
+    add([C[i] > lb[i] and pc[i] < plb[i] for i in range(n)], 10, 1); add([C[i] < ub[i] and pc[i] > pub[i] for i in range(n)], 10, -1)
+    # Keltner (EMA 20 +- 2 ATR): the first close out in 20 bars
+    e20 = _cfl_ema3(C, 20)
+    above = [C[i] > e20[i] + 2 * atr[i] for i in range(n)]; below = [C[i] < e20[i] - 2 * atr[i] for i in range(n)]
+    add([above[i] and not any(above[max(0, i - 20):i]) for i in range(n)], 11, 1)
+    add([below[i] and not any(below[max(0, i - 20):i]) for i in range(n)], 11, -1)
+    return ev
+
+
+# ---- Binance data ----
+def _cfl_get(path, params, timeout=15):
+    r = requests.get("https://fapi.binance.com" + path, params=params, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+
+def cfl_klines(bsym, interval, n):
+    """the last n Binance candles (the forming one included, flagged by its time) -> lists t, o, h, l, c, v"""
+    rows, end = [], None
+    while len(rows) < n:
+        p = {"symbol": bsym, "interval": interval, "limit": min(1500, n - len(rows))}
+        if end is not None:
+            p["endTime"] = end
+        chunk = _cfl_get("/fapi/v1/klines", p)
+        if not chunk:
+            break
+        rows = chunk + rows
+        end = int(chunk[0][0]) - 1
+        if len(chunk) < p["limit"]:
+            break
+    seen, out = set(), []
+    for k in rows:
+        t = int(k[0]) // 1000
+        if t not in seen:
+            seen.add(t); out.append((t, float(k[1]), float(k[2]), float(k[3]), float(k[4]), float(k[5])))
+    out.sort()
+    return [list(x) for x in zip(*out)] if out else [[], [], [], [], [], []]
+
+
+def cfl_oi(bsym):
+    """{hour: the hour's last 5-min open interest} of the last ~25 h (the research: data.binance.vision's metrics reduced so)"""
+    out = {}
+    for x in _cfl_get("/futures/data/openInterestHist", {"symbol": bsym, "period": "5m", "limit": 320}) or []:
+        t = int(x["timestamp"]) // 1000; h = t // 3600 * 3600
+        if h not in out or t >= out[h][0]:
+            out[h] = (t, float(x["sumOpenInterest"]))
+    return {h: v for h, (t, v) in out.items()}
+
+
+def cfl_funding(bsym):
+    return sorted((int(x["fundingTime"]) // 1000, float(x["fundingRate"])) for x in _cfl_get("/fapi/v1/fundingRate", {"symbol": bsym, "limit": 10}) or [])
+
+
+# ---- the features (ev2_engine, the bot's windows; cfl_ref.py = the same in numpy, checked against the research) ----
+def cfl_features(fam, S, h1, j, d1, btc1, btcd, oi, fund):
+    """the 31 features of the signal hour j (its index in h1) for the original side S"""
+    T1, O1, H1, L1, C1, V1 = h1
+    tj = T1[j]; dJ = tj // 86400
+    dT, dO, dH, dL, dC, dV = d1
+    di = {t // 86400: i for i, t in enumerate(dT)}
+    kd = di.get(dJ - 1)
+    if kd is None:
+        return None
+    watr = _cfl_watr(dH, dL, dC)
+    dat = watr[kd] / dC[kd] * 100 if watr[kd] == watr[kd] else _NAN
+    if not (dat == dat) or dat < 0.1:
+        return None
+    px = C1[j]; dpx = dat / 100 * px
+    bmap = {t: c for t, c in zip(btc1[0], btc1[4])}
+    bt_sorted = btc1[0]
+    def bclose(t):
+        if t in bmap:
+            return bmap[t]
+        k = bisect.bisect_right(bt_sorted, t) - 1
+        return btc1[4][max(k, 0)]
+    bC = [bclose(t) for t in T1]
+    f = [0.0] * 31
+    f[0] = float(fam); f[1] = float(S); f[2] = dat; f[3] = float((tj // 3600) % 24); f[4] = float((dJ + 3) % 7)
+    ret = lambda k: (C1[j] / C1[max(j - k, 0)] - 1) * 100
+    f[5] = S * ret(4); f[6] = S * ret(24); f[7] = S * ret(72); f[8] = S * ret(168)
+    f[9] = S * (bC[j] / bC[max(j - 24, 0)] - 1) * 100; f[10] = S * (bC[j] / bC[max(j - 168, 0)] - 1) * 100
+    bdT, bdC = btcd[0], btcd[4]
+    bday = (bt_sorted[max(bisect.bisect_right(bt_sorted, tj) - 1, 0)] // 86400) * 86400
+    bdi = max(bisect.bisect_left(bdT, bday) - 1, 0)
+    be = _cfl_ema(bdC, 50)[bdi]
+    f[11] = S * (bdC[bdi] / be - 1) * 100 if be == be else 0.0
+    rd = _cfl_rsi(dC)[kd]; f[12] = S * ((rd if rd == rd else 50.0) - 50); f[13] = S * (_cfl_rsi(C1)[j] - 50)
+    e50, e200 = _cfl_ema(dC, 50)[kd], _cfl_ema(dC, 200)[kd]
+    f[14] = S * (px - e50) / dpx if e50 == e50 else 0.0; f[15] = S * (px - e200) / dpx if e200 == e200 else 0.0
+    for c_, w in ((16, 30), (17, 90), (18, 365)):
+        hh = max(dH[max(0, kd - w + 1):kd + 1]); ll = min(dL[max(0, kd - w + 1):kd + 1])
+        pos = (px - ll) / (hh - ll) if hh > ll else 0.5
+        f[c_] = pos if S > 0 else 1 - pos
+    v24 = sum(V1[max(j - 23, 0):j + 1]); v20 = sum(V1[max(j - 479, 0):j + 1]) / 20
+    f[19] = math.log((v24 + 1e-9) / (v20 + 1e-9))
+    ah = _cfl_watr(H1, L1, C1)[j]
+    f[20] = ah / C1[j] * 100 / max(dat, 1e-9) if ah == ah else 0.0
+    o0, o4, o24 = oi.get(tj), oi.get(tj - 4 * 3600), oi.get(tj - 24 * 3600)
+    f[21] = S * math.log(o0 / o4) * 100 if o0 and o4 else 0.0
+    f[22] = S * math.log(o0 / o24) * 100 if o0 and o24 else 0.0
+    fr = [v for t, v in fund if t <= tj]
+    f[25] = S * (fr[-1] if fr else 0.0) * 1e4
+    Wb = 24 * 60
+    if j >= Wb:   # the research's beta is 1 before a whole window (a young coin), its sd only from one
+        x = [0.0] + [math.log(C1[i] / C1[i - 1]) * math.log(bC[i] / bC[i - 1]) for i in range(1, len(C1))]
+        y = [0.0] + [math.log(bC[i] / bC[i - 1]) ** 2 for i in range(1, len(C1))]
+        cx = [0.0]; cy = [0.0]
+        for a, b in zip(x, y):
+            cx.append(cx[-1] + a); cy.append(cy[-1] + b)
+        def beta(i):
+            return min(max((cx[i] - cx[i - Wb]) / max(cy[i] - cy[i - Wb], 1e-12), 0.0), 3.0) if i >= Wb else 1.0
+        def resid(i):
+            return math.log(C1[i] / C1[i - 24]) - beta(i) * math.log(bC[i] / bC[i - 24]) if i >= 24 else 0.0
+        sd = math.sqrt(sum(resid(i) ** 2 for i in range(j - Wb, j)) / Wb)
+        f[26] = S * resid(j) / sd if sd > 0 else 0.0
+    vm = sum(V1[max(j - 480, 0):j]) / max(len(V1[max(j - 480, 0):j]), 1)
+    f[27] = math.log(max(V1[j] / max(vm, 1e-12), 1e-6))
+    rg = H1[j] - L1[j]
+    f[28] = (((min(O1[j], C1[j]) - L1[j]) if S > 0 else (H1[j] - max(O1[j], C1[j]))) / rg) if rg > 0 else 0.0
+    eds = [abs(e - px) / dpx for e in (_cfl_ema(dC, k)[kd] for k in (7, 14, 28, 50, 100, 200)) if e == e]
+    f[30] = min(min(eds) if eds else 99.0, 20.0)
+    return f
+
+
+def cfl_score(m, f):
+    return sum(zm_tree_pred(t_, f) for t_ in m["models"]) / len(m["models"])
+
+
+def cfl_add_score(day, sc):
+    """the rolling threshold's store: per UTC day the count and the 300 best scores"""
+    with _cfl_lock:
+        d = _CFL["days"].setdefault(str(int(day)), [0, []])
+        d[0] += 1
+        top = d[1]
+        if len(top) < 300 or sc > top[-1]:
+            top.append(round(sc, 5)); top.sort(reverse=True)
+            del top[300:]
+
+
+def cfl_threshold(m, t):
+    """q of the bot coins' scores of the win days ending lag days before t (numpy's linear quantile on the union)"""
+    r = m.get("rule") or {}
+    q, win, lag = float(r.get("q", 0.997)), int(r.get("win_d", 180)), int(r.get("lag_d", 14))
+    hi = t // 86400 - lag; lo = hi - win
+    with _cfl_lock:
+        days = dict(m.get("seed") or {}); days.update(_CFL["days"])
+    n, top = 0, []
+    for d, (k, v) in days.items():
+        if lo <= int(d) < hi:
+            n += k; top += v
+    if n < 300:
+        return None
+    top.sort(reverse=True)
+    pos = q * (n - 1); i0 = int(math.floor(pos)); fr = pos - i0
+    ia, ib = n - 1 - i0, n - 2 - i0
+    if ia >= len(top):
+        return None
+    a = top[ia]; b = top[ib] if 0 <= ib < len(top) else a
+    return a + fr * (b - a)
+
+
+def cfl_coin_events(bsym, t_close, m, h1, h4, d1, btc1, btcd, oi, fund, first):
+    """the coin's classic events whose signal hour ends at t_close, after the research's own filters (the daily ATR >= 0.1,
+    30 days of history, one per indicator & side a day) -> [(fam, S, features)]"""
+    out, raw = [], []
+    for tfi, (bars, sec) in enumerate(((h4, 14400), (d1, 86400))):
+        T, O, H, L, C, V = bars
+        cl = [i for i in range(len(T)) if T[i] + sec <= t_close]   # closed only
+        if not cl:
+            continue
+        k = cl[-1] + 1
+        for i, ind, s in cfl_tf_events(O[:k], H[:k], L[:k], C[:k]):
+            tj = T[i] + sec - 3600
+            if tj >= t_close - 8 * 86400:
+                raw.append((tj, 2 * ind + tfi, s))
+    raw.sort()
+    hidx = {t: i for i, t in enumerate(h1[0])}
+    dT, dH, dL, dC = d1[0], d1[2], d1[3], d1[4]
+    watr = _cfl_watr(dH, dL, dC); dmap = {t // 86400: (watr[i] / dC[i] * 100 if watr[i] == watr[i] else _NAN) for i, t in enumerate(dT)}
+    last = {}
+    for tj, fam, s in raw:
+        dat = dmap.get(tj // 86400 - 1, _NAN)
+        if not (dat == dat and dat >= 0.1) or tj - first <= 24 * 30 * 3600:   # the research: datr >= 0.1, J > 720 h of history
+            continue
+        key = fam * 2 + (s > 0)
+        if key in last and tj - last[key] < 86400:
+            continue
+        last[key] = tj
+        if tj + 3600 == t_close and tj in hidx:
+            f = cfl_features(fam, s, h1, hidx[tj], d1, btc1, btcd, oi, fund)
+            if f is not None:
+                out.append((fam, s, f))
+    return out
+
+
+def cfl_scan(t_close):
+    """at a 4h close (00:00 also the daily): every bot coin's classic events of that close -> scored, the rolling threshold,
+    the ones above it opened (virtual) against the signal at the next hour's open"""
+    m = cfl_model()
+    if not m:
+        return
+    r = m.get("rule") or {}
+    thr = cfl_threshold(m, t_close - 3600)
+    btc1 = cfl_klines("BTCUSDT", "1h", CFL_W1 + 10); btcd = cfl_klines("BTCUSDT", "1d", CFL_WD + 2)
+    cands, coins, evn, errs = [], 0, 0, 0
+    for bsym in m.get("coins") or []:
+        heartbeat("cfl_loop")
+        try:
+            h4 = cfl_klines(bsym, "4h", CFL_W4 + 1); d1 = cfl_klines(bsym, "1d", CFL_WD + 2)
+            if not h4[0] or not d1[0]:
+                continue
+            with _cfl_lock:
+                first = _CFL["first"].get(bsym)
+            if first is None:
+                fk = _cfl_get("/fapi/v1/klines", {"symbol": bsym, "interval": "1d", "startTime": 0, "limit": 1})
+                first = int(fk[0][0]) // 1000 if fk else d1[0][0]
+                with _cfl_lock:
+                    _CFL["first"][bsym] = first
+            # a coin with no event at this close needs no more data
+            quick = [e for e in cfl_tf_events_at(h4, d1, t_close)]
+            coins += 1
+            if not quick:
+                time.sleep(0.3)
+                continue
+            h1 = cfl_klines(bsym, "1h", CFL_W1)
+            oi = cfl_oi(bsym); fund = cfl_funding(bsym)
+            for fam, s, f in cfl_coin_events(bsym, t_close, m, h1, h4, d1, btc1, btcd, oi, fund, first):
+                sc = cfl_score(m, f); evn += 1
+                cfl_add_score((t_close - 3600) // 86400, sc)
+                fill = next((o for t, o in zip(h1[0], h1[1]) if t == t_close), None)
+                if thr is not None and sc >= thr and t_close - first >= int(r.get("min_age_d", 90)) * 86400:
+                    cands.append({"bsym": bsym, "fam": CFL_FAMS[fam], "S": s, "score": round(sc, 4), "datr": round(f[2], 4), "fill": fill})
+            time.sleep(0.8)
+        except Exception as e:
+            errs += 1
+            if errs <= 3:
+                log_error(f"cfl {bsym}: {e}")
+    cands.sort(key=lambda c: -c["score"])
+    opened = 0
+    for c in cands:
+        if cfl_open(c, t_close, m):
+            opened += 1
+    with _cfl_lock:
+        _CFL["scan"] = {"t": int(time.time()), "bar": t_close, "coins": coins, "events": evn, "thr": round(thr, 4) if thr is not None else None,
+                        "cands": len(cands), "opened": opened, "errs": errs,
+                        "near": [{"symbol": _bn_gate_sym(c["bsym"])[0], "fam": c["fam"], "side": -c["S"], "score": c["score"]} for c in cands[:8]]}
+        _CFL["last_bar"] = t_close
+        cut = str(int(t_close // 86400) - 220)
+        for d in [d for d in _CFL["days"] if d < cut]:
+            _CFL["days"].pop(d, None)
+    cfl_save()
+
+
+def cfl_tf_events_at(h4, d1, t_close):
+    """is there any classic event on this close (4h, and 1d at 00:00)? -> the cheap pre-check before the 1h data"""
+    out = []
+    for tfi, (bars, sec) in enumerate(((h4, 14400), (d1, 86400))):
+        if t_close % sec:
+            continue
+        T, O, H, L, C, V = bars
+        k = next((i + 1 for i in range(len(T) - 1, -1, -1) if T[i] + sec <= t_close), 0)
+        if not k or T[k - 1] + sec != t_close:
+            continue
+        out += [e for e in cfl_tf_events(O[:k], H[:k], L[:k], C[:k]) if e[0] == k - 1]
+    return out
+
+
+def cfl_open(c, t_close, m):
+    r = m.get("rule") or {}
+    side = -c["S"]
+    with _cfl_lock:
+        opn = [t for t in _CFL["trades"] if t["status"] == "OPEN"]
+    if any(t["bsym"] == c["bsym"] and t["side"] == side for t in opn):
+        return False
+    if sum(1 for t in opn if t["side"] == side) >= int(r.get("side_cap", 12)):
+        return False
+    sym, scl = _bn_gate_sym(c["bsym"])
+    tr = {"id": f"cfl_{c['bsym']}_{c['fam']}_{t_close}", "symbol": sym, "bsym": c["bsym"], "scl": scl, "fam": c["fam"], "side": side,
+          "direction": "LONG" if side > 0 else "SHORT", "score": c["score"], "datr": c["datr"], "t_in": t_close, "hour": t_close,
+          "hold": int(r.get("hold_h", 72)), "until": t_close + int(r.get("hold_h", 72)) * 3600, "status": "OPEN", "result": None, "r": None,
+          "exit": None, "t_out": None, "real": False, "rv": CFL_MODEL_VER, "entry": None, "sl": None, "tp": None}
+    if c.get("fill"):
+        cfl_set_fill(tr, c["fill"], r)
+    with _cfl_lock:
+        if any(t["id"] == tr["id"] for t in _CFL["trades"]):
+            return False
+        _CFL["trades"].append(tr)
+    if TELEGRAM_ALERTS_CFL:
+        send_telegram(f"🔄 {sym.replace('_USDT', '')} {tr['direction']} · Классика наоборот: против сигнала «{cfl_fam_ru(c['fam'])}» "
+                      f"({'лонг' if c['S'] > 0 else 'шорт'})\n" + (f"вход {tr['entry']:.6g} · стоп {tr['sl']:.6g} · тейк {tr['tp']:.6g} · " if tr.get("entry") else "")
+                      + f"до {tr['hold']} ч\nвиртуально (без биржи)", category="cfl")
+    return True
+
+
+def cfl_set_fill(tr, fill_bn, r):
+    fill = fill_bn / tr["scl"]; risk = fill * float(r.get("stop_datr", 1.0)) * tr["datr"] / 100
+    tr.update({"entry": fill, "sl": fill - tr["side"] * risk, "tp": fill + tr["side"] * float(r.get("take_r", 3.0)) * risk})
+
+
+def cfl_settle(now=None):
+    """the open trades walked on Binance's 1h candles: the stop by a touch, the take not in the entry hour, out at 72 h"""
+    now = now or time.time()
+    m = _CFL.get("model") or {}
+    r = m.get("rule") or {}
+    with _cfl_lock:
+        opn = [t for t in _CFL["trades"] if t["status"] == "OPEN"]
+    changed = False
+    for t in opn:
+        try:
+            h = cfl_klines(t["bsym"], "1h", min(1500, int((now - t["t_in"]) // 3600) + 3))
+            cs = [(tt, o / t["scl"], hh / t["scl"], ll / t["scl"], cc / t["scl"]) for tt, o, hh, ll, cc in zip(*h[:5]) if tt >= t["t_in"] and tt + 3600 <= now]
+            if t.get("entry") is None:
+                o0 = next((o for tt, o, *_ in cs if tt == t["t_in"]), None)
+                if o0 is None:
+                    continue
+                cfl_set_fill(t, o0 * t["scl"], r); changed = True
+            fill, sl, tp, s = t["entry"], t["sl"], t["tp"], t["side"]
+            risk = abs(fill - sl) or 1e-12; hold = int(t.get("hold") or 72)
+            res = None
+            for k, (tt, o, hh, ll, cc) in enumerate(cs[:hold]):
+                if (ll <= sl) if s > 0 else (hh >= sl):
+                    gap = (o <= sl) if s > 0 else (o >= sl)
+                    res = ("LOSS", o if (gap and k > 0) else sl, k); break
+                if k > 0 and ((hh >= tp) if s > 0 else (ll <= tp)):
+                    res = ("WIN", tp, k); break
+            if res is None and len(cs) >= hold:
+                res = ("TIME_EXIT", cs[hold - 1][4], hold - 1)
+            if not res:
+                continue
+            kind, ex, k = res
+            rr = s * (ex - fill) / risk - (SMC_FEE + SMC_FUND * (k + 1) / 24) * fill / risk
+            with _cfl_lock:
+                t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[k][0] + 3600), "r": round(rr, 3)})
+            changed = True
+            notify_trade_result("cfl", t["symbol"], t["direction"], fill, ex, kind, round(rr, 3), real=False, note=f"против: {cfl_fam_ru(t['fam'])}")
+        except Exception as e:
+            log_error(f"cfl trade {t.get('symbol')}: {e}")
+    if changed:
+        cfl_save()
+
+
+def cfl_loop():
+    time.sleep(140)
+    cfl_load()
+    try:
+        cfl_model()
+    except Exception as e:
+        log_error(f"cfl_loop model: {e}")
+    last_settle = None
+    while True:
+        heartbeat("cfl_loop")
+        try:
+            if CFL_ENABLED:
+                now = time.time()
+                b = int(now // 14400 * 14400)
+                if b != _CFL.get("last_bar") and now - b >= 60:
+                    cfl_scan(b)
+                h = int(now // 3600 * 3600)
+                if h != last_settle and now - h >= 90:
+                    cfl_settle(now); last_settle = h
+        except Exception as e:
+            log_error(f"cfl_loop: {e}")
+            with _cfl_lock:
+                _CFL["err"] = str(e)[:200]
+        time.sleep(30)
+
+
+def cfl_stats():
+    m = _CFL.get("model") or {}
+    with _cfl_lock:
+        trades = list(_CFL["trades"]); scan, err = _CFL.get("scan"), _CFL.get("err")
+    fin = [t for t in trades if t["status"] == "CLOSED" and t.get("r") is not None]
+    rs = [t["r"] for t in fin]
+    t0 = min((t["t_in"] for t in trades), default=None)
+    weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
+    names = {f: cfl_fam_ru(f) for f in CFL_FAMS}
+    return {"on": CFL_ENABLED, "tg": TELEGRAM_ALERTS_CFL, "names": names, "err": err, "scan": scan,
+            "model": {k: m.get(k) for k in ("ver", "trained_to", "rule", "research")} if m else None,
+            "thr_now": (lambda v: round(v, 4) if v is not None else None)(cfl_threshold(m, int(time.time()))) if m else None,
+            "open": [t for t in trades if t["status"] == "OPEN"][-30:],
+            "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
+            "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
+            "live_check": live_vs_bt("cfl", [t["r"] for t in fin if t.get("rv") == CFL_MODEL_VER]),
+            "last": [{k: t.get(k) for k in ("symbol", "side", "fam", "t_in", "hour", "r", "result", "real", "entry", "sl", "tp", "exit", "t_out", "score")}
+                     for t in sorted(fin, key=lambda t: -t["t_in"])[:30]]}
+
+
+@app.route("/api/cfl/status")
+def api_cfl_status():
+    try:
+        return jsonify(cfl_stats())
+    except Exception as e:
+        log_error(f"cfl status: {e}")
+        return jsonify({"err": f"статистика не посчиталась: {e}"})
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -41102,6 +41782,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="cas" style="color:#4dd0e1;">🌊 Каскад</div>
   <div class="tab" data-tab="smc" style="color:#a1887f;">🧱 SMC</div>
   <div class="tab" data-tab="htf" style="color:#9ccc65;">📏 HTF</div>
+  <div class="tab" data-tab="cfl" style="color:#ffb74d;">🔄 Классика</div>
   <div class="tab" data-tab="dlm" style="color:#ffd54f;">⚡ Лимитки</div>
   <div class="tab" data-tab="hdg" style="color:#b39ddb;">🪞 Хедж</div>
   <div class="tab" data-tab="signals">Volume</div>
@@ -41127,6 +41808,7 @@ INDEX_HTML = """<!doctype html>
   <div id="casPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="smcPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="htfPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="cflPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="dlmPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="hdgPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="snrPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
@@ -41399,6 +42081,23 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">новая сделка и её итог</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTgHtf"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+
+    <details class="settingsGroup" style="--mod-color:#ffb74d;"><summary class="settingsGroupTitle">🔄 Классика наоборот</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (4ч и день — 127 монет, только виртуально)</div>
+          <div class="sub">на закрытии каждой 4ч-свечи: сигналы 12 классических индикаторов, модель выбирает лучшие ~0.3%, сделка — против сигнала по рынку на открытии следующего часа; стоп 1 дневной ATR, тейк 3R, выход через 72 ч; не больше 12 в сторону. Без биржи — сравнение с бэктестом</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setCfl"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ 🔄 Классика в Telegram</div>
+          <div class="sub">новая виртуальная сделка (итог — переключателем «Итоги сделок»)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgCfl"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -41838,6 +42537,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('casPanel').style.display = activeTab === 'cas' ? 'block' : 'none';
     document.getElementById('smcPanel').style.display = activeTab === 'smc' ? 'block' : 'none';
     document.getElementById('htfPanel').style.display = activeTab === 'htf' ? 'block' : 'none';
+    document.getElementById('cflPanel').style.display = activeTab === 'cfl' ? 'block' : 'none';
     document.getElementById('dlmPanel').style.display = activeTab === 'dlm' ? 'block' : 'none';
     document.getElementById('hdgPanel').style.display = activeTab === 'hdg' ? 'block' : 'none';
     document.getElementById('snrPanel').style.display = activeTab === 'snr' ? 'block' : 'none';
@@ -41858,6 +42558,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'cas') refreshCas();
     if (activeTab === 'smc') refreshSmc();
     if (activeTab === 'htf') refreshHtf();
+    if (activeTab === 'cfl') refreshCfl();
     if (activeTab === 'dlm') refreshDlm();
     if (activeTab === 'hdg') refreshHdg();
     if (activeTab === 'snr') refreshSnr();
@@ -44945,8 +45646,10 @@ const BT_SMC = {fvg4_bull: 'FVG 4ч ↑', fvg4_bear: 'FVG 4ч ↓', fvgd_bull: '
   pdh: 'максимум вчера', pdl: 'минимум вчера', pdm: 'середина вчера', d_sma20: 'SMA20 дня', d_sma50: 'SMA50 дня', d_sma100: 'SMA100 дня', d_sma200: 'SMA200 дня',
   d_bbu: 'верх Боллинджера дня', d_bbl: 'низ Боллинджера дня', pwh: 'максимум прошлой недели', pwl: 'минимум прошлой недели', pwm: 'середина прошлой недели',
   wopen: 'открытие недели', w_sma10: 'SMA10 недели', w_sma20: 'SMA20 недели', w_sma50: 'SMA50 недели', w_bbu: 'верх Боллинджера недели', w_bbl: 'низ Боллинджера недели',
-  pmh: 'максимум прошлого месяца', pml: 'минимум прошлого месяца', pmm: 'середина прошлого месяца', mopen: 'открытие месяца', yopen: 'открытие года'};   // v0.99.732 — 📏
-const BT_SMC_GRP = {fvg4: 'FVG 4ч', fvgd: 'FVG день', fvgw: 'FVG неделя', swd: 'свинг дня', sww: 'свинг недели', obd: 'ордерблок дня', ob4: 'ордерблок 4ч',
+  pmh: 'максимум прошлого месяца', pml: 'минимум прошлого месяца', pmm: 'середина прошлого месяца', mopen: 'открытие месяца', yopen: 'открытие года',
+  st_flip_4h: 'против: Supertrend 4ч', st_flip_1d: 'против: Supertrend день', psar_flip_4h: 'против: Parabolic SAR 4ч', psar_flip_1d: 'против: Parabolic SAR день', ichi_4h: 'против: Ишимоку 4ч', ichi_1d: 'против: Ишимоку день', macd_x_4h: 'против: MACD 4ч', macd_x_1d: 'против: MACD день', rsi_div_4h: 'против: дивергенция RSI 4ч', rsi_div_1d: 'против: дивергенция RSI день', stoch_x_4h: 'против: стохастик 4ч', stoch_x_1d: 'против: стохастик день', adx_go_4h: 'против: ADX 4ч', adx_go_1d: 'против: ADX день', ha_flip_4h: 'против: Heikin-Ashi 4ч', ha_flip_1d: 'против: Heikin-Ashi день', nr7_4h: 'против: NR7 4ч', nr7_1d: 'против: NR7 день', cci_back_4h: 'против: CCI 4ч', cci_back_1d: 'против: CCI день', bb_back_4h: 'против: Боллинджер 4ч', bb_back_1d: 'против: Боллинджер день', kelt_brk_4h: 'против: Келтнер 4ч', kelt_brk_1d: 'против: Келтнер день'};   // v0.99.732 — 📏; v0.99.739 — 🔄
+const BT_SMC_GRP = {st: 'Supertrend', psar: 'Parabolic SAR', ichi: 'Ишимоку', macd: 'MACD', rsi: 'дивергенция RSI', stoch: 'стохастик', adx: 'ADX', ha: 'Heikin-Ashi', nr7: 'NR7', cci: 'CCI', bb: 'Боллинджер', kelt: 'Келтнер',   // v0.99.739 — 🔄
+  fvg4: 'FVG 4ч', fvgd: 'FVG день', fvgw: 'FVG неделя', swd: 'свинг дня', sww: 'свинг недели', obd: 'ордерблок дня', ob4: 'ордерблок 4ч',
   d: 'SMA / Боллинджер дня', w: 'SMA / Боллинджер недели', pdh: 'максимум вчера', pdl: 'минимум вчера', pdm: 'середина вчера', pwh: 'максимум недели',
   pwl: 'минимум недели', pwm: 'середина недели', wopen: 'открытие недели', pmh: 'максимум месяца', pml: 'минимум месяца', pmm: 'середина месяца', mopen: 'открытие месяца', yopen: 'открытие года'};
 const btLabel = t => t.lvl ? (BT_SMC[t.lvl] || t.lvl) : (t.tf ? `EMA ${t.n} · ${BT_EMA_TF[t.tf] || t.tf}` : (BT_CH[t.c] || t.c) + (t.st ? (String(t.st).startsWith('close') ? ' · от закрытия' : ' · за тенью') : ''));   // v0.99.689 — ⚡ the stream
@@ -45097,7 +45800,7 @@ function btFromPrx(t) {
 }
 async function btChart(o) {
   const coin = (o.s || '').replace('_USDT', ''), side = o.d > 0 ? 'ЛОНГ' : 'ШОРТ';
-  document.getElementById('vgiModalTitle').textContent = `${coin} | ${o.mod === 'rbx' ? '📈 Пробой' : (o.mod === 'emx' ? '📐' : (o.mod === 'cas' ? '🌊 Каскад' : (o.mod === 'smc' ? '🧱 SMC' : (o.mod === 'htf' ? '📏 HTF' : (o.mod === 'dlm' ? '⚡ Лимитка' : 'P/R')))))} ${btLabel(o)} | ${side}${o.live ? '' : ' · бэктест'}`;
+  document.getElementById('vgiModalTitle').textContent = `${coin} | ${o.mod === 'rbx' ? '📈 Пробой' : (o.mod === 'emx' ? '📐' : (o.mod === 'cas' ? '🌊 Каскад' : (o.mod === 'smc' ? '🧱 SMC' : (o.mod === 'htf' ? '📏 HTF' : (o.mod === 'cfl' ? '🔄 Классика' : (o.mod === 'dlm' ? '⚡ Лимитка' : 'P/R'))))))} ${btLabel(o)} | ${side}${o.live ? '' : ' · бэктест'}`;
   document.getElementById('vgiModalParams').textContent = 'загрузка...';
   vgiModal.classList.add('open');
   window._vgiLast = null;
@@ -45120,7 +45823,7 @@ async function btChart(o) {
 function btGateFillNote(o, d) {   // v0.99.668 — the user's IO: a limit filled by Binance's wick that Gate's candles never reached
   if (o.live || d.src !== 'gate' || (d.c && d.c !== o.c) || o.e == null || !(d.bars || []).length) return '';
   const sec = ({'15m': 0.25, '1h': 1, '2h': 2, '4h': 4, '12h': 12, '1d': 24}[o.c] || 1) * 3600;
-  const w1 = o.mod === 'dlm' ? o.t + 3 * ({'4h': 14400, '2h': 7200}[o.c] || 900) : (o.mod === 'emx' || o.mod === 'smc' || o.mod === 'htf') ? o.t : (o.mod === 'prv' ? o.t + 2 * 3600 : (o.mod === 'rbx' ? (o.f || o.t) : null));
+  const w1 = o.mod === 'dlm' ? o.t + 3 * ({'4h': 14400, '2h': 7200}[o.c] || 900) : (o.mod === 'emx' || o.mod === 'smc' || o.mod === 'htf' || o.mod === 'cfl') ? o.t : (o.mod === 'prv' ? o.t + 2 * 3600 : (o.mod === 'rbx' ? (o.f || o.t) : null));
   if (w1 == null) return '';
   const win = d.bars.filter(b => b.time >= o.t && b.time <= w1);
   if (!win.length) return '';
@@ -45384,6 +46087,56 @@ async function refreshHtf() {   // v0.99.732 — 📏 HTF: two models on the fir
 }
 function btFromHtf(t) {   // v0.99.732 — a live 📏 trade -> the chart's trade (1h candles)
   return {mod: 'htf', s: t.symbol, d: 1, c: '1h', lvl: t.fam, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true, vnote: btVnote(t)};
+}
+
+async function refreshCfl() {   // v0.99.739 — 🔄 Классика наоборот: against the classic indicators' signals, virtual only
+  const panel = document.getElementById('cflPanel');
+  let d;
+  try { d = await (await fetch('/api/cfl/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
+  const card = (title, body) => `<div class="zcard"><div class="zh">${title}</div>${body}</div>`;
+  const tile = (l, v, n) => `<div class="ztile"><div class="zl">${l}</div><div class="zv">${v}</div>${n ? `<div class="zn">${n}</div>` : ''}</div>`;
+  const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  const coin = s => (s || '').replace('_USDT', '');
+  const hm = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
+  const nm = f => (d.names || {})[f] || f;
+  const m = d.model, rs = (m && m.research) || {}, rule = (m && m.rule) || {};
+  const pill = d.on === false ? '<span class="pill neg">выключено</span>' : '<span class="pill">виртуально</span>';
+  let h = '';
+  let top = `<div class="dim hintx">12 классических индикаторов на свечах 4ч и дня (Supertrend, Parabolic SAR, Ишимоку, MACD, дивергенция RSI, стохастик, ADX, Heikin-Ashi, NR7, CCI, Боллинджер, Келтнер). Модель оценивает каждый сигнал на закрытии свечи — и сделка идёт <b>против</b> сигнала, по рынку на открытии следующего часа. Берутся лучшие ~${m && rule.q ? +((1 - rule.q) * 100).toFixed(1) : 0.3}% оценок (порог — по последним ${rule.win_d || 180} дням). Пока <b>только виртуально</b>: бот ведёт сделки сам, без биржи, чтобы сравнить с бэктестом.</div>`;
+  if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
+  else {
+    const ys = rs.years || {};
+    const all = Object.values(ys).filter(x => x && x.n);
+    const n = all.reduce((a, x) => a + x.n, 0), avg = n ? all.reduce((a, x) => a + x.avg * x.n, 0) / n : null;
+    top += `<div class="dim" style="font-size:var(--fs-xs);">обучена до ${new Date(m.trained_to * 1000).toLocaleDateString('ru-RU')}</div>
+      <div class="zsub">Проверка на истории 127 монет — каждый год модель его не видела. Результат на сделку:</div>
+      ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y, sub: `${x.n} сделок · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2026'}; }), v => sgR(+(+v).toFixed(2)))}
+      <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span>WR <b>${rs.wr || '—'}%</b></span><span>на 84 чужих монетах <b>~+0.2R</b></span></div>
+      <div class="zsub">Стоп — <b>${rule.stop_datr || 1} дневной ATR</b> от входа, тейк — <b>${rule.take_r || 3} риска</b>, через ${rule.hold_h || 72} ч выход. Не больше ${rule.side_cap || 12} сделок в одну сторону, по монете и стороне — одна. Монеты моложе ${rule.min_age_d || 90} дней не берутся.</div>`;
+  }
+  h += card(`🔄 Классика наоборот ${pill}`, top);
+  const sc = d.scan, near = (sc && sc.near) || [];
+  const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;">
+      <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">против: ${nm(a.fam)} · ${a.score}</span></span>`;
+  h += card('🔎 Последний скан', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, 'монет')}${tile('сигналов', sc.events, 'на этой свече')}${tile('выше порога', sc.cands, `открыто ${sc.opened}`)}</div>
+    <div class="dim" style="font-size:var(--fs-xs);">порог ${sc.thr != null ? sc.thr : '— (мало оценок)'} · свеча ${hm(sc.bar)} · ${hm(sc.t)}${sc.errs ? ` · не ответили ${sc.errs} монет` : ''} · следующий скан на закрытии 4ч-свечи (00, 04, 08… UTC)</div>
+    ${near.length ? `<div style="margin-top:6px;">${near.map(chip).join('')}</div>` : ''}`
+    : `<div class="dim" style="font-size:var(--fs-sm);">первый скан — на закрытии ближайшей 4ч-свечи (00, 04, 08… UTC); загрузка 127 монет занимает несколько минут</div>`);
+  const op = d.open || [];
+  const row = (t, i) => `<div onclick="btLiveOpen('cfl', ${i})" style="padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;">
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim"> · против: ${nm(t.fam)} · виртуально</span></span>
+      <span class="dim" style="white-space:nowrap;">${t.entry ? 'вход ' + fmtNum(t.entry) : 'вход — открытие часа'} · до ${hm(t.until)}</span></div></div>`;
+  h += card('📈 Сделки (виртуально)', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', 'виртуально')}</div>
+    ${op.length ? `<div style="margin-top:8px;">${op.slice(-30).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
+    ${liveCheckHtml(d.live_check)}
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length}${lastSplit(d.last)})</summary>${d.last.map((t, i) => btRowHtml(btFromCfl(t), `btLiveOpen('cfl', ${Math.min(30, op.length) + i})`)).join('')}</details>` : ''}`);
+  window._btLive.cfl = op.slice(-30).reverse().map(btFromCfl).concat((d.last || []).map(btFromCfl));
+  h += btSection('cfl', 'Сделки бэктеста — 2023–2026 (каждый год модель не видела)');
+  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как нашёлся</summary><div class="zsub">Проверяли обратную сторону всех семейств индикаторов, которые уже тестировали. У большинства она хуже прямой; у классики — лучше: модель на сделках против сигнала +0.4R против +0.2R по сигналу, плюс в каждом году (включая тихий 2023). Порог — по последним 180 дням (годовой выкидывал 2023-й). Проверки: заглядывания в будущее нет (сигналы и признаки, пересчитанные на свечах, обрезанных на сигнале, совпали точно); соседние пороги и окна дают похожее; проскальзывание −0.05…−0.1R на сделку выдерживает. ⚠️ На чужих монетах слабее (+0.2R), и денег в связке там не прибавляет — поэтому пока виртуально, 1–2 месяца сравнения с бэктестом.</div></details>`;
+  setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
+}
+function btFromCfl(t) {   // v0.99.739 — a live 🔄 trade -> the chart's trade (1h candles)
+  return {mod: 'cfl', s: t.symbol, d: t.side, c: '1h', lvl: t.fam, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
 }
 
 async function dlmSetEx(on) {   // v0.99.684 — the exchange of the real limits
@@ -46520,6 +47273,7 @@ async function refreshAll() {
   if (activeTab === 'cas') await refreshCas();
   if (activeTab === 'smc') await refreshSmc();
   if (activeTab === 'htf') await refreshHtf();
+  if (activeTab === 'cfl') await refreshCfl();
   if (activeTab === 'dlm') await refreshDlm();
   if (activeTab === 'hdg') await refreshHdg();
   if (activeTab === 'snr') await refreshSnr();
@@ -46883,6 +47637,8 @@ const setInputs = {
   htf_enabled: document.getElementById('setHtf'),   // v0.99.732
   autotrade_htf: document.getElementById('setAutotradeHtf'),
   telegram_alerts_htf: document.getElementById('setTgHtf'),
+  cfl_enabled: document.getElementById('setCfl'),   // v0.99.739
+  telegram_alerts_cfl: document.getElementById('setTgCfl'),
   autotrade_zones_zm: document.getElementById('setAutotradeZonesZm'),
   telegram_alerts_zones_zm: document.getElementById('setTgZonesZm'),
 };
@@ -48387,6 +49143,7 @@ if __name__ == "__main__":
     threading.Thread(target=cas_loop, daemon=True).start()   # v0.99.653 — 🌊 EMA cascade
     threading.Thread(target=smc_loop, daemon=True).start()   # v0.99.678 — 🧱 SMC levels
     threading.Thread(target=htf_loop, daemon=True).start()   # v0.99.732 — 📏 HTF levels
+    threading.Thread(target=cfl_loop, daemon=True).start()   # v0.99.739 — 🔄 Классика наоборот (virtual)
     threading.Thread(target=dlm_loop, daemon=True).start()   # v0.99.679 — ⚡ 15m deep limits
     threading.Thread(target=bno_loop, daemon=True).start()   # v0.99.698 — P/R, SMC, EMA positions on Binance
     threading.Thread(target=hdg_loop, daemon=True).start()   # v0.99.628 — 🪞 hedge mirror

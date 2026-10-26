@@ -20965,3 +20965,20 @@ v0.99.732 - 📏 HTF levels — a new module (the user: "думай над со�
   The backtest list re-walked (290 trades, htf_export_k24.py), the header with HTF re-computed (bad ~$3.7k · usual ~$42.4k ·
   good ~$264k). The texts of the tab / settings / Telegram say the 1d close.
 - The lab scripts of the last rounds (quiet-market lifters, pairs, new hypotheses, the opposite sides, win rate).
+
+## v0.99.739
+- New module **🔄 Классика наоборот** (virtual only — no exchange orders): the 12 classic indicators of the research
+  (Supertrend, Parabolic SAR, Ichimoku, MACD, RSI divergence, Stochastic, ADX, Heikin-Ashi, NR7, CCI, Bollinger, Keltner) on
+  Binance's 4h / 1d candles of the 127 bot coins; at each 4h close (00:00 — the daily too) the signals are scored by the
+  2026 walk-forward model trained on the OPPOSITE side's outcome, the best (score >= q 0.997 of the 180 days ending 14 days
+  before; the model file seeds the days, the bot adds its own) traded against the signal at the next hour's open:
+  stop 1 dATR, take 3R (not in the entry hour), 72 h; <= 12 a side, one per coin & side; coins < 90 days old skipped.
+  Research (tools/winrate/flip*.py, fc_*.py): the opposite side +0.40R bot coins / +0.21R check coins, every year positive
+  incl. 2023; the truncation look-ahead test exact (39/40, the 40th a coin < 90 days old); the grid of thresholds / windows
+  a plateau; the money in the bundle lifts the bad year on the bot coins (~$3.3k -> ~$6k) but not on the check coins —
+  hence virtual first. The 30-day z features (long/short, taker, top traders) dropped: Binance keeps only 30 days of them.
+- The bot: own Binance fetch (klines 1h 3000 / 4h 1500 / 1d 1000 with volume, 5-min open interest, funding), the
+  indicators / features in pure Python (tools/winrate/t_cfl_bot.py: 12/12 events, features and scores = the research's;
+  the threshold = numpy's quantile; 6/6 backtest trades re-made), the tab «🔄 Классика» (the scan, the virtual trades,
+  the live check, the backtest list of 409 trades +0.49R), settings (on / Telegram), heartbeat, model refresh, lab upload.
+- Tests: t_dlm_ui's backtest mock takes the module argument (broken since v0.99.733's bt_trades(need=)).

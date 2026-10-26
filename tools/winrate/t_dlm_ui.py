@@ -10,7 +10,7 @@ V._DLM["trades"] = [{"id": "t1", "symbol": "DOGE_USDT", "side": -1, "direction":
                     {"id": "t2", "symbol": "ADA_USDT", "side": 1, "direction": "LONG", "entry": 0.5, "lv": 0.5, "atr": 0.01, "sl": 0.48, "tp": 0.51, "score": 0.4, "t0": tb - 8 * 14400, "fbar": tb - 7 * 14400, "t_in": now - 99000, "until": 0, "bs": 14400, "hold": 32, "status": "CLOSED", "result": "WIN", "r": 0.49, "exit": 0.51, "t_out": now - 30000, "real": None, "rv": 2},
                     {"id": "t3", "symbol": "XRP_USDT", "side": 1, "direction": "LONG", "entry": 2.0, "lv": 2.0, "atr": 0.01, "sl": 1.98, "tp": 2.005, "score": 0.1, "t0": tb - 99999, "fbar": tb - 99000, "t_in": now - 99000, "until": 0, "status": "CLOSED", "result": "WIN", "r": 0.22, "exit": 2.005, "t_out": now - 90000, "real": None, "rv": 1}]
 V.dlm_save = lambda: None
-_BTD = json.load(open("/home/user/vp-poc-screener/vp_bt_trades.json")); V.bt_trades = lambda: _BTD
+_BTD = json.load(open("/home/user/vp-poc-screener/vp_bt_trades.json")); V.bt_trades = lambda need=None: _BTD
 import s20h4_engine as E
 import os; os.environ["TFH"] = "2"
 import s21h2_engine as E2   # v0.99.689 — the 2h stream's charts
