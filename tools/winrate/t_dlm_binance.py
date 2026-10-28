@@ -2,7 +2,9 @@
 limit (isolated, leverage from the brackets, the price and the size snapped, a 1000-coin scaled), the fill -> the
 STOP_MARKET (Algo API) + the reduce-only take limit, the take -> WIN, the stop -> LOSS, the time exit at the market, an
 unfilled limit expired, the free margin scaling the risk, the minimum notional, the old order endpoint when the Algo API
-is missing, a hedge-mode account, the position cap (v0.99.687), the settings and the keys file"""
+is missing, a hedge-mode account, the position cap (v0.99.687), the settings and the keys file. v0.99.742: a position is
+taken over only when the bot's own order opened it (client id "vp..."); a manual one is never taken / counted / re-stopped,
+and one taken over before is dropped from the records with its stop / take left on Binance"""
 import sys, os, time, json, hmac, hashlib, tempfile
 from urllib.parse import urlsplit, parse_qsl
 from common import V
@@ -99,6 +101,8 @@ def fake(method, url, headers=None, timeout=None, **k):
             else:
                 return R(400, {"code": -2011, "msg": "Unknown order sent."})
         return R(200, o)
+    if path == "/fapi/v1/allOrders":   # v0.99.742 — the coin's orders, the newest last (the id as the time)
+        return R(200, [dict(o, clientOrderId=o.get("newClientOrderId", ""), updateTime=i) for i, o in sorted(X["orders"].items()) if o.get("symbol") == p["symbol"]])
     if path == "/fapi/v1/openOrders":   # v0.99.708
         return R(200, [dict(o, origQty=o.get("quantity"), clientOrderId=o.get("newClientOrderId", "")) for o in X["orders"].values() if o["status"] in ("NEW", "PARTIALLY_FILLED")])
     if path == "/fapi/v1/openAlgoOrders":
@@ -373,6 +377,7 @@ ho = X["orders"][int(h["real"]["id"])]; ho.update(status="FILLED", executedQty=h
 V.dlm_real_tick()
 tB = next(t for t in V._DLM["trades"] if t["symbol"] == "BBB_USDT"); sl0, tp0 = tB["real"].get("sl_id"), tB["real"].get("tp_id")
 X["pos"]["CCCUSDT"] = 10.0; X["entry"]["CCCUSDT"] = 5.0
+i = oid(); X["orders"][i] = {"symbol": "CCCUSDT", "side": "BUY", "type": "MARKET", "quantity": "10", "newClientOrderId": "vpsmc1700000000000", "status": "FILLED", "executedQty": "10", "orderId": i}   # the bot's SMC entry
 for kind, trg in (("STOP_MARKET", "4.8"), ("TAKE_PROFIT_MARKET", "5.3")):
     i = oid(); X["algos"][i] = {"symbol": "CCCUSDT", "side": "SELL", "type": kind, "triggerPrice": trg, "closePosition": "true", "algoId": i, "algoStatus": "NEW"}
 V._DLM.update({"orders": [], "trades": []}); V._BNO["pos"].clear()   # the new phone: no state
@@ -394,8 +399,33 @@ keep = [i for i, a_ in X["algos"].items() if a_["algoStatus"] == "NEW" and a_["s
 got2 = V.dlm_bn_adopt()
 res["orphan stop cancelled, the others kept"] = (X["algos"][oD]["algoStatus"] != "NEW" and all(X["algos"][i]["algoStatus"] == "NEW" for i in keep)
                                                  and any("DDDUSDT" in l_ for l_ in got2))
+# v0.99.742 — a manual position (the user's AIN): (a) a new one with its own stop + take — never taken over, its triggers
+# not cancelled, nothing said; (b) one taken over before this version (adopted, no bot_ok) — dropped from the records, its
+# triggers left on Binance; (c) the bot's own (CCC) stays
+X["pos"]["EEEUSDT"] = 3.0; X["entry"]["EEEUSDT"] = 2.0
+i = oid(); X["orders"][i] = {"symbol": "EEEUSDT", "side": "BUY", "type": "MARKET", "quantity": "3", "newClientOrderId": "android_k8Hj2", "status": "FILLED", "executedQty": "3", "orderId": i}
+man = []
+for kind, trg in (("STOP_MARKET", "1.5"), ("TAKE_PROFIT_MARKET", "2.6")):
+    i = oid(); X["algos"][i] = {"symbol": "EEEUSDT", "side": "SELL", "type": kind, "triggerPrice": trg, "closePosition": "true", "algoId": i, "algoStatus": "NEW"}; man.append(i)
+X["pos"]["FFFUSDT"] = 4.0; X["entry"]["FFFUSDT"] = 3.0
+i = oid(); X["orders"][i] = {"symbol": "FFFUSDT", "side": "BUY", "type": "LIMIT", "quantity": "4", "newClientOrderId": "web_f00", "status": "FILLED", "executedQty": "4", "orderId": i}
+for kind, trg in (("STOP_MARKET", "1.6"), ("TAKE_PROFIT_MARKET", "3.9")):
+    i = oid(); X["algos"][i] = {"symbol": "FFFUSDT", "side": "SELL", "type": kind, "triggerPrice": trg, "closePosition": "true", "algoId": i, "algoStatus": "NEW"}; man.append(i)
+V._BNO["pos"]["FFF_USDT"] = {"mode": "htf", "bsym": "FFFUSDT", "scl": 1.0, "side": 1, "qty": 4.0, "entry": 3.0, "adopted": True, "sl_kind": "algo", "sl_id": str(man[2]),
+                             "tp_kind": "algo", "tp_id": str(man[3]), "sl_px": 1.6, "t": int(time.time()) - 3600}   # taken over by v0.99.741
+h_m = V.bn_heat(1000.0)
+n0 = len(X["calls"]); got3 = V.dlm_bn_adopt()
+moves3 = [c for c in X["calls"][n0:] if c[0] in ("POST", "DELETE") and c[1] in ("/fapi/v1/order", "/fapi/v1/algoOrder")]
+res["a manual position: not taken, an old take-over dropped, its orders kept"] = (
+    "EEE_USDT" not in V._BNO["pos"] and "FFF_USDT" not in V._BNO["pos"] and not moves3 and all(X["algos"][i]["algoStatus"] == "NEW" for i in man)
+    and (V._BNO["pos"].get("CCC_USDT") or {}).get("bot_ok") is True and not any("EEE" in l_ for l_ in got3)
+    and sum("FFF" in l_ and "вручную" in l_ for l_ in got3) == 1 and V.bn_heat(1000.0) < h_m)
+got4 = V.dlm_bn_adopt()   # the next round: nothing new said, nothing asked again for the manual ones
+n_hist = sum(1 for c in X["calls"] if c[1] == "/fapi/v1/allOrders" and c[2].get("symbol") in ("EEEUSDT", "FFFUSDT"))
+res["the manual ones: quiet, asked once"] = not any(("EEE" in l_ or "FFF" in l_) for l_ in got4) and n_hist <= 3
+for k_ in ("EEEUSDT", "FFFUSDT"): X["pos"].pop(k_, None)
 V._dlm_atr_at = _atr
-print("   adopt:", got, got2)
+print("   adopt:", got, got2, got3)
 html = V.app.test_client().get("/").get_data(as_text=True)
 st = V.app.test_client().get("/api/dlm/status").get_json()
 res["ui"] = "setDlmBinance" in html and "bnSaveKeys" in html and st["binance"] is True and st["bn_keys"] is True and st["bn_check"]["ok"]

@@ -21013,3 +21013,18 @@ v0.99.741 — 🔄 Классика наоборот: the stop at the 1d close
   The 🔄 adoption ratio dropped (4R / 2 = EMA's 2.0).
 - Tests: t_cfl_bot.py — (3) 8/8 backtest trades of every exit kind (close stop, emergency, take, time) re-made by the bot;
   (5) the real call with the emergency stop, kx 2 and the risk x 2.
+
+v0.99.742 — a manual Binance position is no longer taken for the bot's (the user's manual AIN long was taken over as
+📏 HTF: "почему бот считает её своей? … статистика же некорректная будет")
+- The take-over (dlm_bn_adopt, every 10 min — for a new phone / a lost state) took any position with a stop / take on
+  Binance and guessed its module by the take / stop distance. Now a position is the bot's only when the last filled order
+  that opened it carries the bot's client id ("vp<mode><ms>" at the market, "vpdlm<ms>" a ⚡ limit; bn_pos_by_bot, the
+  coin's last 100 orders, the answer kept per coin / side / entry). A manual one is never taken over, re-stopped, closed
+  at the market, cleaned of its triggers or counted in the open-risk cap (90%), and nothing is said about it each round.
+- A position taken over before (adopted, not checked) and not opened by the bot: dropped from the bot's records once
+  (Telegram "✋ … позиция открыта не ботом (вручную) — убрана из записей бота, её стоп и тейк на бирже не тронуты"); its
+  stop and take on Binance stay as they are.
+- tools/winrate/common.py (the tests' bot loader, kept only in the research folder before) committed: the bot imported
+  from a temp copy with the repo's model files and backtest list (read-only).
+- Tests: t_dlm_binance — a manual position with its own stop / take: not taken, its orders untouched, quiet, asked once; an
+  old take-over: dropped, the open risk lower, its orders kept; the bot's own (an SMC entry "vpsmc…") still taken over.

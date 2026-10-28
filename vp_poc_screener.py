@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.741"
+APP_VERSION = "0.99.742"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -37334,8 +37334,31 @@ def _dlm_atr_at(sym, t, bs=14400):
     return float(a) if a else None
 
 
-_ADOPT = {"t": 0.0, "last": [], "n": None}
+_ADOPT = {"t": 0.0, "last": [], "n": None, "who": {}}
 DLM_ADOPT_SEC = 600
+
+
+def bn_pos_by_bot(bsym, s, entry_px=None):
+    """v0.99.742 — the user (a manual AIN long taken over as 📏 HTF: "почему бот считает её своей?"): is this Binance position
+    the bot's? -> True / False. The last filled order that opened it (not reduce-only / closing, its side) carries the bot's
+    client id ("vp<mode><ms>" — P/R / SMC / EMA / HTF / 🔄 at the market, "vpdlm<ms>" — a ⚡ limit); the Binance app / site /
+    another program — not. No such order in the coin's last 100 -> not the bot's (a manual position is never touched).
+    The answer kept per coin, side and entry price (no request every 10 min for a manual one)"""
+    key = (bsym, s, round(float(entry_px or 0), 10))
+    who = _ADOPT.setdefault("who", {})
+    if key in who:
+        return who[key]
+    rows = bnf_req("GET", "/fapi/v1/allOrders", {"symbol": bsym, "limit": 100}) or []
+    want = "BUY" if s > 0 else "SELL"
+    opens = [x for x in rows if x.get("status") in ("FILLED", "PARTIALLY_FILLED") and x.get("side") == want
+             and str(x.get("reduceOnly")).lower() != "true" and str(x.get("closePosition")).lower() != "true"
+             and float(x.get("executedQty") or 0) > 0]
+    last = max(opens, key=lambda x: int(x.get("updateTime") or x.get("time") or 0), default=None)
+    ok = bool(last) and str(last.get("clientOrderId") or "").startswith("vp")
+    if len(who) > 200:
+        who.clear()
+    who[key] = ok
+    return ok
 
 
 def dlm_adopt_off():
@@ -37392,6 +37415,26 @@ def dlm_bn_adopt(now=None):
         if x.get("type") in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
             trig.setdefault(x.get("symbol"), {}).setdefault(x["type"], ("order", str(x.get("orderId")), float(x.get("stopPrice") or 0)))
     lines, changed = [], False
+    # (0) v0.99.742 — a position taken over before this version that the bot did not open (a manual one): dropped from the
+    # bot's records only — its stop / take on Binance stay as they are, the bot no longer counts / closes / re-stops it
+    with _bno_lock:
+        adopted = [(k, dict(r_)) for k, r_ in _BNO["pos"].items() if r_.get("adopted") and not r_.get("bot_ok")]
+    for k, r_ in adopted:
+        try:
+            if not pos.get(r_["bsym"]):
+                continue
+            if bn_pos_by_bot(r_["bsym"], int(r_.get("side") or 1), r_.get("entry")):
+                with _bno_lock:
+                    if k in _BNO["pos"]:
+                        _BNO["pos"][k]["bot_ok"] = True
+            else:
+                with _bno_lock:
+                    _BNO["pos"].pop(k, None)
+                bno_save(); known_b.discard(r_["bsym"])
+                lines.append(f"✋ {k.replace('_USDT', '')}: позиция открыта не ботом (вручную) — убрана из записей бота, её стоп и тейк на бирже не тронуты")
+        except Exception as e:
+            log_error(f"binance adopt check {k}: {e}")
+    manual = set()
     # (1) the ⚡ limits
     for x in opn:
         cid = str(x.get("clientOrderId") or "")
@@ -37440,6 +37483,14 @@ def dlm_bn_adopt(now=None):
         for p in lst:
             s = 1 if p["amt"] > 0 else -1; entry = p["entry"] / scl
             stp = tg.get("STOP_MARKET"); tpo = tg.get("TAKE_PROFIT_MARKET")
+            try:
+                mine_p = bn_pos_by_bot(bsym, s, p["entry"])
+            except Exception as e:
+                log_error(f"binance adopt check {bsym}: {e}")
+                continue
+            if not mine_p:   # v0.99.742 — a manual position (or another program's): never taken over, not told each time
+                manual.add(bsym)
+                continue
             if take_lim is not None:
                 a = abs(entry - stp[2] / scl) / 3.0 if stp and stp[2] else _dlm_atr_at(sym, now)
                 if not a:
@@ -37463,7 +37514,7 @@ def dlm_bn_adopt(now=None):
                 ratio = d_tp / d_sl if d_sl else 0
                 mode = min((("prv", 0.75), ("htf", 1.0), ("smc", 1.5), ("emw", 2.0)), key=lambda m_: abs(m_[1] - ratio))[0] if ratio else "smc"   # v0.99.732 — 📏 HTF: take 3R / the emergency stop 3R
                 rec = {"mode": mode, "bsym": bsym, "scl": scl, "side": s, "qty": abs(p["amt"]), "entry": p["entry"], "lev": None, "risk": None, "dual": dual,
-                       "tick": info.get("tick"), "step": info.get("step"), "min_qty": info.get("min_qty"), "t": int(now), "adopted": True,
+                       "tick": info.get("tick"), "step": info.get("step"), "min_qty": info.get("min_qty"), "t": int(now), "adopted": True, "bot_ok": True,
                        "sl_kind": stp[0] if stp else None, "sl_id": stp[1] if stp else None, "tp_kind": tpo[0] if tpo else None, "tp_id": tpo[1] if tpo else None,
                        "sl_px": stp[2] if stp and stp[2] else None}   # v0.99.717 — for the open risk
                 with _bno_lock:
@@ -37488,7 +37539,7 @@ def dlm_bn_adopt(now=None):
         for x in lst_:
             k = x.get("orderType") or x.get("type"); bsym = x.get("symbol"); oid = str(x.get(idk))
             if (k not in ("STOP_MARKET", "TAKE_PROFIT_MARKET") or str(x.get("closePosition")).lower() != "true" or pos.get(bsym)
-                    or bsym in entry_syms or oid in mine or now - float(x.get("createTime") or x.get("time") or 0) / 1000 < 120):
+                    or bsym in entry_syms or bsym in manual or oid in mine or now - float(x.get("createTime") or x.get("time") or 0) / 1000 < 120):
                 continue
             if bnf_cancel(bsym, kind, oid):
                 lines.append(f"🧹 {bsym}: {'стоп' if k == 'STOP_MARKET' else 'тейк'} {x.get('triggerPrice') or x.get('stopPrice')} без позиции "
