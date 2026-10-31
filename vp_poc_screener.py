@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.746"
+APP_VERSION = "0.99.747"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28528,9 +28528,13 @@ _PROC_START = time.time()
 # худшее ожидание и лучшее": a year from $100 on the history (the 12-month windows from each week of 2023-02..2025-10, one
 # account, the bot's leverage, the honest pools; tools/winrate port_expect.py): the worst 10% / the median / the best 10% of
 # the years, the median drawdown. "bundle" = ⚡ 4.5% + P/R 3% + SMC 2.5% + EMA 2% (on Binance together, v0.99.727), "dlm" = ⚡ alone
-EXPECT_YEAR = {"dlm": {"p10": 1620, "p50": 7804, "p90": 27800, "dd": 65, "last12": 22216},   # v0.99.718: cross 10x, the open risk <= 90%, ⚡ 4.5% (port_717d.py); v0.99.704: x the daily WaveTrend (port_osc3.py)
-               "bundle": {"p10": 2949, "p50": 40219, "p90": 216119, "dd": 59, "last12": 146001},
-               "bundle_htf": {"p10": 3691, "p50": 42441, "p90": 264007, "dd": 58, "last12": 231706}}   # v0.99.738: HTF stop on the 1d close (port_htf_hdr.py, htf_bt_v2_k24); v0.99.737: HTF 2%; v0.99.735: + 📏 HTF 1.5% (port_htf_hdr.py, the list htf_bt_v1, the same way as "bundle")   # v0.99.727: SMC 2.5% + EMA 2% (port_risk4.py); v0.99.719: + SMC's break-even after +2R (port_be5.py, the SMC rows from the list); v0.99.718: ⚡ 4.5 + P/R 3 + SMC 1.5 + EMA 1, cross 10x, the open risk <= 90% (port_717d.py)   # v0.99.712: EMA 1% (port_w709.py); v0.99.709: SMC held 96 h (port_smcx.py); v0.99.707: SMC q 0.993 at 1.5%, SMC and EMA only the touches in their reach
+# v0.99.747 — re-counted on the restored lab (tools/winrate money_expect.py: the walk-forward ⚡ pool, which matches the bot's
+# 2026 replay; the money hour by hour on cross margin, one position a coin across the modules, Binance's real brackets;
+# 144 windows from each week of 2023-02..2025-10) at v0.99.746's 14x with the 2h shorts x0.5. The old numbers came from
+# the lost lab's pools and money sim — on the same new sim 10x gives the bundle + HTF $7.7k / $34.3k / $156k / 63%
+EXPECT_YEAR = {"dlm": {"p10": 1635, "p50": 5457, "p90": 24930, "dd": 72, "last12": 21004},
+               "bundle": {"p10": 6138, "p50": 44199, "p90": 169264, "dd": 64, "last12": 52812},
+               "bundle_htf": {"p10": 6548, "p50": 45887, "p90": 200826, "dd": 63, "last12": 86143}}
 
 
 @app.route("/api/boot")

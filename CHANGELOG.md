@@ -21076,3 +21076,14 @@ v0.99.746 — the cross leverage at most 14x, the ⚡ 2h stream's shorts at half
   load, WaveTrend and the open-risk cap unchanged. The settings' texts say so.
 - Tests: t_bn_others — the default ceiling 14x with the same notional, the bracket logic with the ceiling lifted;
   t_dlm_binance — ⚡'s limit at 14x, the 2h shorts x0.5.
+
+v0.99.747 — the header's yearly expectation re-counted for 14x + the 2h shorts x0.5 (the user: "Пусть 14")
+- EXPECT_YEAR on the restored lab (tools/winrate money_expect.py: the walk-forward ⚡ pool, matching the bot's 2026 replay;
+  the money hour by hour on cross margin, one position a coin across the modules, Binance's real brackets; a year from
+  $100, 144 windows from each week of 2023-02..2025-10): the bundle + HTF bad ~$6.5k · usual ~$45.9k · good ~$201k ·
+  drawdowns ~63%, the last 12 months $86k; without HTF $6.1k / $44.2k / $169k / 64%; ⚡ alone $1.6k / $5.5k / $24.9k / 72%.
+  The old numbers (bad ~$3.7k · usual ~$42.4k · good ~$264k · 58%) came from the lost lab's pools and money sim and are
+  not comparable: on the same new sim 10x without the cut gives $7.7k / $34.3k / $156k / 63% (14x: the usual year +34%,
+  the bad 10% -15%); even with the bot's own ⚡ backtest list the last 12 months are ~$49k at 10x, not the old $232k.
+  The daily WaveTrend multiplier is not in the new sim (it added money before). Trading unchanged.
+- Tests: t_hdr_htf (the new medians), t_bn_others — OK.
