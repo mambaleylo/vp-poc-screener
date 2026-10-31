@@ -21087,3 +21087,17 @@ v0.99.747 — the header's yearly expectation re-counted for 14x + the 2h shorts
   the bad 10% -15%); even with the bot's own ⚡ backtest list the last 12 months are ~$49k at 10x, not the old $232k.
   The daily WaveTrend multiplier is not in the new sim (it added money before). Trading unchanged.
 - Tests: t_hdr_htf (the new medians), t_bn_others — OK.
+
+v0.99.748 — the ⚡ daily WaveTrend multiplier: x1.25 only on the most stretched 20%, no x0.85 (the user: "Да")
+- The model's osc_risk (vp_dlm_model.json, the same models / trained_to — the running bots take the file by its content,
+  v0.99.743): lo -3 -> -33, dn 0.85 -> 1.0 (hi 44 kept for the record). wt1 (the coin's daily WaveTrend 10/21) x the
+  side <= -33 — the coin stretched hard against the trade — x1.25 of the ⚡ risk; otherwise x1.
+- Why (tools/winrate money_osc.py, the walk-forward pool, 14x, the 2h shorts x0.5, a year from $100, 144 weekly windows,
+  the bundle + HTF): the -3 / 22 cut put 81% of the trades in a bucket and lost money — bad ~$5.2k · usual ~$41.8k vs
+  $6.5k · $45.9k without it (the last 12 months $122k vs $86k); x1.25 at <= -33 alone: $7.6k · $49.8k · $269k, drawdowns
+  61% / 73%, the last 12 months $108k, better than without it in 139 of 144 windows. The <= -33 trades the best bucket
+  on the bot's coins (+0.27R), the check coins (+0.33R) and the 226 new coins the models never saw (+0.28R); the >= 44
+  ones mixed by year — no cut.
+- EXPECT_YEAR re-counted with it: the bundle + HTF bad ~$7.6k · usual ~$49.8k · good ~$269k · drawdowns ~61%; without HTF
+  $7.1k / $49.2k / $201k / 63%; ⚡ alone $1.9k / $6.5k / $28.0k / 72%. The settings' / ⚡ tab's texts.
+- Tests: t_dlm_binance (x1.25 only at the extreme both sides, no x0.85, from the model file), t_hdr_htf — OK.

@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.747"
+APP_VERSION = "0.99.748"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28532,9 +28532,10 @@ _PROC_START = time.time()
 # 2026 replay; the money hour by hour on cross margin, one position a coin across the modules, Binance's real brackets;
 # 144 windows from each week of 2023-02..2025-10) at v0.99.746's 14x with the 2h shorts x0.5. The old numbers came from
 # the lost lab's pools and money sim — on the same new sim 10x gives the bundle + HTF $7.7k / $34.3k / $156k / 63%
-EXPECT_YEAR = {"dlm": {"p10": 1635, "p50": 5457, "p90": 24930, "dd": 72, "last12": 21004},
-               "bundle": {"p10": 6138, "p50": 44199, "p90": 169264, "dd": 64, "last12": 52812},
-               "bundle_htf": {"p10": 6548, "p50": 45887, "p90": 200826, "dd": 63, "last12": 86143}}
+# v0.99.748 — with the daily WaveTrend x1.25 only at wt1 x side <= -33 (the model's osc_risk; money_osc.py)
+EXPECT_YEAR = {"dlm": {"p10": 1880, "p50": 6505, "p90": 27984, "dd": 72, "last12": 21808},
+               "bundle": {"p10": 7139, "p50": 49233, "p90": 201323, "dd": 63, "last12": 61733},
+               "bundle_htf": {"p10": 7622, "p50": 49792, "p90": 269054, "dd": 61, "last12": 107660}}
 
 
 @app.route("/api/boot")
@@ -36102,7 +36103,10 @@ def dlm_osc_mult(sym, side, now=None):
     last closed daily bars: stretched against the trade (a long into a daily oversold, wt1 x side <= "lo") x"up", with it
     (>= "hi") x"dn", else x1. The honest ⚡ pool (tools/winrate gh_dlm_split.py): the 20% most against +0.28R, the 20% most
     with +0.15R, the same sign every year 2022-2026 (Fisher and EWO the same); a year from $100 (port_osc3.py) the bundle's
-    median $10.1k -> $12.6k, the last 12 months $16.4k -> $19.2k, the drawdown 59% -> 57%. The model's "osc_risk"; none or
+    median $10.1k -> $12.6k, the last 12 months $16.4k -> $19.2k, the drawdown 59% -> 57%. v0.99.748 — x1.25 only at
+    wt1 x side <= -33 (the most stretched 20% against the trade), no x0.85 (money_osc.py on the walk-forward pool: the
+    -3 / 22 cut put 81% of the trades in a bucket, the bundle's median x0.92; the extreme bucket the best on the bot's,
+    the check and the new coins). The model's "osc_risk"; none or
     no daily candles -> x1 (cached a coin a day)"""
     m = (_DLM.get("model") or {}).get("osc_risk") or {}
     if not m:
@@ -42465,7 +42469,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow" style="flex-wrap:wrap;">
         <div style="flex:1 1 100%;">
           <div class="label">Риск на сделку — у каждого модуля свой</div>
-          <div class="sub">% от счёта, который теряется на стопе (0.1–100). Пустое поле — значение модуля по умолчанию (на Binance, по истории связки): ⚡ 4.5% · P/R 3% · 🧱 SMC 2.5% · EMA 2%; остальные модули — 0.5%. У ⚡ к своему % ещё множители: загрузка (×0.625 / ×1.25), дневной WaveTrend (×1.25 / ×0.85) и шорты 2ч-потока ×0.5</div>
+          <div class="sub">% от счёта, который теряется на стопе (0.1–100). Пустое поле — значение модуля по умолчанию (на Binance, по истории связки): ⚡ 4.5% · P/R 3% · 🧱 SMC 2.5% · EMA 2%; остальные модули — 0.5%. У ⚡ к своему % ещё множители: загрузка (×0.625 / ×1.25), дневной WaveTrend (×1.25, если монета на дневке сильно растянута против сделки) и шорты 2ч-потока ×0.5</div>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro 0.5" title="Нейро: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
@@ -46356,7 +46360,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
       ${zBars(rows, v => sgR(+(+v).toFixed(3)))}
       <div class="zstrip"><span>WR <b>~${un.wr || 70}%</b></span><span>в среднем <b>${sgR(un.avg || 0.235)}</b></span><span>последние 12 мес <b>${sgR(un.last12_avg || 0.24)}</b></span><span><b>~65</b> сделок в месяц</span></div>
       ${d.streams && (d.streams.wick4h.n || d.streams.close2h.n) ? `<div class="dim" style="font-size:var(--fs-xs);">живые: 4ч ${d.streams.wick4h.n} (${d.streams.wick4h.n ? sgR(d.streams.wick4h.avg) + ', WR ' + d.streams.wick4h.wr + '%' : '—'}) · 2ч ${d.streams.close2h.n} (${d.streams.close2h.n ? sgR(d.streams.close2h.avg) + ', WR ' + d.streams.close2h.wr + '%' : '—'})</div>` : ''}
-      <div class="zsub hintx">Сделки посчитаны по часовым свечам Binance: стоп — только если свеча своего графика (4ч у 4ч-сделок, 2ч у 2ч) закрылась за ним; фитили и часовые закрытия за стопом не выбивают, от обвала — аварийный стоп 3 ATR на бирже. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%${(m && m.load_risk) ? ` (риск по загрузке: пока открыто меньше ${m.load_risk.n} сделок ⚡ — ×${m.load_risk.lo}, дальше ×${m.load_risk.hi}: сделки общего прострела рынка на истории вдвое лучше одиночных)` : ''}${(m && m.osc_risk) ? ` и по дневному WaveTrend (осциллятор LazyBear с TradingView): монета на дневке перепродана против сделки — ×${m.osc_risk.up}, перекуплена в её сторону — ×${m.osc_risk.dn}` : ''} с плечом, как у бота (ликвидация в ${mo.liq_buf || 1.25}× дальше аварийного стопа — маржа ограничивает число сделок), без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 7189)}</b>, худшие 10% ~${usd(mo.year_p10 || 2783)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 4926)}), последние 12 месяцев ~${usd(mo.last12 || 11387)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
+      <div class="zsub hintx">Сделки посчитаны по часовым свечам Binance: стоп — только если свеча своего графика (4ч у 4ч-сделок, 2ч у 2ч) закрылась за ним; фитили и часовые закрытия за стопом не выбивают, от обвала — аварийный стоп 3 ATR на бирже. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%${(m && m.load_risk) ? ` (риск по загрузке: пока открыто меньше ${m.load_risk.n} сделок ⚡ — ×${m.load_risk.lo}, дальше ×${m.load_risk.hi}: сделки общего прострела рынка на истории вдвое лучше одиночных)` : ''}${(m && m.osc_risk) ? ` и по дневному WaveTrend (осциллятор LazyBear с TradingView): монета на дневке сильно растянута против сделки — ×${m.osc_risk.up}${m.osc_risk.dn != null && m.osc_risk.dn != 1 ? `, растянута в её сторону — ×${m.osc_risk.dn}` : ''}` : ''} с плечом, как у бота (ликвидация в ${mo.liq_buf || 1.25}× дальше аварийного стопа — маржа ограничивает число сделок), без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 7189)}</b>, худшие 10% ~${usd(mo.year_p10 || 2783)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 4926)}), последние 12 месяцев ~${usd(mo.last12 || 11387)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
       <div class="zbanner warn hintx">Просадка: при обвале рынка счёт может временно упасть на 60–70% от пика — 24–25 мая 2025 за два дня стопы закрыли 19 сделок 4ч (−19R, при 4% на сделку это около −50%), с 2ч сделками просадки ещё глубже. Потом счёт восстанавливался, но к такому надо быть готовым и не повышать риск после серии стопов.</div>
       ${d.risk_set && d.risk_set > 6 ? `<div class="zbanner warn">Риск ${d.risk}% на сделку при до ${d.max_pos || 20} сделок сразу — это до ${Math.round(d.risk * (d.max_pos || 20))}% счёта под стопами одновременно. Лучше всего по деньгам — 3–4%: выше денег даже меньше (маржи хватает на меньшее число сделок), а просадки глубже.</div>` : ''}
       ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} (бот держит их у себя и выставляет на бирже, когда цена подошла на 1 ATR — так места и маржа не заняты далёкими лимитками) — переключатель «↳ ⚡ Лимитки 4ч+2ч» в автоторговле; риск — поле «⚡» (пусто = 4.5%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;

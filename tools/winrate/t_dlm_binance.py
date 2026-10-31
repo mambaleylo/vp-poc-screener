@@ -426,6 +426,13 @@ res["the manual ones: quiet, asked once"] = not any(("EEE" in l_ or "FFF" in l_)
 for k_ in ("EEEUSDT", "FFFUSDT"): X["pos"].pop(k_, None)
 V._dlm_atr_at = _atr
 print("   adopt:", got, got2, got3)
+# v0.99.748 — the daily WaveTrend: x1.25 only at wt1 x side <= -33, no x0.85 (the model file's osc_risk)
+_m0 = V._DLM.get("model"); V._DLM["model"] = json.load(open(os.path.join(os.path.dirname(os.path.abspath(V.__file__)), "vp_dlm_model.json")))
+_day = int(time.time() // 86400); _wo = []
+for _w, _sd in ((-40.0, 1), (-20.0, 1), (50.0, 1), (40.0, -1), (-50.0, -1)):
+    V._OSC[("WTX_USDT", _day)] = _w; _wo.append(V.dlm_osc_mult("WTX_USDT", _sd))
+V._DLM["model"] = _m0; V._OSC.pop(("WTX_USDT", _day), None)
+res["WaveTrend x1.25 only at the extreme, no x0.85"] = _wo == [1.25, 1.0, 1.0, 1.25, 1.0]
 # v0.99.746 — the 2h stream's shorts at x0.5 of the risk, the rest x1
 res["the 2h shorts x0.5"] = (V.dlm_stream_mult({"st": "close2h", "side": -1}) == 0.5 and V.dlm_stream_mult({"st": "close2h", "side": 1}) == 1.0
                              and V.dlm_stream_mult({"st": "wick4h", "side": -1}) == 1.0 and V.dlm_stream_mult({"side": -1}) == 1.0)
