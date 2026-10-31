@@ -21061,3 +21061,18 @@ v0.99.745 — the lab upload carries Binance's leverage brackets (the user: "у 
   cap, learnt from -4300): the lab's money uses the leverage each coin really allows. Public numbers; nothing of the
   account. Trading unchanged.
 - Tests: t_lab_export — the brackets and the cap exported.
+
+v0.99.746 — the cross leverage at most 14x, the ⚡ 2h stream's shorts at half the risk (the user: "14")
+- The multi-year recount (tools/winrate money_multi.py / money_multi2.py / money_multi3.py on the restored lab: the
+  walk-forward ⚡ pool 2023-2026 by the bot's rules + the bundle's backtest lists, the money hour by hour on Binance's
+  cross margin with each coin's real leverage brackets; 12-month windows from $200 started every quarter 2023-01 ..
+  2025-10): v0.99.744's 20x was no better than 10x — the median $75.8k vs $74.0k, the worst window $3.7k vs $5.6k, the
+  worst drawdown 82% vs 73% (the "x2" was one year, 2026). The 2h stream's shorts the weakest; at x0.5 and the leverage
+  grid 10..20x: 10x $70.8k / worst $6.9k / drawdown 63% / 73%; 13x $83.1k / $7.6k / 63% / 73%; 14x $85.9k / $7.2k /
+  63% / 73%, better than 10x in 10 of 12 windows; 15x $89.7k / $6.1k / 66% / 73%; 18x $91.2k / $5.3k / 68% / 80%. No
+  liquidation in any.
+- BN_CROSS_LEV 125 -> 14 (VP_BN_CROSS_LEV): the cross leverage = min(the coin's bracket at the size, the account's cap, 14).
+- DLM_STREAM_SIDE_RISK / dlm_stream_mult: a ⚡ close2h short's risk x0.5 (VP_DLM_C2H_SHORT_RISK), Gate and Binance; the
+  load, WaveTrend and the open-risk cap unchanged. The settings' texts say so.
+- Tests: t_bn_others — the default ceiling 14x with the same notional, the bracket logic with the ceiling lifted;
+  t_dlm_binance — ⚡'s limit at 14x, the 2h shorts x0.5.

@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.745"
+APP_VERSION = "0.99.746"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -36050,6 +36050,17 @@ def dlm_risk(equity=None):
     return min(MODULE_RISK_PCT.get("dlm") or DLM_RISK_DEFAULT, 10.0)
 
 
+# v0.99.746 — the ⚡ risk by the stream & side: the 2h stream's shorts x0.5 (tools/winrate money_multi.py, the walk-forward
+# pool 2023-2025: their trades the weakest — a year from $200 at 20x the median $75.8k -> $89.9k, the worst $3.7k -> $5.4k;
+# with 14x see BN_CROSS_LEV). VP_DLM_C2H_SHORT_RISK overrides it
+DLM_STREAM_SIDE_RISK = {("close2h", -1): float(os.environ.get("VP_DLM_C2H_SHORT_RISK", "0.5"))}
+
+
+def dlm_stream_mult(o):
+    """v0.99.746 — x the stream & side's risk (DLM_STREAM_SIDE_RISK; else x1)"""
+    return float(DLM_STREAM_SIDE_RISK.get((o.get("st") or "wick4h", 1 if o.get("side", 1) > 0 else -1), 1.0))
+
+
 def dlm_load_mult():
     """v0.99.703 — the risk by how busy ⚡ is: the trades of a lone coin's spike (fewer than "n" ⚡ trades open, virtual +
     real — the research pool's own count) made +0.10R, the ones of a market-wide spike (8+) +0.26R, every year
@@ -36622,7 +36633,7 @@ def dlm_real_place(o):
         equity = get_futures_total_equity()
         osc = dlm_osc_mult(sym, o["side"])   # v0.99.704 — x the daily WaveTrend
         lm = dlm_load_mult()
-        risk = dlm_risk(equity) * lm * osc   # v0.99.703 — x the load
+        risk = dlm_risk(equity) * lm * osc * dlm_stream_mult(o)   # v0.99.703 — x the load; v0.99.746 — x the stream & side
         rule = ((_DLM.get("model") or {}).get("rule") or {})
         sl, kx = _dlm_size_stop(o, rule)   # v0.99.692 — at the emergency stop, the risk x its distance / the stop's
         risk = round(risk * kx, 4)
@@ -36701,8 +36712,13 @@ BN_OTHERS = os.environ.get("VP_BN_OTHERS", "0") == "1"
 # drawdown the same — v0.99.717's port_heat had found 15x / 20x no better; the live trades decide). The loss at the stop
 # does not depend on it (the position is sized by the risk); with cross margin the liquidation is the account's. Now the
 # highest leverage Binance gives the coin at the position's size (its bracket), within the account's cap
+# v0.99.746 — the ceiling 14x: the multi-year recount (tools/winrate money_multi*.py: the walk-forward ⚡ pool + the
+# bundle, 12-month windows from $200 started every quarter 2023-01 .. 2025-10, Binance's real brackets) — the ⚡ 2h-stream
+# shorts at x0.5 (DLM_STREAM_SIDE_RISK): 10x the median $70.8k, the worst $6.9k, the drawdown 63% / 73%; 14x $85.9k /
+# $7.2k / 63% / 73%, better than 10x in 10 of 12; 15x+ a deeper drawdown and a lower worst year (20x $3.7k / 82% without
+# the cut) for ~5% more median. No liquidation in any
 BN_CROSS = os.environ.get("VP_BN_CROSS", "1") == "1"
-BN_CROSS_LEV = int(os.environ.get("VP_BN_CROSS_LEV", "125"))   # the ceiling; the coin's bracket and the account's cap decide
+BN_CROSS_LEV = int(os.environ.get("VP_BN_CROSS_LEV", "14"))   # the ceiling; the coin's bracket and the account's cap may give less
 BN_HEAT_MAX = 0.90
 
 
@@ -37081,7 +37097,7 @@ def dlm_bn_place(o):
     acct = bnf_account()
     osc = dlm_osc_mult(sym, s)   # v0.99.704 — x the daily WaveTrend
     lm = dlm_load_mult()
-    risk = round(dlm_risk(acct["equity"]) * lm * osc * kx, 4)   # v0.99.703 — x the load
+    risk = round(dlm_risk(acct["equity"]) * lm * osc * kx * dlm_stream_mult(o), 4)   # v0.99.703 — x the load; v0.99.746 — x the stream & side
     tb = {bsym: tiers} if tiers else None
     mt = bn_margin_mode(bsym)   # v0.99.717 — cross (the open risk capped; v0.99.744: the coin's highest leverage) or isolated (the leverage by the emergency stop)
     if mt == "CROSSED":
@@ -42149,7 +42165,7 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow subRow">
         <div>
-          <div class="label">↳ 💱 Кросс-маржа, плечо — максимум монеты, общий риск до 90%</div>
+          <div class="label">↳ 💱 Кросс-маржа, плечо до 14x (или максимум монеты), общий риск до 90%</div>
           <div class="sub hintx">новые позиции на Binance — в кросс-марже с наибольшим плечом, которое Binance даёт монете при этом размере позиции (не больше лимита аккаунта; потеря на стопе от плеча не зависит — размер позиции считается от риска, а маржи на позицию нужно меньше), а предел — сам риск: сумма потерь всех открытых позиций и выставленных лимиток ⚡, если все сработают по стопам на бирже, не больше 90% счёта (новая сделка урезается, чтобы в него уложиться). В изолированной марже пределом была маржа: на истории она урезала 31% сделок и отменяла ещё 20% — долгие позиции SMC / P/R / EMA держали её, когда приходили лучшие пачки ⚡. За год со $100: плохой год $1 631 → $2 393, медиана $17 743 → $24 773, последние 12 мес $37 206 → $72 757, просадка та же ~61%. Выключено — как раньше: изолированная, плечо по стопу. Монета, где Binance не даёт сменить режим (на ней позиция или ордер), торгуется по-старому</div>
         </div>
         <label class="switch"><input type="checkbox" id="setBnCross"><span class="switchSlider"></span></label>
@@ -42445,7 +42461,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow" style="flex-wrap:wrap;">
         <div style="flex:1 1 100%;">
           <div class="label">Риск на сделку — у каждого модуля свой</div>
-          <div class="sub">% от счёта, который теряется на стопе (0.1–100). Пустое поле — значение модуля по умолчанию (на Binance, по истории связки): ⚡ 4.5% · P/R 3% · 🧱 SMC 2.5% · EMA 2%; остальные модули — 0.5%. У ⚡ к своему % ещё множители: загрузка (×0.625 / ×1.25) и дневной WaveTrend (×1.25 / ×0.85)</div>
+          <div class="sub">% от счёта, который теряется на стопе (0.1–100). Пустое поле — значение модуля по умолчанию (на Binance, по истории связки): ⚡ 4.5% · P/R 3% · 🧱 SMC 2.5% · EMA 2%; остальные модули — 0.5%. У ⚡ к своему % ещё множители: загрузка (×0.625 / ×1.25), дневной WaveTrend (×1.25 / ×0.85) и шорты 2ч-потока ×0.5</div>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro 0.5" title="Нейро: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">

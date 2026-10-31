@@ -146,9 +146,11 @@ algos = [a for a in X["algos"].values() if a["symbol"] == "AAAUSDT"]
 st = next((a for a in algos if a["type"] == "STOP_MARKET"), {}); tk = next((a for a in algos if a["type"] == "TAKE_PROFIT_MARKET"), {})
 q = float(mk[0][2]["quantity"]) if mk else 0
 res["smc opened on Binance, its 2.5% at the stop"] = (r1["status"] == "OPENED" and not gate and len(mk) == 1 and mk[0][2]["side"] == "BUY"
-                                               and 0.9 * 25 <= q * 0.5 <= 1.001 * 25 and X["mtype"].get("AAAUSDT") == "CROSSED" and X["lev"].get("AAAUSDT", 0) == 50)   # v0.99.717 — cross; v0.99.744: the coin's bracket 50x (was 10x)
+                                               and 0.9 * 25 <= q * 0.5 <= 1.001 * 25 and X["mtype"].get("AAAUSDT") == "CROSSED" and X["lev"].get("AAAUSDT", 0) == 14)   # v0.99.717 — cross; v0.99.744: the coin's bracket 50x (was 10x); v0.99.746: the ceiling 14x
 # v0.99.744 — the cross leverage is the coin's bracket at the position's size, within the account's cap
 tb_ = {"AAAUSDT": [(5000.0, 0.01, 50), (25000.0, 0.025, 20)]}
+m14, l14, _ = V.bn_size("LONG", 10.0, 9.5, 50, 0.01, 1000.0, 2.5, "AAAUSDT", tb_, "CROSSED")   # v0.99.746 — the default ceiling 14x
+_cl0 = V.BN_CROSS_LEV; V.BN_CROSS_LEV = 125   # the bracket's own logic below
 m1, l1, _ = V.bn_size("LONG", 10.0, 9.5, 50, 0.01, 1000.0, 2.5, "AAAUSDT", tb_, "CROSSED")
 m2, l2, _ = V.bn_size("LONG", 10.0, 9.5, 50, 0.01, 20000.0, 2.5, "AAAUSDT", tb_, "CROSSED")    # $500 at the stop -> $10000 notional
 m3, l3, _ = V.bn_size("LONG", 10.0, 9.5, 20, 0.01, 1000.0, 2.5, "AAAUSDT", tb_, "CROSSED")     # the account's cap 20x
@@ -157,6 +159,8 @@ _cl = V.BN_CROSS_LEV; V.BN_CROSS_LEV = 10; m0, l0, _ = V.bn_size("LONG", 10.0, 9
 print(f"   the same position at 10x: margin {m0:.1f}$ (now {m1:.1f}$), notional {m0 * l0:.0f}$ = {m1 * l1:.0f}$")
 res["cross: the bracket's leverage, the account's cap"] = (l1 == 50 and l0 == 10 and abs(m1 * l1 - m0 * l0) < 1e-6 and m1 < m0 / 4.9   # the same size (risk), 1/5 of the margin
                                                            and l2 == 20 and abs(m2 * l2 - 20 * m1 * l1) < 1 and l3 == 20)
+V.BN_CROSS_LEV = _cl0
+res["cross: the ceiling 14x by default, the same size"] = _cl0 == 14 and l14 == 14 and abs(m14 * l14 - m1 * l1) < 1e-6
 res["stop + take on the exchange"] = (st.get("triggerPrice") == "9.5" and st.get("closePosition") == "true" and st.get("side") == "SELL"
                                      and tk.get("triggerPrice") == "11.5" and tk.get("closePosition") == "true")
 X["pos"]["AAAUSDT"] = q
