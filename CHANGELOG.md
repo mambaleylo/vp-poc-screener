@@ -21053,3 +21053,11 @@ v0.99.744 — the cross leverage: the coin's highest instead of a fixed 10x (the
   20x, the drawdown the same. v0.99.717's port_heat had found 15x / 20x no better — the live trades decide.
 - Tests: t_bn_others — the leverage = the bracket's (50x up to $5000, 20x above), the account's cap, the same notional as
   at 10x with a fifth of the margin; t_dlm_binance — ⚡'s limit at the bracket's 50x.
+
+v0.99.745 — the lab upload carries Binance's leverage brackets (the user: "у некоторых монет попросту такого [плеча] может не
+быть и там сделка будет с 10 плечом")
+- lab_export_build adds "bn_brackets" — every USDⓈ-M coin's leverage brackets for the small positions ([notional cap,
+  the max leverage, the maintenance margin rate], one request /fapi/v1/leverageBracket) — and "bn_lev_cap" (the account's
+  cap, learnt from -4300): the lab's money uses the leverage each coin really allows. Public numbers; nothing of the
+  account. Trading unchanged.
+- Tests: t_lab_export — the brackets and the cap exported.

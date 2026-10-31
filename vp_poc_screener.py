@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.744"
+APP_VERSION = "0.99.745"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28411,7 +28411,21 @@ def lab_export_build():
                 errs["log"] = [ln[:400] for ln in f.read().decode("utf-8", "replace").splitlines() if ln.startswith("[ERR]")][-600:]
     except Exception as e:
         log_error(f"lab export log: {e}")
-    return {"ver": APP_VERSION, "made": int(time.time()), "binance": bool(DLM_BINANCE), "files": files, "errors": lab_sanitize(errs)}
+    out = {"ver": APP_VERSION, "made": int(time.time()), "binance": bool(DLM_BINANCE), "files": files, "errors": lab_sanitize(errs)}
+    try:   # v0.99.745 — Binance's leverage brackets of every USDⓈ-M coin (one request) and the account's cap: the lab's money
+        # by the real leverage a coin allows (the user: "у некоторых монет попросту такого может не быть") — public numbers
+        if BINANCE_API_KEY and BINANCE_API_SECRET:
+            rows = bnf_req("GET", "/fapi/v1/leverageBracket") or []
+            br = {}
+            for row in rows if isinstance(rows, list) else []:
+                bs_ = sorted((float(b["notionalCap"]), int(b["initialLeverage"]), float(b["maintMarginRatio"])) for b in row.get("brackets") or [])
+                if row.get("symbol") and bs_:
+                    br[row["symbol"]] = [list(x) for x in bs_[:4]]   # the small positions' brackets
+            out["bn_brackets"] = br
+            out["bn_lev_cap"] = _BNF.get("lev_cap")
+    except Exception as e:
+        log_error(f"lab export brackets: {e}")
+    return out
 
 
 def _gh(method, url, tok, **kw):

@@ -17,6 +17,14 @@ V.log_error("binance algo STOP_MARKET ZKUSDT: Binance -4509: test reason — the
 V.log_error("telegram: HTTPSConnectionPool url: /bot123456789:AAHk3jsd8f7sdf8sd7f8sd7f8sdf7sd8f7s/sendMessage timeout; GET /fapi/v2/account?timestamp=1&signature=abcdef0123456789")
 V.log_error("free margin $12.50 too low")
 dat = V.lab_export_build(); s = json.dumps(dat, ensure_ascii=False)
+# v0.99.745 — the leverage brackets of every coin and the account's cap, when the Binance keys are there
+_k = (V.BINANCE_API_KEY, V.BINANCE_API_SECRET, V.bnf_req); V.BINANCE_API_KEY, V.BINANCE_API_SECRET = "k", "s"; V._BNF["lev_cap"] = 20
+V.bnf_req = lambda m, path, params=None, **kw: [{"symbol": "AAAUSDT", "brackets": [{"notionalCap": 5000, "initialLeverage": 50, "maintMarginRatio": 0.01},
+                                                                              {"notionalCap": 25000, "initialLeverage": 20, "maintMarginRatio": 0.025}]},
+                                                {"symbol": "BBBUSDT", "brackets": [{"notionalCap": 10000, "initialLeverage": 10, "maintMarginRatio": 0.02}]}] if path == "/fapi/v1/leverageBracket" else []
+db = V.lab_export_build()
+V.BINANCE_API_KEY, V.BINANCE_API_SECRET, V.bnf_req = _k
+res["leverage brackets exported"] = db.get("bn_brackets", {}).get("AAAUSDT") == [[5000.0, 50, 0.01], [25000.0, 20, 0.025]] and db["bn_brackets"]["BBBUSDT"][0][1] == 10 and db.get("bn_lev_cap") == 20
 res["errors exported, secrets / money cut"] = "Binance -4509: test reason" in s and "AAHk3" not in s and "abcdef0123456789" not in s and "12.50" not in s
 res["money cut"] = all(k not in s for k in ('"size"', '"risk"', '"margin"', '"balance_after"', '"pnl"', '"qty"', '"notional"'))
 res["prices / R kept"] = '"pnl_r": 0.55' in s and '"risk_pct": 4.5' in s and '"sl_px": 1950.0' in s and '"price": 100.01' in s and '"lev": 10' in s
