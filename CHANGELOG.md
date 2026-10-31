@@ -21028,3 +21028,15 @@ v0.99.742 — a manual Binance position is no longer taken for the bot's (the us
   from a temp copy with the repo's model files and backtest list (read-only).
 - Tests: t_dlm_binance — a manual position with its own stop / take: not taken, its orders untouched, quiet, asked once; an
   old take-over: dropped, the open risk lower, its orders kept; the bot's own (an SMC entry "vpsmc…") still taken over.
+
+v0.99.743 — the models refreshed by any change of the repo's file (the user's COW short: −12% of the account instead of
+the ~4.5% risk)
+- The cause: the bot took a model from the repo only when its "trained_to" grew. ⚡'s exits of v0.99.692–694 (the take
+  1.1 ATR, the stop at the chart candle's close beyond 2 ATR, the emergency stop on the exchange at 3 ATR, the position
+  sized at the 2 ATR stop) came in the same file with the same date, so the phone kept the old one: every ⚡ trade since
+  (the lab export of 31.10) had the touch stop at 2 ATR on the exchange and the take 1 ATR — the rule the research had
+  dropped (61% of those stops wicks). COW: the 2 ATR touch stop (+5.3%) hit and the market order filled 1.2% further.
+- Now model_refresh_once takes the repo's file whenever it differs from the local one (the same version, the date not
+  older); the module reloads it; a Telegram line names the refreshed models. Runs 10 min after the start and daily.
+- Tests: t_model_refresh.py — the same date with other rules taken (⚡ close2h -> the close stop, take 1.1); the same file
+  not rewritten; an older repo date kept; another version kept.

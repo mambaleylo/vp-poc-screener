@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.742"
+APP_VERSION = "0.99.743"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -32320,7 +32320,9 @@ def prx_model():
 def model_refresh_once():
     """v0.99.636 — a model retrained later (the same version, a later "trained_to") is taken from the repo: the file is
     replaced and the module reloads it on its next use. Only the version decides the format, so a model the bot's
-    code cannot read is never taken."""
+    code cannot read is never taken. v0.99.743 — any change of the repo's file is taken, not only a later "trained_to":
+    ⚡'s exits of v0.99.692–694 (the take 1.1 ATR, the stop at the chart candle's close, the emergency stop 3 ATR) came in
+    the same file with the same date, and the phone traded the old rule (the touch stop at 2 ATR, the take 1 ATR) since"""
     done = []
     for name, fn, url, ver, lock, st in (("🎯 Сильные зоны", ZM_MODEL_FILE, ZM_MODEL_URL, ZM_MODEL_VER, _zm_lock, _ZM),
                                          ("📐 EMA", EMX_MODEL_FILE, EMX_MODEL_URL, EMX_MODEL_VER, _emx_lock, _EMX),
@@ -32332,7 +32334,7 @@ def model_refresh_once():
                                          ("🔄 Классика наоборот", CFL_MODEL_FILE, CFL_MODEL_URL, CFL_MODEL_VER, _cfl_lock, _CFL),   # v0.99.739
                                          ("⚡ Лимитки 4ч+2ч", DLM_MODEL_FILE, DLM_MODEL_URL, DLM_MODEL_VER, _dlm_lock, _DLM)):
         try:
-            local = 0
+            local, lm = 0, None
             if os.path.exists(fn):
                 with open(fn) as f:
                     lm = json.load(f)
@@ -32341,7 +32343,9 @@ def model_refresh_once():
             r = requests.get(url.format(ref="main"), params={"nocache": int(time.time())}, timeout=120)
             r.raise_for_status()
             m = r.json()
-            if m.get("ver") != ver or not (m.get("models") or m.get("streams") or m.get("models_o")) or int(m.get("trained_to") or 0) <= local:
+            if m.get("ver") != ver or not (m.get("models") or m.get("streams") or m.get("models_o")) or int(m.get("trained_to") or 0) < local:
+                continue
+            if lm is not None and lm.get("ver") == ver and m == lm:   # the same file: nothing to take
                 continue
             tmp = fn + ".new"
             with open(tmp, "w") as f:
@@ -32350,7 +32354,7 @@ def model_refresh_once():
             with lock:
                 st["model"] = None          # reloaded from the file on the next use
             done.append(name)
-            log_error(f"model refresh: {name} — a newer model (trained to {time.strftime('%Y-%m-%d', time.gmtime(int(m['trained_to'])))}) taken")
+            log_error(f"model refresh: {name} — the repo's model taken (trained to {time.strftime('%Y-%m-%d', time.gmtime(int(m['trained_to'])))})")
         except Exception as e:
             log_error(f"model refresh {name}: {e}")
     return done
@@ -32786,7 +32790,9 @@ def model_refresh_loop():
     time.sleep(600)
     while True:
         try:
-            model_refresh_once()
+            done = model_refresh_once()
+            if done:   # v0.99.743 — told: the rules the modules trade by changed
+                send_telegram("🔄 Модели обновлены из репозитория (новые правила сделок): " + ", ".join(done), category="system")
         except Exception as e:
             log_error(f"model_refresh_loop: {e}")
         time.sleep(24 * 3600)
