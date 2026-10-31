@@ -33,6 +33,9 @@ SER = {}
 def series(gs, tf):
     if (gs, tf) not in SER:
         T, O, H, L, C, Vv = raw(gs); hh = {"4h": 4, "2h": 2, "1h": 1}[tf]
+        # the depth the bot looks at (dlm_scan: 3000 4h / 4500 2h bars; the 1h only from the trades' days) — the memory
+        k0 = bisect.bisect_left(T, START - {"4h": 510, "2h": 385, "1h": 15}[tf] * 86400)
+        T, O, H, L, C, Vv = T[k0:], O[k0:], H[k0:], L[k0:], C[k0:], Vv[k0:]
         blk = T // (hh * 3600); st = np.concatenate([[0], np.flatnonzero(blk[1:] != blk[:-1]) + 1]); en = np.concatenate([st[1:], [len(T)]])
         full = (en - st) == hh; st, en = st[full], en[full]
         b = [{"time": int(blk[s] * hh * 3600), "open": float(O[s]), "high": float(H[s:e].max()), "low": float(L[s:e].min()), "close": float(C[e - 1]),
