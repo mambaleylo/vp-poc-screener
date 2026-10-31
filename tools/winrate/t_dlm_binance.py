@@ -161,7 +161,7 @@ V.dlm_real_place(a)
 ra = a["real"]; o = X["orders"].get(int(ra.get("id") or 0)) or {}
 loss = float(o.get("quantity", 0)) * (10.0 - 9.8)
 res["limit placed"] = (ra.get("status") == "LIMIT" and ra.get("ex") == "binance" and o.get("type") == "LIMIT" and o.get("side") == "BUY"
-                       and o.get("price") == "10" and X["mtype"].get("AAAUSDT") == "CROSSED" and X["lev"].get("AAAUSDT") == ra["lev"] == 10   # v0.99.717
+                       and o.get("price") == "10" and X["mtype"].get("AAAUSDT") == "CROSSED" and X["lev"].get("AAAUSDT") == ra["lev"] == 50   # v0.99.717; v0.99.744: the coin's bracket (50x up to $5000), was 10x
                        and 80 <= loss <= 100 and ra["lev"] <= 50)
 # (3) the fill -> the stop (algo, the whole position) + the take (reduce-only limit)
 o.update(status="FILLED", executedQty=o["quantity"], avgPrice="9.99"); X["pos"]["AAAUSDT"] = float(o["quantity"])
@@ -349,7 +349,7 @@ h0 = V.bn_heat(1000.0)
 c1 = mk("AAA_USDT", 1, 10.0, 0.1); c1["id"] += "x1"; V._DLM["orders"].append(c1); V.dlm_real_place(c1)
 rc = c1.get("real") or {}; oc = X["orders"].get(int(rc.get("id") or 0)) or {}
 loss_c = float(oc.get("quantity", 0)) * (10.0 - float(rc.get("pre_sl_px") or 0))   # at its stop on the exchange
-scaled = rc.get("status") == "LIMIT" and rc.get("margin") == "CROSSED" and rc.get("lev") == 10 and 80 <= loss_c <= 101   # 900 - 800 = $100 room
+scaled = rc.get("status") == "LIMIT" and rc.get("margin") == "CROSSED" and rc.get("lev") == 50 and 80 <= loss_c <= 101   # 900 - 800 = $100 room
 c2 = mk("BBB_USDT", 1, 5.0, 0.05); c2["id"] += "x2"; V._DLM["orders"].append(c2); V.dlm_real_place(c2)
 full = c2.get("real") is None and "общий риск" in (c2.get("hold") or "")
 V._DLM["orders"] = [x for x in V._DLM["orders"] if x is not c2]; V._dlm_cancel_back(c1); V._DLM["orders"] = []; V._BNO["pos"].clear()

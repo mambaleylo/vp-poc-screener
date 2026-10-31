@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.743"
+APP_VERSION = "0.99.744"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -36681,8 +36681,14 @@ BN_OTHERS = os.environ.get("VP_BN_OTHERS", "0") == "1"
 # $37 206 -> $72 757, the drawdown the same 61–62% (tools/winrate port_heat*.py). 15x / 20x or a cap of 100%+ — a deeper
 # drawdown for no more money. A coin whose margin type Binance will not change (a position / an order on it) keeps
 # the isolated way (the leverage by its stop, the liquidation beyond it)
+# v0.99.744 — the user: "нужно увеличить плечо, если монета позволяет … высвободится больше маржи для дополнительных сделок"
+# (a ⚡ trade held ~0.09 of the equity as margin at 10x; the recount on the bots' backtest lists, money200.py / lev.py:
+# at 10x the free margin cut 10% of the trades and skipped more, a year from $200 the median $53k -> $113k at 20x, the
+# drawdown the same — v0.99.717's port_heat had found 15x / 20x no better; the live trades decide). The loss at the stop
+# does not depend on it (the position is sized by the risk); with cross margin the liquidation is the account's. Now the
+# highest leverage Binance gives the coin at the position's size (its bracket), within the account's cap
 BN_CROSS = os.environ.get("VP_BN_CROSS", "1") == "1"
-BN_CROSS_LEV = 10
+BN_CROSS_LEV = int(os.environ.get("VP_BN_CROSS_LEV", "125"))   # the ceiling; the coin's bracket and the account's cap decide
 BN_HEAT_MAX = 0.90
 
 
@@ -36739,12 +36745,16 @@ def bn_heat_cap(risk_pct, equity):
 
 
 def bn_size(direction, e, sl_x, cap, mmr, equity, risk, bsym, tb, mt, safety=None):
-    """compute_risk_based_position, with cross margin the leverage fixed (BN_CROSS_LEV within the coin's cap): the same
-    notional (the risk at the stop), less margin -> (margin, lev, skip)"""
+    """compute_risk_based_position, with cross margin the leverage the coin's highest at the position's size (its Binance
+    bracket; v0.99.744, was a fixed 10x) within the cap (the account's) and BN_CROSS_LEV: the same notional (the risk at
+    the stop), less margin -> (margin, lev, skip)"""
     kw = {"safety_margin": safety} if safety is not None else {}
     margin, lev, skip = compute_risk_based_position(direction, e, sl_x, cap, mmr, equity, risk_pct=risk, symbol=bsym, tiers_by_symbol=tb, **kw)
     if not skip and mt == "CROSSED" and lev:
-        lev2 = max(1, min(int(cap), BN_CROSS_LEV))
+        notional = margin * lev
+        tiers = sorted((tb or {}).get(bsym) or [])
+        brk = next((int(l_) for c_, _m, l_ in tiers if c_ >= notional), int(tiers[-1][2]) if tiers else int(cap))
+        lev2 = max(1, min(int(cap), brk, BN_CROSS_LEV))
         margin, lev = margin * lev / lev2, lev2
     return margin, lev, skip
 BN_OTHERS_MODES = ("prv", "smc", "emw", "htf", "cfl")
@@ -36837,7 +36847,7 @@ def bno_open(mode, symbol, direction, entry, sl, tp, kx=1.0):
     tb = {bsym: tiers} if tiers else None
     acct = bnf_account()
     risk = float(MODULE_RISK_PCT.get(mode) or BN_OTHERS_RISK.get(mode, 1.0)) * kx   # v0.99.700: kx — the stop sl is the emergency one
-    mt = bn_margin_mode(bsym)   # v0.99.717 — cross (the leverage 10x, the open risk capped) or isolated (the leverage by the stop)
+    mt = bn_margin_mode(bsym)   # v0.99.717 — cross (the open risk capped; v0.99.744: the coin's highest leverage) or isolated (the leverage by the stop)
     if mt == "CROSSED":
         risk, why = bn_heat_cap(risk, acct["equity"])
         if why:
@@ -37059,7 +37069,7 @@ def dlm_bn_place(o):
     lm = dlm_load_mult()
     risk = round(dlm_risk(acct["equity"]) * lm * osc * kx, 4)   # v0.99.703 — x the load
     tb = {bsym: tiers} if tiers else None
-    mt = bn_margin_mode(bsym)   # v0.99.717 — cross (10x, the open risk capped) or isolated (the leverage by the emergency stop)
+    mt = bn_margin_mode(bsym)   # v0.99.717 — cross (the open risk capped; v0.99.744: the coin's highest leverage) or isolated (the leverage by the emergency stop)
     if mt == "CROSSED":
         risk, why = bn_heat_cap(risk, acct["equity"])
         if why:   # waits (an open trade may close before the price comes) and says why
@@ -42125,8 +42135,8 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow subRow">
         <div>
-          <div class="label">↳ 💱 Кросс-маржа 10x, общий риск до 90%</div>
-          <div class="sub hintx">новые позиции на Binance — в кросс-марже с плечом 10x, а предел — сам риск: сумма потерь всех открытых позиций и выставленных лимиток ⚡, если все сработают по стопам на бирже, не больше 90% счёта (новая сделка урезается, чтобы в него уложиться). В изолированной марже пределом была маржа: на истории она урезала 31% сделок и отменяла ещё 20% — долгие позиции SMC / P/R / EMA держали её, когда приходили лучшие пачки ⚡. За год со $100: плохой год $1 631 → $2 393, медиана $17 743 → $24 773, последние 12 мес $37 206 → $72 757, просадка та же ~61%. Выключено — как раньше: изолированная, плечо по стопу. Монета, где Binance не даёт сменить режим (на ней позиция или ордер), торгуется по-старому</div>
+          <div class="label">↳ 💱 Кросс-маржа, плечо — максимум монеты, общий риск до 90%</div>
+          <div class="sub hintx">новые позиции на Binance — в кросс-марже с наибольшим плечом, которое Binance даёт монете при этом размере позиции (не больше лимита аккаунта; потеря на стопе от плеча не зависит — размер позиции считается от риска, а маржи на позицию нужно меньше), а предел — сам риск: сумма потерь всех открытых позиций и выставленных лимиток ⚡, если все сработают по стопам на бирже, не больше 90% счёта (новая сделка урезается, чтобы в него уложиться). В изолированной марже пределом была маржа: на истории она урезала 31% сделок и отменяла ещё 20% — долгие позиции SMC / P/R / EMA держали её, когда приходили лучшие пачки ⚡. За год со $100: плохой год $1 631 → $2 393, медиана $17 743 → $24 773, последние 12 мес $37 206 → $72 757, просадка та же ~61%. Выключено — как раньше: изолированная, плечо по стопу. Монета, где Binance не даёт сменить режим (на ней позиция или ордер), торгуется по-старому</div>
         </div>
         <label class="switch"><input type="checkbox" id="setBnCross"><span class="switchSlider"></span></label>
       </div>

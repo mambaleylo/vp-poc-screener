@@ -146,7 +146,17 @@ algos = [a for a in X["algos"].values() if a["symbol"] == "AAAUSDT"]
 st = next((a for a in algos if a["type"] == "STOP_MARKET"), {}); tk = next((a for a in algos if a["type"] == "TAKE_PROFIT_MARKET"), {})
 q = float(mk[0][2]["quantity"]) if mk else 0
 res["smc opened on Binance, its 2.5% at the stop"] = (r1["status"] == "OPENED" and not gate and len(mk) == 1 and mk[0][2]["side"] == "BUY"
-                                               and 0.9 * 25 <= q * 0.5 <= 1.001 * 25 and X["mtype"].get("AAAUSDT") == "CROSSED" and X["lev"].get("AAAUSDT", 0) == 10)   # v0.99.717 — cross 10x
+                                               and 0.9 * 25 <= q * 0.5 <= 1.001 * 25 and X["mtype"].get("AAAUSDT") == "CROSSED" and X["lev"].get("AAAUSDT", 0) == 50)   # v0.99.717 — cross; v0.99.744: the coin's bracket 50x (was 10x)
+# v0.99.744 — the cross leverage is the coin's bracket at the position's size, within the account's cap
+tb_ = {"AAAUSDT": [(5000.0, 0.01, 50), (25000.0, 0.025, 20)]}
+m1, l1, _ = V.bn_size("LONG", 10.0, 9.5, 50, 0.01, 1000.0, 2.5, "AAAUSDT", tb_, "CROSSED")
+m2, l2, _ = V.bn_size("LONG", 10.0, 9.5, 50, 0.01, 20000.0, 2.5, "AAAUSDT", tb_, "CROSSED")    # $500 at the stop -> $10000 notional
+m3, l3, _ = V.bn_size("LONG", 10.0, 9.5, 20, 0.01, 1000.0, 2.5, "AAAUSDT", tb_, "CROSSED")     # the account's cap 20x
+print(f"   cross lev: small {l1}x margin {m1:.1f}$ · big {l2}x margin {m2:.1f}$ · account cap {l3}x")
+_cl = V.BN_CROSS_LEV; V.BN_CROSS_LEV = 10; m0, l0, _ = V.bn_size("LONG", 10.0, 9.5, 50, 0.01, 1000.0, 2.5, "AAAUSDT", tb_, "CROSSED"); V.BN_CROSS_LEV = _cl
+print(f"   the same position at 10x: margin {m0:.1f}$ (now {m1:.1f}$), notional {m0 * l0:.0f}$ = {m1 * l1:.0f}$")
+res["cross: the bracket's leverage, the account's cap"] = (l1 == 50 and l0 == 10 and abs(m1 * l1 - m0 * l0) < 1e-6 and m1 < m0 / 4.9   # the same size (risk), 1/5 of the margin
+                                                           and l2 == 20 and abs(m2 * l2 - 20 * m1 * l1) < 1 and l3 == 20)
 res["stop + take on the exchange"] = (st.get("triggerPrice") == "9.5" and st.get("closePosition") == "true" and st.get("side") == "SELL"
                                      and tk.get("triggerPrice") == "11.5" and tk.get("closePosition") == "true")
 X["pos"]["AAAUSDT"] = q

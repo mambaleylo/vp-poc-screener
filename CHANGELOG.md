@@ -21040,3 +21040,16 @@ the ~4.5% risk)
   older); the module reloads it; a Telegram line names the refreshed models. Runs 10 min after the start and daily.
 - Tests: t_model_refresh.py — the same date with other rules taken (⚡ close2h -> the close stop, take 1.1); the same file
   not rewritten; an older repo date kept; another version kept.
+
+v0.99.744 — the cross leverage: the coin's highest instead of a fixed 10x (the user: "риск чтобы был тот как надо, но
+достигался наибольшим возможным плечом")
+- With cross margin the position is sized by the risk (the loss at the stop = the risk %), the leverage only sets the margin
+  it holds. bn_size now takes the highest leverage Binance gives the coin at the position's size (its leverage bracket for
+  that notional), within the account's cap (a new futures account: 20x until Binance lets more; learnt from -4300) — was
+  min(the coin's cap, 10). The same position, a fifth of the margin at 50x: more room for the next trades. The open-risk cap
+  (the losses at the exchange stops <= 90% of the equity) unchanged; the liquidation stays the account's (cross).
+- Why: the recount on the bot's backtest lists (money200.py / lev.py — the research pool was lost with the scratch
+  folder): at 10x the free margin cut 10% of the trades and skipped more; a year from $200 the median $53k -> $113k at
+  20x, the drawdown the same. v0.99.717's port_heat had found 15x / 20x no better — the live trades decide.
+- Tests: t_bn_others — the leverage = the bracket's (50x up to $5000, 20x above), the account's cap, the same notional as
+  at 10x with a fifth of the margin; t_dlm_binance — ⚡'s limit at the bracket's 50x.
