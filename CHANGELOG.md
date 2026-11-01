@@ -21229,3 +21229,20 @@ v0.99.756 — the cross leverage ceiling 17x (was 14x) (the user: "17", "Да")
   69%. The settings' text.
 - The lab: supervise.sh (a long job restarted when it dies or stalls, a chain's whole process tree watched).
 - Tests: t_bn_others / t_dlm_binance (the default ceiling), t_hdr_htf, t_dlm_bot, t_mod_ui — OK.
+
+## v0.99.757
+- 🚀 Пробой 4ч — a new module, virtual (the user: the daily 📈 breakout holds up to half a year, "максимум сутки двое";
+  then "встраивай", virtual first). On every 4h close the 127 research coins' breakouts: a close out of the 20 / 30 / 50
+  bars before, the range < 4 x ATR100, with the chart's EMA200; a model (vp_rbs_model.json, 300 trees on 31 features of the
+  breakout — its strength, the squeeze, the volume, the trend, RSI, BTC, the hour) scores each, the ones above +0.8R open:
+  the entry at the next 4h open, the stop 1.5 ATR, the take 2R, out at the 12th bar's close (48 h), one trade a coin.
+  Walk-forward 2023-2026 (each year's model trained on the years before): +0.20 / +0.25 / +0.48 / +0.21R a trade (all the
+  breakouts: +0.02 / +0.06 / +0.13 / -0.10R), ~4 a week, 1.3 days in a trade; 2022 with a model trained on 2021 alone was
+  negative — the reason it is virtual first. In the bundle at 1% (money_rbs.py): the usual year $28.9k -> $49.4k, the
+  drawdown 66% -> 70%; its own filters do not lower the drawdown (money_rbs2.py), the risk x0.75 after a 40% drawdown
+  keeps it at 66% with $37.3k — for the real trades later.
+- The tab (the research's years, the last scan's best scores, the virtual trades, the live check, the 845 backtest trades
+  with their charts and the range), the settings (on / Telegram), the model refreshed with the others.
+- The lab: rb_short.py, rbs_eval.py, rbs_feat.py, rbs_ml.py, money_rbs.py, money_rbs2.py, rbs_export.py. The trees are
+  exported without lgbpure's 7-digit rounding (a -1e-35 threshold rounded to 0 sent the zeros the other way).
+- t_rbs_bot: the bot's breakouts / 31 features / score / trade on the lab's real 4h bars match the research exactly.

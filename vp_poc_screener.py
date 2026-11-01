@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.756"
+APP_VERSION = "0.99.757"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1158,6 +1158,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
                   "htf_enabled", "autotrade_htf", "telegram_alerts_htf", "risk_pct_htf",   # v0.99.732
                   "cfl_enabled", "telegram_alerts_cfl", "autotrade_cfl", "risk_pct_cfl",   # v0.99.739, v0.99.740
+                  "rbs_enabled", "telegram_alerts_rbs",   # v0.99.757
                   "dlm_enabled", "autotrade_dlm2", "telegram_alerts_dlm", "risk_pct_dlm2", "dlm_binance", "dlm_more_coins", "bn_others", "bn_cross",   # v0.99.679, v0.99.684, v0.99.686 (v0.99.687: the single mode and the ladder dropped; the 4h module's own autotrade / risk keys: it starts virtual at 4% (v0.99.688), the 15m one held up to 50%)
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
@@ -1243,6 +1244,7 @@ def get_settings():
         "smc_enabled": SMC_ENABLED, "autotrade_smc": AUTOTRADE_ENABLED_SMC, "telegram_alerts_smc": TELEGRAM_ALERTS_SMC, "risk_pct_smc": MODULE_RISK_PCT.get("smc"),   # v0.99.678
         "htf_enabled": HTF_ENABLED, "autotrade_htf": AUTOTRADE_ENABLED_HTF, "telegram_alerts_htf": TELEGRAM_ALERTS_HTF, "risk_pct_htf": MODULE_RISK_PCT.get("htf"),   # v0.99.732
         "cfl_enabled": CFL_ENABLED, "telegram_alerts_cfl": TELEGRAM_ALERTS_CFL, "autotrade_cfl": AUTOTRADE_ENABLED_CFL, "risk_pct_cfl": MODULE_RISK_PCT.get("cfl"),   # v0.99.739, v0.99.740
+        "rbs_enabled": RBS_ENABLED, "telegram_alerts_rbs": TELEGRAM_ALERTS_RBS,   # v0.99.757
         "dlm_enabled": DLM_ENABLED, "autotrade_dlm2": AUTOTRADE_ENABLED_DLM, "telegram_alerts_dlm": TELEGRAM_ALERTS_DLM, "risk_pct_dlm2": MODULE_RISK_PCT.get("dlm"),   # v0.99.679, v0.99.687
         "dlm_binance": DLM_BINANCE,   # v0.99.684
         "bn_others": BN_OTHERS,   # v0.99.698
@@ -1536,6 +1538,7 @@ def apply_settings(updates):
                    ("smc_enabled", "SMC_ENABLED"), ("autotrade_smc", "AUTOTRADE_ENABLED_SMC"), ("telegram_alerts_smc", "TELEGRAM_ALERTS_SMC"),
                    ("htf_enabled", "HTF_ENABLED"), ("autotrade_htf", "AUTOTRADE_ENABLED_HTF"), ("telegram_alerts_htf", "TELEGRAM_ALERTS_HTF"),   # v0.99.732
                    ("cfl_enabled", "CFL_ENABLED"), ("telegram_alerts_cfl", "TELEGRAM_ALERTS_CFL"), ("autotrade_cfl", "AUTOTRADE_ENABLED_CFL"),   # v0.99.739, v0.99.740
+                   ("rbs_enabled", "RBS_ENABLED"), ("telegram_alerts_rbs", "TELEGRAM_ALERTS_RBS"),   # v0.99.757
                    ("dlm_enabled", "DLM_ENABLED"), ("autotrade_dlm2", "AUTOTRADE_ENABLED_DLM"), ("telegram_alerts_dlm", "TELEGRAM_ALERTS_DLM"),
                    ("dlm_binance", "DLM_BINANCE"), ("dlm_more_coins", "DLM_MORE_COINS"), ("bn_others", "BN_OTHERS"), ("bn_cross", "BN_CROSS")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
         if _k in updates:
@@ -7569,6 +7572,7 @@ LOOP_MAX_GAP_SEC = {
     "smc_loop": 60 * 60,   # v0.99.678 — 🧱 SMC, beats per coin while the hour's levels are counted
     "htf_loop": 60 * 60,   # v0.99.732 — 📏 HTF, the same
     "cfl_loop": 60 * 60,   # v0.99.739 — 🔄 Классика наоборот
+    "rbs_loop": 60 * 60,   # v0.99.757 — 🚀 Пробой 4ч
     "dlm_loop": 30 * 60,   # v0.99.679 — ⚡ 15m deep limits, beats every 5 s and per coin while scanning
     "hdg_loop": 10 * 60,   # v0.99.628 — 🪞 hedge mirror, beats every 5 s
     "auto_update_loop": 30 * 60,   # v0.99.637 — beats every 10 min
@@ -7586,7 +7590,7 @@ LOOP_MAX_GAP_SEC = {
 LOOP_LABELS = {
     "scan_loop": "Volume скан", "msnr_live_loop": "MSNR живой скан",
     "lsw_live_loop": "Sweep живой скан", "snr_live_loop": "S/R живой скан",
-    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "cas_loop": "🌊 Каскад", "smc_loop": "🧱 SMC", "htf_loop": "📏 HTF-уровни", "cfl_loop": "🔄 Классика наоборот", "dlm_loop": "⚡ Лимитки 4ч+2ч", "hdg_loop": "🪞 Хедж", "auto_update_loop": "автообновление", "nx_loop": "Нейро",
+    "prx_loop": "Peak Reversal", "rbx_loop": "📈 Пробой", "cas_loop": "🌊 Каскад", "smc_loop": "🧱 SMC", "htf_loop": "📏 HTF-уровни", "cfl_loop": "🔄 Классика наоборот", "rbs_loop": "🚀 Пробой 4ч", "dlm_loop": "⚡ Лимитки 4ч+2ч", "hdg_loop": "🪞 Хедж", "auto_update_loop": "автообновление", "nx_loop": "Нейро",
     "reconcile_loop": "сверка позиций (автоторговля)",
     "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
     "snr_backtest_loop": "S/R бэктест",
@@ -26331,7 +26335,7 @@ def _zones_outbox_save():
 
 TELEGRAM_ALERTS_TRADE_RESULTS = os.environ.get("VP_TG_TRADE_RESULTS", "1") == "1"            # v0.99.457
 TELEGRAM_TRADE_RESULTS_REAL_ONLY = os.environ.get("VP_TG_TRADE_RESULTS_REAL", "0") == "1"
-_TRADE_MOD_NAMES = {"rbx": "📈 Пробой", "cas": "🌊 Каскад", "smc": "🧱 SMC", "htf": "📏 HTF-уровни", "cfl": "🔄 Классика наоборот", "dlm": "⚡ Лимитки 4ч+2ч", "zones_zm": "🎯 Сильные зоны", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "zones": "Зоны",
+_TRADE_MOD_NAMES = {"rbx": "📈 Пробой", "rbs": "🚀 Пробой 4ч", "cas": "🌊 Каскад", "smc": "🧱 SMC", "htf": "📏 HTF-уровни", "cfl": "🔄 Классика наоборот", "dlm": "⚡ Лимитки 4ч+2ч", "zones_zm": "🎯 Сильные зоны", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "zones": "Зоны",
                     "zones_own": "Зоны · 🔎 наш поиск", "zones_appr": "Зоны · движение к зоне", "zones_pb": "Зоны · 🧪 откат"}
 
 
@@ -32359,6 +32363,7 @@ def model_refresh_once():
                                          ("🧱 SMC", SMC_MODEL_FILE, SMC_MODEL_URL, SMC_MODEL_VER, _smc_lock, _SMC),
                                          ("📏 HTF-уровни", HTF_MODEL_FILE, HTF_MODEL_URL, HTF_MODEL_VER, _htf_lock, _HTF),   # v0.99.732
                                          ("🔄 Классика наоборот", CFL_MODEL_FILE, CFL_MODEL_URL, CFL_MODEL_VER, _cfl_lock, _CFL),   # v0.99.739
+                                         ("🚀 Пробой 4ч", RBS_MODEL_FILE, RBS_MODEL_URL, RBS_MODEL_VER, _rbs_lock, _RBS),   # v0.99.757
                                          ("⚡ Лимитки 4ч+2ч", DLM_MODEL_FILE, DLM_MODEL_URL, DLM_MODEL_VER, _dlm_lock, _DLM)):
         try:
             local, lm = 0, None
@@ -35245,6 +35250,375 @@ def api_cfl_status():
         return jsonify(cfl_stats())
     except Exception as e:
         log_error(f"cfl status: {e}")
+        return jsonify({"err": f"статистика не посчиталась: {e}"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v0.99.757 — 🚀 Пробой 4ч (the user: the daily 📈 breakout holds up to half a year — "максимум сутки двое", then "посадку
+# можно уменьшить? поработай с фильтрами", then "встраивай"). The lab (tools/winrate/rb_short.py, rbs_feat.py, rbs_ml.py,
+# money_rbs*.py): a close out of a narrow range (20 / 30 / 50 bars < 4 x ATR100) with the 4h chart's own EMA200 alone is
+# ~0R after the fees on 1h / 2h / 4h with a hold of 1-2 days; a model on 31 features of the breakout (its strength, the
+# squeeze, the volume, the trend, RSI, BTC, the hour) keeps the ones it scores above +0.8R: walk-forward 2023-2026 (each
+# year's model trained on the years before) +0.20 / +0.25 / +0.48 / +0.21R a trade, ~4 a week, 1.3 days in a trade. The
+# entry at the next 4h open, the stop 1.5 ATR, the take 2R, out at the 12th bar's close (48 h). The neighbours (the stop
+# 1.5-2 ATR, the threshold 0.6-1.0) are positive too; a 1-day hold, a 1 ATR stop are not; 2022 with a model trained on
+# 2021 alone was negative. Virtual first (the user's choice): 3-4 weeks of live signals against the backtest.
+RBS_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_rbs_model.json")
+RBS_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_rbs_model.json"
+RBS_MODEL_VER = 1
+RBS_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_rbs_state.json")
+RBS_ENABLED = os.environ.get("VP_RBS", "1") == "1"
+TELEGRAM_ALERTS_RBS = os.environ.get("VP_TG_ALERTS_RBS", "1") == "1"
+RBS_FNAMES = ["side", "N", "rg", "brk", "body", "bar_atr", "atr_pct", "atr_x", "vol_x", "vol_x5", "d_e50", "d_e200", "sl_e200", "sl_e50",
+              "r1", "r3", "r6", "r12", "r24", "r48", "pos100", "rsi", "up_run", "b_r6", "b_r24", "b_r72", "b_e200", "b_atr", "b_rel24",
+              "hour", "wday"]
+RBS_W4 = 999   # 4h bars a coin is looked at: 1000 with the forming one = Binance's weight 5 (1500 — 10); t_rbs_bot: the features within 0.2% of the research's, the score the same
+RBS_DELAY = 240   # s after the 4h close: after 🔄's scan of the same close, the weight spread
+_RBS = {"model": None, "err": None, "trades": [], "scan": None, "last_bar": None, "loaded": False}
+_rbs_lock = threading.Lock()
+
+
+def rbs_model():
+    with _rbs_lock:
+        m = _RBS["model"]
+    if m and m.get("ver") == RBS_MODEL_VER:
+        return m
+    m = None
+    try:
+        if os.path.exists(RBS_MODEL_FILE):
+            with open(RBS_MODEL_FILE) as f:
+                m = json.load(f)
+            if m.get("ver") != RBS_MODEL_VER or m.get("feats") != RBS_FNAMES:
+                m = None
+    except Exception as e:
+        log_error(f"rbs model read: {e}")
+        m = None
+    if not m:
+        try:
+            r = requests.get(RBS_MODEL_URL.format(ref="main"), params={"nocache": int(time.time())}, timeout=120)
+            r.raise_for_status()
+            m = r.json()
+            if m.get("ver") != RBS_MODEL_VER or not m.get("models"):
+                raise RuntimeError(f"версия модели {m.get('ver')} вместо {RBS_MODEL_VER}")
+            if m.get("feats") != RBS_FNAMES:
+                raise RuntimeError("признаки модели не совпадают с кодом бота — нужно обновить бота")
+            tmp = RBS_MODEL_FILE + ".new"
+            with open(tmp, "w") as f:
+                json.dump(m, f, separators=(",", ":"))
+            os.replace(tmp, RBS_MODEL_FILE)
+        except Exception as e:
+            with _rbs_lock:
+                _RBS["err"] = f"модель не скачалась: {e}"
+            log_error(f"rbs model download: {e}")
+            return None
+    with _rbs_lock:
+        _RBS.update({"model": m, "err": None})
+    return m
+
+
+def rbs_load():
+    try:
+        if os.path.exists(RBS_STATE_FILE):
+            with open(RBS_STATE_FILE) as f:
+                d = json.load(f)
+            with _rbs_lock:
+                for k in ("trades", "scan", "last_bar"):
+                    if d.get(k) is not None:
+                        _RBS[k] = d[k]
+    except Exception as e:
+        log_error(f"rbs state load: {e}")
+    _RBS["loaded"] = True
+
+
+def rbs_save():
+    try:
+        with _rbs_lock:
+            data = json.dumps({"trades": _RBS["trades"][-600:], "scan": _RBS["scan"], "last_bar": _RBS["last_bar"]}, separators=(",", ":"))
+        tmp = RBS_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(data)
+        os.replace(tmp, RBS_STATE_FILE)
+    except Exception as e:
+        log_error(f"rbs state save: {e}")
+
+
+# ---- the research's indicators (rb_short.py / rbs_feat.py), pure Python ----
+def _rbs_ema(x, n):   # from the first value
+    k = 2 / (n + 1); out = []; e = x[0] if x else 0.0
+    for v in x:
+        e = e + k * (v - e); out.append(e)
+    return out
+
+
+def _rbs_wilder(x, n):
+    out = [_NAN] * len(x)
+    if len(x) < n:
+        return out
+    v = sum(x[:n]) / n; out[n - 1] = v
+    for i in range(n, len(x)):
+        v = (v * (n - 1) + x[i]) / n; out[i] = v
+    return out
+
+
+def _rbs_sma(x, n):
+    out = [_NAN] * len(x); s = 0.0
+    for i, v in enumerate(x):
+        s += v
+        if i >= n:
+            s -= x[i - n]
+        if i >= n - 1:
+            out[i] = s / n
+    return out
+
+
+def rbs_ind(O, H, L, C, V):
+    n = len(C)
+    tr = [H[0] - L[0]] + [max(H[i], C[i - 1]) - min(L[i], C[i - 1]) for i in range(1, n)]
+    d = [0.0] + [C[i] - C[i - 1] for i in range(1, n)]
+    up = _rbs_wilder([max(x, 0.0) for x in d], 14); dn = _rbs_wilder([max(-x, 0.0) for x in d], 14)
+    rsi = [100 - 100 / (1 + u / max(w, 1e-12)) if u == u and w == w else _NAN for u, w in zip(up, dn)]
+    return {"tr": tr, "atr": _rbs_wilder(tr, 14), "a100": _rbs_sma(tr, 100), "e50": _rbs_ema(C, 50), "e200": _rbs_ema(C, 200), "rsi": rsi,
+            "vs": _rbs_sma(V, 20), "vs5": _rbs_sma(V, 5)}
+
+
+def rbs_events_at(ind, H, L, C, i, r):
+    """the breakouts closing bar i: [(side, N, rg, brk)] — a close out of the N bars before (and the bar before still inside
+    its own N-bar range), the range < kmax x ATR100, with the chart's EMA200"""
+    out = []
+    a, a100 = ind["atr"][i], ind["a100"][i]
+    if i < 210 or not (a == a) or not (a100 == a100) or a100 <= 0:
+        return out
+    for N in r.get("ns") or (20, 30, 50):
+        if i - 1 - N < 0:
+            continue
+        hh, ll = max(H[i - N:i]), min(L[i - N:i]); hp, lp = max(H[i - 1 - N:i - 1]), min(L[i - 1 - N:i - 1])
+        s = 1 if (C[i] > hh and C[i - 1] <= hp) else (-1 if (C[i] < ll and C[i - 1] >= lp) else 0)
+        rg = (hh - ll) / a100
+        if not s or not rg < float(r.get("kmax", 4.0)) or s * (C[i] - ind["e200"][i]) <= 0:
+            continue
+        out.append((s, N, rg, s * (C[i] - (hh if s > 0 else ll)) / a))
+    return out
+
+
+def _f32(v):
+    return struct.unpack("f", struct.pack("f", v))[0] if v == v and abs(v) < 3e38 else (_NAN if v != v else v)
+
+
+def rbs_features(T, O, H, L, C, V, ind, i, s, N, rg, brk, B):
+    """the research's 31 features of the breakout closing bar i (rbs_feat.py, 4h), float32 as the model learned them"""
+    a = ind["atr"][i]; t = T[i] + 14400
+    bT = B["T"]; bj = -1
+    for j in range(len(bT) - 1, -1, -1):   # BTC's last 4h bar closed by then
+        if bT[j] + 14400 <= t:
+            bj = j; break
+    if bj < 0:
+        return None
+    BC = B["C"]
+    r_ = lambda k: s * (C[i] / C[i - k] - 1) / (a / C[i]) if i >= k else _NAN
+    br = lambda k: (BC[bj] / BC[bj - k] - 1) * 100 * s if bj >= k else _NAN
+    run_ = float(sum(1 for j in range(i - 9, i + 1) if s * ((C[j] > O[j]) - (C[j] < O[j])) > 0))
+    hh100, ll100 = max(H[i - 99:i + 1]), min(L[i - 99:i + 1]); w100 = max(hh100 - ll100, 1e-12)
+    k6, k24, k72 = 1, 6, 18
+    e50, e200, vs, vs5 = ind["e50"], ind["e200"], ind["vs"], ind["vs5"]
+    sg = lambda x: (x > 0) - (x < 0)
+    f = [s, N, rg, brk, s * (C[i] - O[i]) / max(H[i] - L[i], 1e-12), (H[i] - L[i]) / a, a / C[i] * 100, a / ind["a100"][i],
+         V[i] / max(vs[i - 1], 1e-12), vs5[i] / max(vs[i - 5], 1e-12),
+         s * (C[i] - e50[i]) / a, s * (C[i] - e200[i]) / a, s * (e200[i] - e200[i - 20]) / a, s * (e50[i] - e50[i - 10]) / a,
+         r_(1), r_(3), r_(6), r_(12), r_(24), r_(48),
+         ((C[i] - ll100) / w100) if s > 0 else ((hh100 - C[i]) / w100),
+         (ind["rsi"][i] - 50) * s, run_, br(k6), br(k24), br(k72), s * sg(BC[bj] - B["e200"][bj]), B["atr"][bj] / BC[bj] * 100,
+         r_(k24) - br(k24) / (a / C[i] * 100) if i >= k24 else _NAN,
+         (t // 3600) % 24, ((t // 86400) + 3) % 7]
+    return [_f32(float(x)) for x in f]
+
+
+def rbs_score(m, f):
+    return sum(zm_tree_pred(t_, f) for t_ in m["models"]) / len(m["models"])
+
+
+def _rbs_closed(k, t_close):
+    """a klines' lists -> the bars closed by t_close (the forming one off)"""
+    n = sum(1 for t in k[0] if t + 14400 <= t_close)
+    return [x[:n] for x in k]
+
+
+def rbs_scan(t_close):
+    """at a 4h close: every coin's breakouts of that bar scored, the ones above the threshold opened (virtual) at the next
+    4h open — one trade a coin at a time"""
+    m = rbs_model()
+    if not m:
+        return
+    r = m.get("rule") or {}
+    thr = float(r.get("thr", 0.8))
+    bk = _rbs_closed(cfl_klines("BTCUSDT", "4h", RBS_W4 + 1), t_close)
+    if not bk[0] or bk[0][-1] + 14400 != t_close:
+        log_error("rbs scan: no BTC 4h bar for this close")
+        return
+    bi = rbs_ind(*bk[1:])
+    B = {"T": bk[0], "C": bk[4], "e200": bi["e200"], "atr": bi["atr"]}
+    cands, near, coins, evn, errs = [], [], 0, 0, 0
+    for bsym in m.get("coins") or []:
+        heartbeat("rbs_loop")
+        try:
+            k = cfl_klines(bsym, "4h", RBS_W4 + 1)
+            fill = next((o for t, o in zip(k[0], k[1]) if t == t_close), None)   # the next bar's open, if it has started
+            T, O, H, L, C, V = _rbs_closed(k, t_close)
+            if len(T) < 300 or T[-1] + 14400 != t_close:
+                continue
+            coins += 1
+            ind = rbs_ind(O, H, L, C, V); i = len(C) - 1
+            ev = rbs_events_at(ind, H, L, C, i, r)
+            best = None
+            for s, N, rg, brk in ev:
+                f = rbs_features(T, O, H, L, C, V, ind, i, s, N, rg, brk, B)
+                if f is None:
+                    continue
+                sc = rbs_score(m, f); evn += 1
+                if best is None or sc > best["score"]:
+                    best = {"bsym": bsym, "side": s, "N": N, "score": round(sc, 4), "atr": ind["atr"][i], "close": C[i], "fill": fill}
+            if best:
+                near.append(best)
+                if best["score"] > thr and float(r.get("stop_atr", 1.5)) * best["atr"] > best["close"] * 0.003:   # the research: no stop under 0.3%
+                    cands.append(best)
+            time.sleep(0.5)
+        except Exception as e:
+            errs += 1
+            if errs <= 3:
+                log_error(f"rbs {bsym}: {e}")
+    cands.sort(key=lambda c: -c["score"]); near.sort(key=lambda c: -c["score"])
+    opened = sum(1 for c in cands if rbs_open(c, t_close, m))
+    with _rbs_lock:
+        _RBS["scan"] = {"t": int(time.time()), "bar": t_close, "coins": coins, "events": evn, "thr": thr, "cands": len(cands), "opened": opened, "errs": errs,
+                        "near": [{"symbol": _bn_gate_sym(c["bsym"])[0], "side": c["side"], "N": c["N"], "score": c["score"]} for c in near[:8]]}
+        _RBS["last_bar"] = t_close
+    rbs_save()
+
+
+def rbs_set_fill(tr, fill_bn, r):
+    fill = fill_bn / tr["scl"]; risk = float(r.get("stop_atr", 1.5)) * tr["atr_bn"] / tr["scl"]
+    tr.update({"entry": fill, "sl": fill - tr["side"] * risk, "tp": fill + tr["side"] * float(r.get("take_r", 2.0)) * risk})
+
+
+def rbs_open(c, t_close, m):
+    r = m.get("rule") or {}
+    with _rbs_lock:
+        if any(t["bsym"] == c["bsym"] and t["status"] == "OPEN" for t in _RBS["trades"]):   # one trade a coin at a time (the research)
+            return False
+    sym, scl = _bn_gate_sym(c["bsym"])
+    hold = int(r.get("hold_bars", 12))
+    tr = {"id": f"rbs_{c['bsym']}_{t_close}", "symbol": sym, "bsym": c["bsym"], "scl": scl, "side": c["side"], "direction": "LONG" if c["side"] > 0 else "SHORT",
+          "N": c["N"], "score": c["score"], "atr_bn": c["atr"], "t_in": t_close, "hold": hold, "until": t_close + hold * 14400, "status": "OPEN",
+          "result": None, "r": None, "exit": None, "t_out": None, "real": False, "rv": RBS_MODEL_VER, "entry": None, "sl": None, "tp": None}
+    if c.get("fill"):
+        rbs_set_fill(tr, c["fill"], r)
+    with _rbs_lock:
+        if any(t["id"] == tr["id"] for t in _RBS["trades"]):
+            return False
+        _RBS["trades"].append(tr)
+    if TELEGRAM_ALERTS_RBS:
+        px = tr["entry"] or c["close"] / scl; risk = float(r.get("stop_atr", 1.5)) * c["atr"] / scl
+        send_telegram(f"{'🟢' if c['side'] > 0 else '🔴'} {sym.replace('_USDT', '')} {tr['direction']} · 🚀 Пробой 4ч (коридор {c['N']} свечей, оценка {c['score']:+.2f}R)\n"
+                      f"вход ~{px:.6g} · стоп {px - c['side'] * risk:.6g} · тейк {px + c['side'] * float(r.get('take_r', 2.0)) * risk:.6g} · до {hold * 4} ч\n"
+                      "без сделки (только сигнал)", category="rbs")
+    return True
+
+
+def rbs_walk(cs, s, e, sl, tp, hold):
+    """the research's walk (rb_short.outcome, the take): the 4h bars from the entry bar — the stop first, then the take, out at
+    the hold-th bar's close -> (kind, exit, bar index) or None while open"""
+    for j, (_t, _o, h, l, c) in enumerate(cs[:hold]):
+        if (l <= sl) if s > 0 else (h >= sl):
+            return "LOSS", sl, j
+        if (h >= tp) if s > 0 else (l <= tp):
+            return "WIN", tp, j
+    if len(cs) >= hold:
+        return "TIME_EXIT", cs[hold - 1][4], hold - 1
+    return None
+
+
+def rbs_settle(now=None):
+    now = now or time.time()
+    m = _RBS.get("model") or {}
+    r = m.get("rule") or {}
+    fee, fund = float(r.get("fee", 0.001)), float(r.get("fund", 0.0003))
+    with _rbs_lock:
+        opn = [t for t in _RBS["trades"] if t["status"] == "OPEN"]
+    changed = False
+    for t in opn:
+        try:
+            k = cfl_klines(t["bsym"], "4h", min(1500, int((now - t["t_in"]) // 14400) + 3))
+            cs = [(tt, o / t["scl"], hh / t["scl"], ll / t["scl"], cc / t["scl"]) for tt, o, hh, ll, cc in zip(*k[:5]) if tt >= t["t_in"] and tt + 14400 <= now]
+            if t.get("entry") is None:
+                o0 = next((o for tt, o in zip(k[0], k[1]) if tt == t["t_in"]), None)
+                if o0 is None:
+                    continue
+                rbs_set_fill(t, o0, r); changed = True
+            s, e = t["side"], t["entry"]; risk = abs(e - t["sl"]) or 1e-12
+            res = rbs_walk(cs, s, e, t["sl"], t["tp"], int(t.get("hold") or 12))
+            if not res:
+                continue
+            kind, ex, j = res
+            rr = s * (ex - e) / risk - (e * fee + e * fund * (j + 1) * 4 / 24) / risk
+            with _rbs_lock:
+                t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(cs[j][0] + 14400), "r": round(rr, 3)})
+            changed = True
+            notify_trade_result("rbs", t["symbol"], t["direction"], e, ex, kind, round(rr, 3), real=False, note=f"🚀 Пробой 4ч · коридор {t.get('N')}")
+        except Exception as e_:
+            log_error(f"rbs trade {t.get('symbol')}: {e_}")
+    if changed:
+        rbs_save()
+
+
+def rbs_loop():
+    time.sleep(160)
+    rbs_load()
+    try:
+        rbs_model()
+    except Exception as e:
+        log_error(f"rbs_loop model: {e}")
+    last_settle = None
+    while True:
+        heartbeat("rbs_loop")
+        try:
+            if RBS_ENABLED:
+                now = time.time()
+                b = int(now // 14400 * 14400)
+                if b != _RBS.get("last_bar") and now - b >= RBS_DELAY:
+                    rbs_scan(b)
+                h = int(now // 3600 * 3600)
+                if h != last_settle and now - h >= 90:
+                    rbs_settle(now); last_settle = h
+        except Exception as e:
+            log_error(f"rbs_loop: {e}")
+            with _rbs_lock:
+                _RBS["err"] = str(e)[:200]
+        time.sleep(30)
+
+
+def rbs_stats():
+    m = _RBS.get("model") or {}
+    with _rbs_lock:
+        trades = list(_RBS["trades"]); scan, err = _RBS.get("scan"), _RBS.get("err")
+    fin = [t for t in trades if t["status"] == "CLOSED" and t.get("r") is not None]
+    rs = [t["r"] for t in fin]
+    t0 = min((t["t_in"] for t in trades), default=None)
+    weeks = max(1.0, (time.time() - t0) / (7 * 86400)) if t0 else None
+    return {"on": RBS_ENABLED, "tg": TELEGRAM_ALERTS_RBS, "err": err, "scan": scan, "auto": False,
+            "model": {k: m.get(k) for k in ("ver", "trained_to", "rule", "research")} if m else None,
+            "open": [t for t in trades if t["status"] == "OPEN"][-30:],
+            "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for r in rs if r > 0) / len(rs), 1) if rs else None,
+            "sum": round(sum(rs), 2) if rs else None, "per_week": round(len(fin) / weeks, 1) if weeks else None,
+            "live_check": live_vs_bt("rbs", [t["r"] for t in fin if t.get("rv") == RBS_MODEL_VER]),
+            "last": [{k: t.get(k) for k in ("symbol", "side", "N", "t_in", "r", "result", "entry", "sl", "tp", "exit", "t_out", "score")}
+                     for t in sorted(fin, key=lambda t: -t["t_in"])[:30]]}
+
+
+@app.route("/api/rbs/status")
+def api_rbs_status():
+    try:
+        return jsonify(rbs_stats())
+    except Exception as e:
+        log_error(f"rbs status: {e}")
         return jsonify({"err": f"статистика не посчиталась: {e}"})
 
 
@@ -42079,6 +42453,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="smc" style="color:#a1887f;">🧱 SMC</div>
   <div class="tab" data-tab="htf" style="color:#9ccc65;">📏 HTF</div>
   <div class="tab" data-tab="cfl" style="color:#ffb74d;">🔄 Классика</div>
+  <div class="tab" data-tab="rbs" style="color:#ff8a65;">🚀 Пробой 4ч</div>
   <div class="tab" data-tab="dlm" style="color:#ffd54f;">⚡ Лимитки</div>
   <div class="tab" data-tab="hdg" style="color:#b39ddb;">🪞 Хедж</div>
   <div class="tab" data-tab="signals">Volume</div>
@@ -42105,6 +42480,7 @@ INDEX_HTML = """<!doctype html>
   <div id="smcPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="htfPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="cflPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="rbsPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="dlmPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="hdgPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="snrPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
@@ -42394,6 +42770,23 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">новая виртуальная сделка (итог — переключателем «Итоги сделок»)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTgCfl"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+
+    <details class="settingsGroup" style="--mod-color:#ff8a65;"><summary class="settingsGroupTitle">🚀 Пробой 4ч</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (4ч — 127 монет, виртуально)</div>
+          <div class="sub">на закрытии каждой 4ч-свечи: пробои узкого коридора по тренду, модель берёт оцененные выше +0.8R (~4 в неделю); вход на открытии следующей свечи, стоп 1.5 ATR, тейк 2R, выход через 48 ч. Пока без реальных сделок</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setRbs"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ 🚀 Пробой 4ч в Telegram</div>
+          <div class="sub">новая виртуальная сделка (итог — переключателем «Итоги сделок»)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgRbs"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -42842,6 +43235,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('smcPanel').style.display = activeTab === 'smc' ? 'block' : 'none';
     document.getElementById('htfPanel').style.display = activeTab === 'htf' ? 'block' : 'none';
     document.getElementById('cflPanel').style.display = activeTab === 'cfl' ? 'block' : 'none';
+    document.getElementById('rbsPanel').style.display = activeTab === 'rbs' ? 'block' : 'none';
     document.getElementById('dlmPanel').style.display = activeTab === 'dlm' ? 'block' : 'none';
     document.getElementById('hdgPanel').style.display = activeTab === 'hdg' ? 'block' : 'none';
     document.getElementById('snrPanel').style.display = activeTab === 'snr' ? 'block' : 'none';
@@ -42863,6 +43257,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'smc') refreshSmc();
     if (activeTab === 'htf') refreshHtf();
     if (activeTab === 'cfl') refreshCfl();
+    if (activeTab === 'rbs') refreshRbs();
     if (activeTab === 'dlm') refreshDlm();
     if (activeTab === 'hdg') refreshHdg();
     if (activeTab === 'snr') refreshSnr();
@@ -46110,13 +46505,13 @@ function btFromPrx(t) {
 }
 async function btChart(o) {
   const coin = (o.s || '').replace('_USDT', ''), side = o.d > 0 ? 'ЛОНГ' : 'ШОРТ';
-  document.getElementById('vgiModalTitle').textContent = `${coin} | ${o.mod === 'rbx' ? '📈 Пробой' : (o.mod === 'emx' ? '📐' : (o.mod === 'cas' ? '🌊 Каскад' : (o.mod === 'smc' ? '🧱 SMC' : (o.mod === 'htf' ? '📏 HTF' : (o.mod === 'cfl' ? '🔄 Классика' : (o.mod === 'dlm' ? '⚡ Лимитка' : 'P/R'))))))} ${btLabel(o)} | ${side}${o.live ? '' : ' · бэктест'}`;
+  document.getElementById('vgiModalTitle').textContent = `${coin} | ${o.mod === 'rbx' ? '📈 Пробой' : o.mod === 'rbs' ? '🚀 Пробой' : (o.mod === 'emx' ? '📐' : (o.mod === 'cas' ? '🌊 Каскад' : (o.mod === 'smc' ? '🧱 SMC' : (o.mod === 'htf' ? '📏 HTF' : (o.mod === 'cfl' ? '🔄 Классика' : (o.mod === 'dlm' ? '⚡ Лимитка' : 'P/R'))))))} ${btLabel(o)} | ${side}${o.live ? '' : ' · бэктест'}`;
   document.getElementById('vgiModalParams').textContent = 'загрузка...';
   vgiModal.classList.add('open');
   window._vgiLast = null;
   window._emwRedraw = null;
   let d;
-  try { d = await (await fetch(`/api/btchart/${o.s}?c=${o.c}&t=${o.t}&x=${o.x || 0}&before=${o.mod === 'rbx' ? (o.n || (o.c === '12h' ? 30 : 20)) + 3 : (o.mod === 'cas' ? 90 : (o.mod === 'dlm' ? 16 : 6))}${o.mod === 'dlm' ? '&after=12' : ''}`)).json(); } catch (e) { document.getElementById('vgiModalParams').textContent = 'нет связи'; return; }
+  try { d = await (await fetch(`/api/btchart/${o.s}?c=${o.c}&t=${o.t}&x=${o.x || 0}&before=${o.mod === 'rbx' || o.mod === 'rbs' ? (o.n || (o.c === '12h' ? 30 : 20)) + 3 : (o.mod === 'cas' ? 90 : (o.mod === 'dlm' ? 16 : 6))}${o.mod === 'dlm' ? '&after=12' : ''}`)).json(); } catch (e) { document.getElementById('vgiModalParams').textContent = 'нет связи'; return; }
   if (d.error) { document.getElementById('vgiModalParams').textContent = d.error; return; }
   const coarse = d.c && d.c !== o.c;   // v0.99.659 — Gate has no 1h candles that old: drawn on 4h / day
   if (coarse) o = Object.assign({}, o, {c: d.c, c0: o.c});
@@ -46175,6 +46570,11 @@ function btDraw(bars, o) {
     dots.push({t: bars[ei].time, p: o.e, color: '#ffffff', r: 5});
   }
   if (xi >= 0 && o.xp != null) dots.push({t: bars[xi].time, p: o.xp, color: o.r > 0 ? '#34d399' : (o.r < 0 ? '#f87171' : '#a6b0c0'), r: 6});
+  if (o.mod === 'rbs' && ei > 0 && ei - 1 - (o.n || 20) >= 0) {   // v0.99.757 — 🚀 the range the 4h close broke out of
+    const N = o.n || 20, si = ei - 1, rb = bars.slice(si - N, si);
+    zones.push({from: si - N, to: si - 1, p1: Math.min(...rb.map(b => b.low)), p2: Math.max(...rb.map(b => b.high)), color: '#ff8a65', alpha: 0.16});
+    legend.push({text: `коридор ${N} свечей 4ч`, color: '#ff8a65'});
+  }
   if (o.mod === 'rbx' && ei > 0) {
     const N = o.n || (o.c === '12h' ? 30 : 20), si = ei - 1;   // the breakout bar, the range = the N bars before it
     if (si - N >= 0) {
@@ -46399,6 +46799,52 @@ function btFromHtf(t) {   // v0.99.732 — a live 📏 trade -> the chart's trad
   return {mod: 'htf', s: t.symbol, d: 1, c: '1h', lvl: t.fam, t: t.hour || t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true, vnote: btVnote(t)};
 }
 
+async function refreshRbs() {   // v0.99.757 — 🚀 Пробой 4ч: the 4h breakout picked by a model, out within 48 h (virtual)
+  const panel = document.getElementById('rbsPanel');
+  let d;
+  try { d = await (await fetch('/api/rbs/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
+  const card = (title, body) => `<div class="zcard"><div class="zh">${title}</div>${body}</div>`;
+  const tile = (l, v, n) => `<div class="ztile"><div class="zl">${l}</div><div class="zv">${v}</div>${n ? `<div class="zn">${n}</div>` : ''}</div>`;
+  const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  const coin = s => (s || '').replace('_USDT', '');
+  const hm = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
+  const m = d.model, rs = (m && m.research) || {}, rule = (m && m.rule) || {};
+  const pill = d.on === false ? '<span class="pill neg">выключено</span>' : '<span class="pill">виртуально</span>';
+  let top = `<div class="dim hintx">Пробой узкого коридора на 4ч-свечах 127 монет: свеча закрылась за максимумом / минимумом последних 20, 30 или 50 свечей, коридор уже 4 средних хода (ATR100), по тренду EMA200. Сам по себе такой пробой после комиссий даёт ~0R — сделку выбирает модель: она смотрит на силу пробоя, сжатие, объём, тренд, RSI, BTC и время, и берёт только те, что оценивает выше +${rule.thr || 0.8}R. Сделка короткая — не больше 2 суток.</div>`;
+  if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
+  else {
+    const ys = rs.years || {};
+    top += `<div class="dim" style="font-size:var(--fs-xs);">обучена до ${new Date(m.trained_to * 1000).toLocaleDateString('ru-RU')}</div>
+      <div class="zsub">Проверка на истории — каждый год модель его не видела (училась на годах до него). Результат на сделку:</div>
+      ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y, sub: `${x.n} сделок · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R · без модели ${x.all_avg > 0 ? '+' : ''}${x.all_avg}R`, v: x.avg, hi: y === '2026'}; }), v => sgR(+(+v).toFixed(2)))}
+      <div class="zstrip"><span>в среднем <b>${sgR(rs.avg)}</b></span><span>WR <b>${rs.wr || '—'}%</b></span><span>~<b>${rs.per_week || '—'}</b> в неделю</span><span>в сделке ~<b>${rs.days_med || '—'}</b> сут</span></div>
+      <div class="zsub">Вход — по рынку на открытии следующей 4ч-свечи, стоп — <b>${rule.stop_atr || 1.5} ATR</b> (4ч), тейк — <b>${rule.take_r || 2} риска</b>, через ${(rule.hold_bars || 12) * 4} ч выход по закрытию свечи. Одна сделка на монету.</div>
+      <div class="zbanner warn" style="margin-top:6px;">Пока только виртуально. В 2022 модель, обученная на одном 2021, ошиблась (−0.1…−0.5R на сделку) — поэтому сначала 3–4 недели живых сигналов против бэктеста, потом решение о реальных сделках.</div>`;
+  }
+  let h = card(`🚀 Пробой 4ч ${pill}`, top);
+  const sc = d.scan, near = (sc && sc.near) || [];
+  const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;">
+      <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span> <span class="dim">коридор ${a.N} · ${a.score > 0 ? '+' : ''}${a.score}R</span></span>`;
+  h += card('🔎 Последний скан', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, 'монет')}${tile('пробоев', sc.events, 'на этой свече')}${tile('выше порога', sc.cands, `открыто ${sc.opened}`)}</div>
+    <div class="dim" style="font-size:var(--fs-xs);">порог +${sc.thr}R · свеча ${hm(sc.bar)} · ${hm(sc.t)}${sc.errs ? ` · не ответили ${sc.errs} монет` : ''} · следующий скан на закрытии 4ч-свечи (00, 04, 08… UTC)</div>
+    ${near.length ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:6px;">лучшие оценки пробоев этой свечи:</div><div style="margin-top:4px;">${near.map(chip).join('')}</div>` : ''}`
+    : `<div class="dim" style="font-size:var(--fs-sm);">первый скан — на закрытии ближайшей 4ч-свечи (00, 04, 08… UTC); 127 монет — несколько минут</div>`);
+  const op = d.open || [];
+  const row = (t, i) => `<div onclick="btLiveOpen('rbs', ${i})" style="padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);cursor:pointer;"><div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;">
+      <span><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim"> · коридор ${t.N} · ${t.score > 0 ? '+' : ''}${t.score}R · виртуально</span></span>
+      <span class="dim" style="white-space:nowrap;">${t.entry ? 'вход ' + fmtNum(t.entry) : 'вход — открытие свечи'} · до ${hm(t.until)}</span></div></div>`;
+  h += card('📈 Сделки (виртуально)', `<div class="ztiles z3">${tile('открыто', op.length, '')}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_week != null ? `~${d.per_week} в неделю` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', 'виртуально')}</div>
+    ${op.length ? `<div style="margin-top:8px;">${op.slice(-30).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
+    ${liveCheckHtml(d.live_check)}
+    ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length}${lastSplit(d.last)})</summary>${d.last.map((t, i) => btRowHtml(btFromRbs(t), `btLiveOpen('rbs', ${Math.min(30, op.length) + i})`)).join('')}</details>` : ''}`);
+  window._btLive.rbs = op.slice(-30).reverse().map(btFromRbs).concat((d.last || []).map(btFromRbs));
+  h += btSection('rbs', 'Сделки бэктеста — 2023–2026 (каждый год модель не видела)');
+  h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как нашёлся</summary><div class="zsub">Дневной 📈 Пробой держит сделки до полугода. Короче — пробой на 1ч, 2ч и 4ч с выходом за 1–2 суток — сам по себе в плюс не выходит (лучшие варианты около 0R, минус хотя бы в одном году). Модель на 31 признаке пробоя отбирает примерно 1 из 10 пробоев 4ч — и на годах, которых не видела, они дают +0.20…+0.48R. Соседние настройки (стоп 1.5–2 ATR, порог 0.6–1.0) тоже в плюсе; выход через сутки и стоп 1 ATR — нет. В связке с ⚡ на 1% риска обычный год со $100 ~$49k вместо ~$29k (просадка 70% вместо 66%).</div></details>`;
+  setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
+}
+function btFromRbs(t) {   // v0.99.757 — a live 🚀 trade -> the chart's trade (4h candles)
+  return {mod: 'rbs', s: t.symbol, d: t.side, c: '4h', n: t.N, t: t.t_in, e: t.entry, sl: t.sl, tp: t.tp, x: t.t_out, xp: t.exit, r: t.r, k: t.result, live: true};
+}
 async function refreshCfl() {   // v0.99.739 — 🔄 Классика наоборот: against the classic indicators' signals; v0.99.740 — longs only, the real trades by a switch (off)
   const panel = document.getElementById('cflPanel');
   let d;
@@ -47585,6 +48031,7 @@ async function refreshAll() {
   if (activeTab === 'smc') await refreshSmc();
   if (activeTab === 'htf') await refreshHtf();
   if (activeTab === 'cfl') await refreshCfl();
+  if (activeTab === 'rbs') await refreshRbs();
   if (activeTab === 'dlm') await refreshDlm();
   if (activeTab === 'hdg') await refreshHdg();
   if (activeTab === 'snr') await refreshSnr();
@@ -47950,6 +48397,8 @@ const setInputs = {
   telegram_alerts_htf: document.getElementById('setTgHtf'),
   cfl_enabled: document.getElementById('setCfl'),   // v0.99.739
   telegram_alerts_cfl: document.getElementById('setTgCfl'),
+  rbs_enabled: document.getElementById('setRbs'),   // v0.99.757
+  telegram_alerts_rbs: document.getElementById('setTgRbs'),
   autotrade_cfl: document.getElementById('setAutotradeCfl'),   // v0.99.740
   autotrade_zones_zm: document.getElementById('setAutotradeZonesZm'),
   telegram_alerts_zones_zm: document.getElementById('setTgZonesZm'),
@@ -49457,6 +49906,7 @@ if __name__ == "__main__":
     threading.Thread(target=smc_loop, daemon=True).start()   # v0.99.678 — 🧱 SMC levels
     threading.Thread(target=htf_loop, daemon=True).start()   # v0.99.732 — 📏 HTF levels
     threading.Thread(target=cfl_loop, daemon=True).start()   # v0.99.739 — 🔄 Классика наоборот (virtual)
+    threading.Thread(target=rbs_loop, daemon=True).start()   # v0.99.757 — 🚀 Пробой 4ч (virtual)
     threading.Thread(target=dlm_loop, daemon=True).start()   # v0.99.679 — ⚡ 15m deep limits
     threading.Thread(target=bno_loop, daemon=True).start()   # v0.99.698 — P/R, SMC, EMA positions on Binance
     threading.Thread(target=hdg_loop, daemon=True).start()   # v0.99.628 — 🪞 hedge mirror
