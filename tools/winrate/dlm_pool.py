@@ -4,10 +4,10 @@ coin groups: base (the bot's 210) / new (226). -> <LABSTORE>/wf/pool_<group>.jso
 import sys, os, json, numpy as np, calendar, collections
 ST = os.environ.get("LABSTORE", "/home/user/vp-lab-store")
 ts = lambda y, m=1, d=1: calendar.timegm((y, m, d, 0, 0, 0))
-def pool(groups, cap=20):
+def pool(groups, cap=20, sdir=None):
     ev = []
     for st in ("wick4h", "close2h"):
-        z0 = np.load(f"{ST}/wf/scores_{st}.npz", allow_pickle=True); z = {k: z0[k] for k in z0.files}   # read once (an NpzFile unpacks on every access)
+        z0 = np.load(f"{sdir or ST + '/wf'}/scores_{st}.npz", allow_pickle=True); z = {k: z0[k] for k in z0.files}   # read once (an NpzFile unpacks on every access)
         m = np.isfinite(z["score"]) & (z["score"] >= z["thr"]) & np.isin(z["grp"], groups)
         for k in np.flatnonzero(m):
             ev.append((int(z["t1h"][k]), -float(z["score"][k]), st, str(z["coin"][k]), int(z["side"][k]), int(z["t"][k]), float(z["fill"][k]),
