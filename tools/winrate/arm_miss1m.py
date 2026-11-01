@@ -26,8 +26,9 @@ for st in ("wick4h", "close2h"):
     z0 = np.load(f"{M.ST}/wf/allorders_{st}.npz", allow_pickle=True); z = {k: z0[k] for k in z0.files}
     ii = np.flatnonzero(z["filled"] & (z["t1h"] >= 1761955200) & (z["t1h"] < 1793491200))
     for k in rng.choice(ii, N // 2, replace=False):
-        O.append({k_: (z[k_][k].item() if hasattr(z[k_][k], "item") else z[k_][k]) for k_ in ("coin", "t", "side", "lv", "atr", "t1h")})
-res = {x: [0, 0] for x in (0.3, 0.5, 0.7, 1.0)}; n = 0
+        O.append({k_: (z[k_][k].item() if hasattr(z[k_][k], "item") else z[k_][k]) for k_ in ("coin", "t", "side", "lv", "atr", "t1h", "R")} | {"st": st})
+ARMS = (0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 1.0)
+res = {x: [0, 0] for x in ARMS}; n = 0; per = []
 for o in O:
     month = str(np.datetime64(int(o["t1h"]), "s").astype("datetime64[M]"))
     a = m1(o["coin"], month)
@@ -39,12 +40,16 @@ for o in O:
     dist_op = s * (w[:, 1] - lv) / at; dist_cl = s * (w[:, 4] - lv) / at
     t = np.flatnonzero(dist_lo <= 0)
     if not len(t): continue
-    n += 1; t = t[0]
+    n += 1; t = t[0]; flags = {}
     for x in res:
         first_near = np.flatnonzero(dist_lo <= x)[0]
         if first_near == t and dist_op[t] > x:   # came from beyond the arming distance and reached the level in one minute
-            if dist_cl[t] > 0: res[x][0] += 1   # and closed back: a wick through and back — likely missed
-            elif dist_cl[t] < -0.3: res[x][1] += 1   # closed far through: the bot gives it up
+            if dist_cl[t] > 0: res[x][0] += 1; flags[x] = 1   # and closed back: a wick through and back — likely missed
+            elif dist_cl[t] < -0.3: res[x][1] += 1; flags[x] = 2   # closed far through: the bot gives it up
+    per.append({"coin": o["coin"], "t": int(o["t"]), "side": int(o["side"]), "st": o["st"], "R": float(o["R"]), "miss": {str(k): v for k, v in flags.items()}})
 print(f"filled orders checked on 1m: {n}")
+Rall = np.array([p_["R"] for p_ in per])
 for x, (wk, far) in res.items():
-    print(f"   armed at {x} ATR: a wick through and back within the minute {wk} ({wk / n * 100:.1f}%), closed > 0.3 ATR through {far} ({far / n * 100:.1f}%)")
+    rm = [p_["R"] for p_ in per if str(x) in p_["miss"]]
+    print(f"   armed at {x} ATR: a wick through and back in a minute {wk} ({wk / n * 100:.1f}%), > 0.3 ATR through {far} ({far / n * 100:.1f}%) | the missed ones' R {np.mean(rm) if rm else float('nan'):+.3f} (all {Rall.mean():+.3f})")
+json.dump(per, open(f"{M.ST}/wf/arm_miss1m.json", "w"))

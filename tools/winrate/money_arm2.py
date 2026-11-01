@@ -34,7 +34,11 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     arm_d = float(kw.get("arm", ARM)); hf = float(kw.get("hf", 1.0)); cnt = kw.get("cnt", "1") == "1"
     if "dlm" in kw: rk = dict(rk, dlm=float(kw["dlm"]))
     if "k" in kw: rk = {m_: v_ * float(kw["k"]) for m_, v_ in rk.items()}   # every module's risk x k
+    for m_ in ("prv", "smc", "emx", "htf"):
+        if m_ in kw: rk = dict(rk, **{m_: float(kw[m_])})
+    if rk["dlm"] <= 0: OR = []   # ⚡ off
     if "mp" in kw: maxpos = int(kw["mp"])
+    oth = kw.get("oth") == "1"; ma = int(kw.get("ma", 999))   # the other modules take an armed ⚡ limit's room; at most `ma` armed ⚡ limits
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
     OR = [o for o in OR if A - 64 * 3600 <= o["t"] < B]; io = 0; act = []
     OT = sorted(OT, key=lambda v: v["t0"]); jo = bisect.bisect_left([v["t0"] for v in OT], A)
@@ -69,6 +73,12 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             v = OT[jo]; jo += 1
             if v["t0"] < h - 3600 or any(o["sym"] == v["sym"] for o in pos) or any(a["sym"] == v["sym"] for a in armed.values()): continue
             s_, hn, room = fit(v, eq)
+            if oth and armed and (s_ is None or s_["rd"] < rd_of(v, eq) * 0.999):   # no room: the armed ⚡ limits (the lowest priority first) make way
+                freed = 0.0
+                for k2, a in sorted(armed.items(), key=lambda x: x[1]["o"]["prio"]):
+                    if room + freed >= hn: break
+                    del armed[k2]; freed += hf * a["heat"]
+                s_, hn, room = fit(v, eq)
             if s_: pos.append(dict(v, **s_))
         while io < len(OR) and OR[io]["t"] <= h:
             act.append(OR[io]); io += 1
@@ -112,6 +122,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
                     del armed[k2]; freed += hf * a["heat"]; n2 -= cnt
                 if freed or n2 < nd:
                     nd = n2; s_, hn, room = fit(o, eq) if nd < maxpos else (None, 0, 0)
+            if s_ and not touch and len(armed) >= ma: s_ = None   # the armed limits' own cap
             if s_ and nd < maxpos:
                 if touch:   # reached this hour: filled at once
                     done.add(k_)
