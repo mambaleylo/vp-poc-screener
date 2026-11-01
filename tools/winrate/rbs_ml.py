@@ -9,7 +9,7 @@ TFS = [int(x) for x in os.environ.get("TFS", "1,2,4").split(",")]
 STOPS = (1.0, 1.5, 2.0); EXITS = ("t2", "t3", "dc10", "dc20", "p1t3", "p1dc10"); HOLDS = (1, 2, 5)
 RULES = [(sk, xn, hd) for sk in (1.5, 2.0) for xn in ("t2", "t3", "p1t3", "dc10") for hd in (1, 2)]
 TEST = (2023, 2024, 2025, 2026); WK = {2023: 52, 2024: 52, 2025: 52, 2026: 43}
-THR = (0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4)
+THR = tuple(float(x) for x in os.environ.get("THR", "0,0.05,0.1,0.15,0.2,0.3,0.4").split(","))
 P = dict(objective="regression", learning_rate=0.05, num_leaves=31, min_data_in_leaf=300, feature_fraction=0.8, bagging_fraction=0.8,
          bagging_freq=1, lambda_l2=10.0, verbose=-1, num_threads=1, seed=1)
 
@@ -67,7 +67,7 @@ if __name__ == "__main__":
         for o in Pl.imap_unordered(job, [(tf, ru) for tf in TFS for ru in RULES]):
             res.append(o)
             print(o["tf"], o["rule"], "все: " + " ".join(f"{o['all'][Y][0]:+.2f}" for Y in TEST), flush=True)
-    json.dump(res, open(f"{ST}/wf/rbs_ml.json", "w"), indent=0)
+    json.dump(res, open(f"{ST}/wf/rbs_ml{os.environ.get('OUTSUF', '')}.json", "w"), indent=0)
     best = []
     for o in res:
         for th, row in o["thr"].items():
