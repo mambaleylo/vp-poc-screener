@@ -8,3 +8,8 @@ f2_s21h2/
 s21h2_models.json
 s21h2_mk/
 *_roll_*.npz
+htf_rl.npy
+roll_*.npz
+s23_4h/
+f2_s23_4h/
+s23_mk/
