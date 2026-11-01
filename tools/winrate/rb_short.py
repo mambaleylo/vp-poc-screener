@@ -11,7 +11,7 @@ TFH = int(sys.argv[1]) if len(sys.argv) > 1 else 4
 NS, KMAX = ((20, 30, 50) if TFH < 24 else (15, 20, 30)), 4.0
 STOPS = (1.0, 1.5, 2.0)
 EXITS = ("t2", "t3", "dc10", "dc20", "p1t3", "p1dc10") + (("t5", "p1t5") if TFH >= 12 else ())
-HOLDS_D = (2, 5, 10) if TFH < 12 else (5, 10, 20)   # 12h / 1d: the deployed signal, the hold capped
+HOLDS_D = (1, 2, 5) if TFH < 12 else (5, 10, 20)   # 12h / 1d: the deployed signal, the hold capped
 FEE, FUND = 0.001, 0.0003
 
 

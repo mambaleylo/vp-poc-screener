@@ -9,7 +9,7 @@ def P(tfh):
     """the grid rb_short.py used for this chart"""
     NS = (20, 30, 50) if tfh < 24 else (15, 20, 30)
     EX = ("t2", "t3", "dc10", "dc20", "p1t3", "p1dc10") + (("t5", "p1t5") if tfh >= 12 else ())
-    return NS, EX, ((2, 5, 10) if tfh < 12 else (5, 10, 20))
+    return NS, EX, ((1, 2, 5) if tfh < 12 else (5, 10, 20))
 YRS = list(range(2021, 2027)); TR, CK = (2021, 2022, 2023), (2024, 2025, 2026)
 WK = {2021: 52, 2022: 52, 2023: 52, 2024: 52, 2025: 52, 2026: 43}
 
