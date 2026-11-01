@@ -21,6 +21,10 @@ def wt_days(sym):
         ap = (H + L + C) / 3; esa = ema(ap, 10); dd = ema(np.abs(ap - esa), 10)
         ci = (ap - esa) / np.maximum(0.015 * dd, 1e-12); WT[sym] = (u, ema(ci, 21))
     return WT[sym]
+def wt_x(v):
+    """the coin's daily WaveTrend x the side on the last closed day before the touch (None when short)"""
+    u, w = wt_days(v["sym"]); j = np.searchsorted(u, (v["t0"] - 3600) // 86400) - 1
+    return w[j] * v["side"] if j >= 60 else 0.0
 def osc(v):
     if v["mod"] != "dlm": return 1.0
     u, w = wt_days(v["sym"]); day = (v["t0"] - 3600) // 86400   # the last closed day before the touch hour
