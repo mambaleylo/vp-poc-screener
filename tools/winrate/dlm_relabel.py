@@ -19,7 +19,7 @@ for st in ("wick4h", "close2h"):
             fl, t1h, fill, R, kind, tout = DE.fill_walk(T1, O1, H1, L1, C1, z["t"].astype(np.int64), z["side"].astype(np.int64), z["lv"], z["atr"], bs, p["ch"],
                                                         DE.ALIVE, DE.HOLD, TAKE, SOFT, HARD, DE.FEE_IN, DE.FEE_TAKE, DE.FEE_OUT, DE.FUND)
             keep = fl
-            z = {k: (v[keep] if hasattr(v, "__len__") and len(v) == len(fl) else v) for k, v in z.items()}
+            z = {k: (v[keep] if getattr(v, "ndim", 0) > 0 and len(v) == len(fl) else v) for k, v in z.items()}
             z.update(R=R[keep].astype(np.float32), kind=kind[keep].astype(np.int8), tout=tout[keep], t1h=t1h[keep], fill=fill[keep])
         np.savez_compressed(fo + ".tmp.npz", **z); os.replace(fo + ".tmp.npz", fo); n += 1
     print(st, "relabelled", n, flush=True)
