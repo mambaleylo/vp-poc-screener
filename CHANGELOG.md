@@ -21151,20 +21151,21 @@ v0.99.751 — ⚡ real trades: the real fills from Binance (the lab's "live vs b
 - Tests: t_dlm_binance (a stop filled at 9.70 instead of 9.80 in two fills with commissions -> the exit 9.70, r_real
   -1.53 vs -1.0, the tab's slippage), t_dlm_ui, t_bn_others, t_mod_ui, t_lab_export — OK.
 
-v0.99.752 — ⚡ the room by the score: no room -> a higher-scored limit takes an armed lower one's place
-- The bot's arming in the lab's money (tools/winrate money_arm.py): a ⚡ limit goes on the exchange when the price is within
-  1 ATR and from then holds its risk in the open-risk cap and a place of the 20; the lab had counted the room only from the
-  fill. With the bot's rule ("the first come takes the room"; the room short -> a scaled-down limit, or none) the bundle +
-  HTF a year from $100: bad ~$10.9k · usual ~$37.9k · drawdowns ~71%. The rule's variants: the waiting ones queued by the
-  score $54k; armed lower limits taken off at random $70k (bad $8.8k); by the raw score $77k / $16.7k / 59%; by the score
-  over its stream's threshold $90.6k / $17.0k / 60%, better in 143 of 144 windows. Two parts: no scaled-down crumbs
-  holding the places, and the room to the better trades (the bad year and the drawdown).
-- _dlm_arm: the waiting orders within reach armed by _dlm_prio (the score / the stream's threshold) instead of by the
-  distance; _dlm_bump before each: no room (the positions + limits cap, the side's cap, or — cross margin — the open-risk
-  cap below the order's full risk) -> the armed, not filled ⚡ limits of a lower priority (the lowest first) back to
-  waiting until it fits, each saying why; none lower -> nothing changes (the order waits as before). VP_DLM_PRIO=0 off.
-- EXPECT_YEAR with the arming and the priority (money_expect3.py): the bundle + HTF bad ~$17.0k · usual ~$90.6k · good
-  ~$1.03M · drawdowns ~60%; without HTF $16.9k / $82.2k / $952k / 60%; ⚡ alone $4.4k / $15.6k / $62.2k / 71%. The armed
-  limits that never fill are not in the lab (the pool keeps the filled orders) — they hold room too: live expect less.
-- Tests: t_dlm_binance (2 places, two armed limits of a low score: a higher one takes the lowest one's place, it goes back
-  to waiting saying why; a lower one takes nothing and waits), t_hdr_htf — OK.
+v0.99.752 — the honest header: the armed ⚡ limits hold room, the never-filled ones too; the room-by-score rule in, off
+- The strictest money so far (tools/winrate dlm_allorders.py, money_arm2.py, money_expect4.py): every ⚡ order the yearly
+  models choose 2023–2026, the filled AND the never-filled (61.9k orders, 8.8k filled — 80–90% never fill), hour by hour
+  as the bot runs them: a limit goes on the exchange when the price is within 1 ATR and from then holds its risk in the
+  95% open-risk cap and a place of the 20; one limit a coin (the nearer one, the bot's swap); the price reaching it while
+  it waits for room -> no trade. The earlier money had counted the room only from the fill: at the market-wide drops,
+  when ⚡'s best trades fill, the armed limits that never fill hold the room and the good fills are skipped (the taken
+  ones +0.13R a trade against +0.25R of the pool). EXPECT_YEAR (a year from $100, 144 windows, 3 random orders): the
+  bundle + HTF bad ~$2.4k · usual ~$7.2k · good ~$23.6k · drawdowns ~83%; without HTF $2.0k / $5.3k / $17.8k / 83%; ⚡
+  alone $248 / $679 / $2.6k / 85%. No liquidation in any window.
+- Checked on the way: not counting the armed limits in the cap -> the account wiped out in the drops (the cap is
+  needed); every risk x0.5 / x0.33 -> fewer skipped, a lower drawdown (69% / 60%) but far less money (usual $3.0k / $1.4k);
+  the arming at 0.5 ATR instead of 1 — usual ~$12.5k, with the room by the score ~$19.5k (36 windows) — to be checked on
+  1-min candles for the fills the bot would miss before it is used.
+- _dlm_prio / _dlm_bump (the room by the score: no room -> an armed, not filled ⚡ limit of a lower score over its
+  stream's threshold back to waiting) and the arming by the priority — in the code, off (VP_DLM_PRIO=1 turns it on): at
+  the 1 ATR arming it is no better (56 of 144 windows).
+- Tests: t_dlm_binance (the rule's mechanics with it on), t_hdr_htf — OK.

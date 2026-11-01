@@ -28536,11 +28536,12 @@ _PROC_START = time.time()
 # v0.99.749 — EMA 3%, the open risk cap 95%
 # v0.99.750 — ⚡'s exits 1.75 / 1.2 ATR, and the ⚡ trades of an hour in a random order (money_expect2.py, 5 orders averaged:
 # the bot gives the room to the first level the price reaches; the lab's score order was ~25% too kind)
-# v0.99.752 — the bot's arming in the money (a limit holds its risk from the moment it goes on the exchange; money_arm.py,
-# money_expect3.py) and the room by the score (DLM_PRIO); the never-filled armed limits are not in the lab (they hold room too)
-EXPECT_YEAR = {"dlm": {"p10": 4431, "p50": 15585, "p90": 62177, "dd": 71, "last12": 25443},
-               "bundle": {"p10": 16857, "p50": 82177, "p90": 951994, "dd": 60, "last12": 67874},
-               "bundle_htf": {"p10": 17032, "p50": 90565, "p90": 1033108, "dd": 60, "last12": 79159}}
+# v0.99.752 — the strictest money (tools/winrate money_arm2.py / money_expect4.py): every ⚡ order hour by hour — an armed
+# limit holds its room from the moment it goes on the exchange, the never-filled ones (80–90% of them) too; the bot's
+# nearer-limit swap; the earlier numbers had counted the room only from the fill
+EXPECT_YEAR = {"dlm": {"p10": 248, "p50": 679, "p90": 2624, "dd": 85, "last12": 370},
+               "bundle": {"p10": 2014, "p50": 5325, "p90": 17750, "dd": 83, "last12": 1625},
+               "bundle_htf": {"p10": 2439, "p50": 7248, "p90": 23587, "dd": 83, "last12": 5446}}
 
 
 @app.route("/api/boot")
@@ -36480,7 +36481,7 @@ def _dlm_take_watch(t, mark=None, now=None):
 DLM_ARM_ATR = float(os.environ.get("VP_DLM_ARM_ATR", "1.0"))   # v0.99.691 — a real limit goes on the exchange when the price is this close (v0.99.702: 0.3 -> 1.0 ATR — at 0.3 a fast spike through the level beat the 5 s polls: ~20% of the backtest's fills missed live, arm_miss.py on 1m; at 1.0 ~2%)
 DLM_SWAP_ATR = 0.25   # v0.99.715 — the parallel stream's limit takes the coin's place on the exchange when this much nearer
 DLM_DISARM_ATR = 1.6   # ... and comes off again (back to waiting) when the price goes this far from it (v0.99.702: 1.0 -> 1.6)
-DLM_PRIO = os.environ.get("VP_DLM_PRIO", "1") == "1"   # v0.99.752 — no room: a higher-scored limit takes an armed lower one's place (_dlm_bump)
+DLM_PRIO = os.environ.get("VP_DLM_PRIO", "0") == "1"   # v0.99.752 — no room: a higher-scored limit takes an armed lower one's place (_dlm_bump); off: with the never-filled limits in the money (money_arm2.py) no better at the 1 ATR arming
 DLM_THROUGH_ATR = 0.3   # v0.99.702 — the price already this far through a waiting order's level: no trade (another entry than the research's)
 
 

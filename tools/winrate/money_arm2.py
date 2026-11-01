@@ -33,6 +33,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     kw = dict(x.split("=") for x in rule.split("|")[1:]); rule = rule.split("|")[0]   # "A|arm=0.5|hf=0.5|cnt=0"
     arm_d = float(kw.get("arm", ARM)); hf = float(kw.get("hf", 1.0)); cnt = kw.get("cnt", "1") == "1"
     if "dlm" in kw: rk = dict(rk, dlm=float(kw["dlm"]))
+    if "k" in kw: rk = {m_: v_ * float(kw["k"]) for m_, v_ in rk.items()}   # every module's risk x k
     if "mp" in kw: maxpos = int(kw["mp"])
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
     OR = [o for o in OR if A - 64 * 3600 <= o["t"] < B]; io = 0; act = []
