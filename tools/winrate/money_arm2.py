@@ -16,7 +16,7 @@ MF = json.load(open("/home/user/vp-poc-screener/vp_dlm_model.json")); SS = {s["n
 def orders():
     out = []
     for st in ("wick4h", "close2h"):
-        z0 = np.load(f"{M.ST}/wf/allorders_{st}.npz", allow_pickle=True); z = {k: z0[k] for k in z0.files}; bs = DE.STREAMS[st]["hh"] * 3600; sa, ha = SS[st]["stop_atr"], SS[st]["hard_stop_atr"]
+        z0 = np.load(f"{M.ST}/wf/allorders_{st}{os.environ.get('ALLSUF', '')}.npz", allow_pickle=True); z = {k: z0[k] for k in z0.files}; bs = DE.STREAMS[st]["hh"] * 3600; sa, ha = SS[st]["stop_atr"], SS[st]["hard_stop_atr"]
         for k in range(len(z["t"])):
             lv, a = float(z["lv"][k]), float(z["atr"][k]); f = bool(z["filled"][k]); e = float(z["fill"][k]) if f else lv
             out.append({"coin": str(z["coin"][k]), "sym": M.bn(str(z["coin"][k])), "t": int(z["t"][k]), "until": int(z["t"][k]) + 4 * bs, "side": int(z["side"][k]),
