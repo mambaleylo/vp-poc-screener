@@ -68,6 +68,8 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     WF = {"osc": O.W_OSC, "nocut": lambda v: O.W_OSC(v) / M.W2S(v), "w2s": M.W2S,
           "oldwt": lambda v: M.W2S(v) * ((1.25 if O.wt_x(v) <= -3 else (0.85 if O.wt_x(v) >= 22 else 1.0)) if v["mod"] == "dlm" else 1.0)}[kw.get("wf", "osc")]
     if "ex" in kw: OR = EXITS[kw["ex"]]
+    if "pm" in kw: OR = [o for o in OR if o["prio"] >= float(kw["pm"])]   # a stricter threshold: the score >= pm x the year's
+    if "life" in kw: OR = [dict(o, until=o["t"] + int((o["until"] - o["t"]) * float(kw["life"]) / 4)) for o in OR]   # the limit's life in bars (4)
     if "heat" in kw: heat = float(kw["heat"])
     oth = kw.get("oth") == "1"; ma = int(kw.get("ma", 999))   # the other modules take an armed ⚡ limit's room; at most `ma` armed ⚡ limits
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
