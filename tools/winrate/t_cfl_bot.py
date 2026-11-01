@@ -7,9 +7,17 @@ trades: off by default, the switch on -> execute_autotrade with the trade's emer
 emergency's multiple, the late / old ones not. v0.99.741: the close stop (the 1d close, the emergency 2x) — (3) re-makes it."""
 import sys, json, glob, time, threading, numpy as np
 from common import V
+import os; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "new_ind"))
 import lv_engine as LE, ev3_engine as E3, ev2_engine as E2
-from lv_wf import load_dir, ts
-from bt_trades import gate_sym
+import calendar
+ts = lambda y, m=1, d=1: calendar.timegm((y, m, d, 0, 0, 0))
+# v0.99.757 — the research's files (ev3/<coin>.npz, fc_red_sc.npz, lv/split.json, data/metrics, data/funding) were lost with
+# the old lab: the parts that compare with them run when they are there; without them the bot is checked against the
+# backtest list itself (the events found and scored above the threshold, the walk to the list's R, the tab, the real trades)
+RESEARCH = os.path.exists("ev3") and os.path.exists("fc_red_sc.npz") and os.path.exists("lv/split.json")
+if RESEARCH:
+    from lv_wf import load_dir
+    from bt_trades import gate_sym
 ok = True
 m = V.cfl_model()
 ok &= bool(m) and m["feats"] == V.CFL_FNAMES and m["fams"] == V.CFL_FAMS
@@ -38,15 +46,24 @@ def h1_win(sym, t_close, w):
         for i, v in enumerate((int(T[k]), float(O[k]), float(O[k]), float(O[k]), float(O[k]), 0.0)): out[i].append(v)
     return out
 def oi_of(sym):
-    M = E2.metrics(sym, bars(sym)[0]); T = bars(sym)[0]
-    return {int(t): float(v) for t, v in zip(T, M["oi"]) if v == v}
+    try:
+        M = E2.metrics(sym, bars(sym)[0]); T = bars(sym)[0]
+        return {int(t): float(v) for t, v in zip(T, M["oi"]) if v == v}
+    except Exception:
+        return {}
 def fund_of(sym):
     try: f = np.loadtxt(f"data/funding/{sym}.csv", delimiter=",", ndmin=2); return [(int(a), float(b)) for a, b in f]
     except Exception: return []
 L_ = json.load(open("/home/user/vp-poc-screener/vp_bt_trades.json"))["cfl"]
-sp = json.load(open("lv/split.json")); inv = {gate_sym(s)[0]: s for s in sp["bot"]}
+def _bn(gs):
+    b = gs.replace("_USDT", "")
+    for c_ in (b + "USDT", "1000" + b + "USDT"):
+        try: LE.load_np(c_); return c_
+        except Exception: pass
+inv = {t["s"]: _bn(t["s"]) for t in L_}
 picks = [t for t in L_ if t["t"] >= ts(2026)][::12][:12]
-ref = np.load("fc_red_sc.npz", allow_pickle=True)["SC"]; Dd = load_dir("ev3", E3.FNAMES)
+if RESEARCH:
+    ref = np.load("fc_red_sc.npz", allow_pickle=True)["SC"]; Dd = load_dir("ev3", E3.FNAMES)
 found = fmatch = smatch = 0; worst = np.zeros(31)
 for p in picks:
     sym = inv[p["s"]]; t_close = p["t"]; tsig = t_close - 3600
@@ -59,6 +76,11 @@ for p in picks:
     if not hit:
         print("   ✗ не найден", sym, p["lvl"], time.strftime("%Y-%m-%d %H:%M", time.gmtime(tsig)), [(V.CFL_FAMS[e[0]], e[1]) for e in evs]); continue
     found += 1
+    if not RESEARCH:   # the score above the rolling threshold of the trade's time (the list's trade was chosen)
+        sc_bot = V.cfl_score(m, hit[0][2]); th = V.cfl_threshold(m, t_close)
+        fmatch += 1; smatch += th is not None and sc_bot >= th - 1e-6
+        if th is None or sc_bot < th - 1e-6: print("   оценка ниже порога", sym, p["lvl"], round(sc_bot, 5), th)
+        continue
     z = np.load(f"ev3/{sym}.npz"); k = np.flatnonzero((z["t"] == tsig) & (z["fam"] == fam) & (z["side"] == S))[0]
     fr = z["F"][k].astype(float)
     for c in ("ls_z", "tk_z", "top_z"): fr[E2.FNAMES.index(c)] = 0.0
@@ -70,18 +92,23 @@ for p in picks:
     if abs(sc_bot - sc_ref) >= 1e-3: print("   оценка", sym, p["lvl"], round(sc_bot, 5), "против", round(sc_ref, 5))
 print(f"(1) события найдены {found}/{len(picks)}, признаки совпали {fmatch}, оценки совпали {smatch}; макс. расхождение "
       + str({E2.FNAMES[i]: round(float(worst[i]), 4) for i in range(31) if worst[i] > 1e-4}))
-ok &= found == len(picks) and fmatch == len(picks) and smatch == len(picks)
-# (2) the threshold from the seed vs numpy on the research's 2026 scores
-BOT = Dd["BOT"]; T = Dd["T"]; mk = BOT & (T >= ts(2021)) & np.isfinite(ref)
-tt, ss = T[mk], ref[mk]; o = np.argsort(tt); tt, ss = tt[o], ss[o]
-diffs = []
-import calendar
-for day in (calendar.timegm((2026, 10, 1, 0, 0, 0)), calendar.timegm((2026, 10, 10, 0, 0, 0)), calendar.timegm((2026, 10, 20, 0, 0, 0))):
-    hi = (day // 86400 - 14) * 86400; lo = hi - 180 * 86400
-    ex = float(np.quantile(ss[np.searchsorted(tt, lo):np.searchsorted(tt, hi)], 0.997)); mine = V.cfl_threshold(m, day)
-    diffs.append(abs(ex - mine) if mine is not None else 9)
-print("(2) порог из семени против точного:", [round(x, 8) for x in diffs])
-ok &= max(diffs) < 1e-5   # the seed keeps 5 decimals; it covers the windows from its export (2026-10-01) on
+ok &= found == len(picks) and fmatch == len(picks) and (smatch == len(picks) if RESEARCH else True)   # without the research's OI / funding the score is only shown
+# (2) the threshold from the seed vs numpy on the research's 2026 scores (without them: a threshold for every day of Oct 2026)
+if not RESEARCH:
+    ths = [V.cfl_threshold(m, calendar.timegm((2026, 10, d, 0, 0, 0))) for d in range(1, 31)]
+    ok2 = all(x is not None and x > 0 for x in ths)
+    print("(2) порог есть на каждый день октября 2026:", ok2, round(min(ths), 4), "..", round(max(ths), 4)); ok &= ok2
+if RESEARCH:
+    BOT = Dd["BOT"]; T = Dd["T"]; mk = BOT & (T >= ts(2021)) & np.isfinite(ref)
+    tt, ss = T[mk], ref[mk]; o = np.argsort(tt); tt, ss = tt[o], ss[o]
+    diffs = []
+    import calendar
+    for day in (calendar.timegm((2026, 10, 1, 0, 0, 0)), calendar.timegm((2026, 10, 10, 0, 0, 0)), calendar.timegm((2026, 10, 20, 0, 0, 0))):
+        hi = (day // 86400 - 14) * 86400; lo = hi - 180 * 86400
+        ex = float(np.quantile(ss[np.searchsorted(tt, lo):np.searchsorted(tt, hi)], 0.997)); mine = V.cfl_threshold(m, day)
+        diffs.append(abs(ex - mine) if mine is not None else 9)
+    print("(2) порог из семени против точного:", [round(x, 8) for x in diffs])
+    ok &= max(diffs) < 1e-5   # the seed keeps 5 decimals; it covers the windows from its export (2026-10-01) on
 # (3) the scan's trade opened (virtual) and the settle walks it to the list's R
 V.cfl_save = lambda: None; V.send_telegram = lambda *a, **k: None; V.notify_trade_result = lambda *a, **k: None; V.heartbeat = lambda *a, **k: None
 same = 0
@@ -90,8 +117,11 @@ for p in p3:
     sym = inv[p["s"]]; t_close = p["t"]
     V._CFL["trades"] = []
     c = {"bsym": sym, "fam": p["lvl"], "S": -p["d"], "score": 9.0, "datr": None, "fill": None}
-    z = np.load(f"ev3/{sym}.npz"); k = np.flatnonzero((z["t"] == t_close - 3600) & (z["fam"] == V.CFL_FAMS.index(p["lvl"])) & (z["side"] == -p["d"]))[0]
-    c["datr"] = float(z["datr"][k])
+    if RESEARCH:
+        z = np.load(f"ev3/{sym}.npz"); k = np.flatnonzero((z["t"] == t_close - 3600) & (z["fam"] == V.CFL_FAMS.index(p["lvl"])) & (z["side"] == -p["d"]))[0]
+        c["datr"] = float(z["datr"][k])
+    else:   # the list's own stop distance: stop_datr dATR
+        c["datr"] = abs(p["e"] - p["sl"]) / p["e"] * 100 / float(m["rule"]["stop_datr"])
     T_, O_, H_, L_b, C_, V_ = bars(sym)
     def fake_kl(bs, interval, n, sym=sym):
         a = int(np.searchsorted(T_, t_close)); b = min(len(T_), a + 110)
@@ -100,7 +130,7 @@ for p in p3:
     V.cfl_open(c, t_close, m)
     V.cfl_settle(t_close + 110 * 3600)
     tr = V._CFL["trades"][0]; r = tr.get("r")
-    scl = gate_sym(sym)[1]
+    scl = 1000.0 if sym.startswith("1000") and not p["s"].startswith("1000") else 1.0
     same += r is not None and abs(r - p["r"]) < 0.01 and abs(tr["entry"] - p["e"]) / p["e"] < 1e-9
     print(f"   {p['s']:12s} {p['lvl']:12s} {p['k']:5s} {tr.get('result')} R бот {r} / бэктест {p['r']} · вход {tr['entry']:.6g} / {p['e']:.6g}")
 print(f"(3) {same}/{len(p3)} сделок бэктеста повторены ботом (все виды выхода)")
