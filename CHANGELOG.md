@@ -21246,3 +21246,14 @@ v0.99.756 — the cross leverage ceiling 17x (was 14x) (the user: "17", "Да")
 - The lab: rb_short.py, rbs_eval.py, rbs_feat.py, rbs_ml.py, money_rbs.py, money_rbs2.py, rbs_export.py. The trees are
   exported without lgbpure's 7-digit rounding (a -1e-35 threshold rounded to 0 sent the zeros the other way).
 - t_rbs_bot: the bot's breakouts / 31 features / score / trade on the lab's real 4h bars match the research exactly.
+
+## v0.99.758
+- The cross leverage: no 17x ceiling — each coin its own Binance maximum at the position's size, within the account's cap
+  (a new account: 20x until 21.11) (the user: "динамическое плечо для каждой монеты"). The loss at the stop and the
+  liquidation (by the whole balance) do not change; the margin a position locks does: at 17x the free margin still cut /
+  skipped the bursts' trades, from 20x never (money_lev2.py: 20 / 25 / 30 / 40 / 50x and the coin's maximum all the same
+  ~$38-40k, with the margin never short $34k). The bundle + HTF a year from $100: bad ~$6.6k (was $7.3k) · usual ~$39.7k
+  (was $28.9k) · good ~$269k (was $199k), the drawdown ~69% (was 66%), the last 12 months ~$44.6k (was $33.5k); better in
+  97 of 144 windows, the 2023-started windows worse ($12.7k -> $10.4k).
+- The lab: money_corr.py (the open risk a side / the long-short difference — far worse; the fees: BNB +5.7%, the takes as
+  a limit +1% more — not done), money_lev2.py, money_arm2 sh= / net= / nomg=.
