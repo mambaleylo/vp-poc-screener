@@ -10,12 +10,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dlm_engine as DE, money_multi as M, money_expect as X, money_osc as O, money_params as MP
 from multiprocessing import Pool
 ARM, DISARM = 1.0, 1.6
-RULES = sys.argv[1].split(",") if len(sys.argv) > 1 else ["A", "Bn"]; SEEDS = [1, 2, 3, 4, 5]
+RULES = sys.argv[1].split(",") if len(sys.argv) > 1 else ["A", "Bn"]; SEEDS = [1, 2, 3]
 MF = json.load(open("/home/user/vp-poc-screener/vp_dlm_model.json")); SS = {s["name"]: s for s in MF["streams"]}
 def orders():
     out = []
     for st in ("wick4h", "close2h"):
-        z = np.load(f"{M.ST}/wf/allorders_{st}.npz", allow_pickle=True); bs = DE.STREAMS[st]["hh"] * 3600; sa, ha = SS[st]["stop_atr"], SS[st]["hard_stop_atr"]
+        z0 = np.load(f"{M.ST}/wf/allorders_{st}.npz", allow_pickle=True); z = {k: z0[k] for k in z0.files}; bs = DE.STREAMS[st]["hh"] * 3600; sa, ha = SS[st]["stop_atr"], SS[st]["hard_stop_atr"]
         for k in range(len(z["t"])):
             lv, a = float(z["lv"][k]), float(z["atr"][k]); f = bool(z["filled"][k]); e = float(z["fill"][k]) if f else lv
             out.append({"coin": str(z["coin"][k]), "sym": M.bn(str(z["coin"][k])), "t": int(z["t"][k]), "until": int(z["t"][k]) + 4 * bs, "side": int(z["side"][k]),
@@ -84,13 +84,14 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
                 elif far: del armed[k_]
             elif near:
                 want.append((o, touch))
-        order = sorted(want, key=lambda w: -w[0]["prio"]) if rule == "Bn" else [want[i] for i in rng.permutation(len(want))]
+        order = sorted(want, key=lambda w: -w[0]["prio"]) if rule in ("Bn", "Bq") else [want[i] for i in rng.permutation(len(want))]
         for o, touch in order:
             k_ = id(o)
             if k_ in done or k_ in armed: continue
             busy = any(p_["sym"] == o["sym"] for p_ in pos) or any(a["o"]["sym"] == o["sym"] for a in armed.values())
             nd = sum(1 for p_ in pos if p_["mod"] == "dlm") + len(armed)
             s_, hn, room = (None, 0, 0) if busy or nd >= maxpos else fit(o, eq)
+            if rule == "Ac" and s_ and s_["rd"] < rd_of(o, eq) * 0.999: s_ = None   # no scaled-down crumbs
             if rule == "Bn" and not busy and (s_ is None or s_["rd"] < rd_of(o, eq) * 0.999 or nd >= maxpos):
                 low = sorted([(k2, a) for k2, a in armed.items() if a["o"]["prio"] < o["prio"]], key=lambda x: x[1]["o"]["prio"])
                 freed = 0.0; n2 = nd
