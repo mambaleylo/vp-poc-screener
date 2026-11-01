@@ -38,6 +38,8 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         if m_ in kw: rk = dict(rk, **{m_: float(kw[m_])})
     if rk["dlm"] <= 0: OR = []   # ⚡ off
     if "mp" in kw: maxpos = int(kw["mp"])
+    if "cap" in kw: cap = float(kw["cap"])
+    if "heat" in kw: heat = float(kw["heat"])
     oth = kw.get("oth") == "1"; ma = int(kw.get("ma", 999))   # the other modules take an armed ⚡ limit's room; at most `ma` armed ⚡ limits
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
     OR = [o for o in OR if A - 64 * 3600 <= o["t"] < B]; io = 0; act = []
