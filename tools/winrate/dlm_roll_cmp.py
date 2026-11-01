@@ -1,6 +1,6 @@
 """dlm_roll.py's variants side by side: per month the threshold = q of the variant's own out-of-sample scores of the train coins
 over the 365 days before (the first period's in-sample ones while short), every order above it, one per coin & side until
-its exit, at most 20 a side -> 2023-01 .. 2026-10 on the train coins (out of time) and the check coins (never seen): trades a
+its exit, at most 20 a side -> 2023-01 .. 2026-09 (the data's end) on the train coins (out of time) and the check coins (never seen): trades a
 month, R, sum, drawdown, R by year. usage: dlm_roll_cmp.py DR FAM EX [Q]"""
 import sys; AV = list(sys.argv)
 import os, glob, calendar, numpy as np
@@ -30,7 +30,7 @@ def pool(SC, INS, sub):
 def st(sel):
     r = R[sel]; t = T[sel]; o = np.argsort(t); c = np.cumsum(r[o]); dd = float(np.max(np.maximum.accumulate(np.r_[0, c]) - np.r_[0, c]))
     yrs = " ".join(f"{Y}: {r[(t >= ts(Y)) & (t < ts(Y + 1))].mean():+.3f}" for Y in (2023, 2024, 2025, 2026))
-    return f"{len(sel) / 46:5.1f}/мес {r.mean():+.3f}R Σ{r.sum():+6.0f}R просадка {dd:4.0f}R | {yrs}"
+    return f"{len(sel) / 45:5.1f}/мес {r.mean():+.3f}R Σ{r.sum():+6.0f}R просадка {dd:4.0f}R | {yrs}"
 print(f"{DR} {FAM} E{EX} q{Q}", flush=True)
 for v in ("Y", "M0", "M12", "M24"):
     fn = f"{DR}_roll_{FAM}_{EX}_{v}.npz"

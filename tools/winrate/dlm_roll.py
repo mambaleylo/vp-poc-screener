@@ -35,7 +35,9 @@ for k, (a, b) in enumerate(P):
     if W: tr &= T >= a - 3 * 86400 - W * 30.4 * 86400
     tr = np.flatnonzero(tr)
     if len(tr) < 20000: continue
-    te = (T >= a) & (T < b); s = np.zeros(int(te.sum())); ref = TR & (T >= a - 365 * 86400) & (T < a); si = np.zeros(int(ref.sum()))
+    te = (T >= a) & (T < b)
+    if not te.any(): continue   # past the data's end
+    s = np.zeros(int(te.sum())); ref = TR & (T >= a - 365 * 86400) & (T < a); si = np.zeros(int(ref.sum()))
     for X in XS:
         for seed in range(NS):
             m = lgb.LGBMRegressor(random_state=seed, **pr).fit(X[tr], y[tr]); s += m.predict(X[te]); si += m.predict(X[ref]) if k == 0 else 0
