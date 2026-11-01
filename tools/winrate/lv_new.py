@@ -34,7 +34,7 @@ def wk(O, H, L, C, Tb, j, s, fill, datr, hard_a, take, hold, kh):
     return s * (C[b] - fill) / risk - (0.001 + 0.0003 * (e - j) / 24) * fill / risk, e - j, 3
 def module(mod):
     m = json.load(open(f"/home/user/vp-poc-screener/vp_{mod}_model.json")); fams = m["fams"]
-    want = {fams.index(f) for f in m["smc_fams" if mod == "smc" else "htf_fams"]}
+    want = {(fams.index(f) if isinstance(f, str) else int(f)) for f in m["smc_fams" if mod == "smc" else "htf_fams"]}   # names (SMC) or indices (HTF)
     rule = m["rule"]; cap = int(m.get("side_cap") or 12)
     ev = []
     for grp in ("base", "new"):
