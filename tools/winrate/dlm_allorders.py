@@ -9,7 +9,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dlm_engine as DE
 ST = os.environ.get("LABSTORE", "/home/user/vp-lab-store"); NS = int(sys.argv[1]) if len(sys.argv) > 1 else 3
 QK = float(sys.argv[2]) if len(sys.argv) > 2 else 0.99   # keep the orders >= this quantile's threshold (the bot's 0.99 stays "thr")
-SUF = "" if QK == 0.99 else f"_q{QK}"
+SUF = ("" if QK == 0.99 else f"_q{QK}") + os.environ.get("OUTSUF", "")
+FEAT = os.environ.get("FEATDIR", "feat")   # the labels' folder (feat_<tag>: dlm_relabel.py)
 ts = lambda y, m=1, d=1: calendar.timegm((y, m, d, 0, 0, 0))
 from common import V
 C = json.load(open(f"{ST}/feat_coins.json"))
@@ -27,7 +28,7 @@ for stream in ("wick4h", "close2h"):
     rows = {k: [] for k in ("coin", "t", "F", "R", "tout")}
     for c, g in GROUP.items():
         if g != "train": continue
-        z = np.load(f"{ST}/feat/{stream}/{c}.npz")
+        z = np.load(f"{ST}/{FEAT}/{stream}/{c}.npz")
         if not len(z["t"]): continue
         rows["coin"].append(np.full(len(z["t"]), c))
         for k in ("t", "F", "R", "tout"): rows[k].append(z[k])
