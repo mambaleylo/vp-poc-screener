@@ -28540,9 +28540,10 @@ _PROC_START = time.time()
 # limit holds its room from the moment it goes on the exchange, the never-filled ones (80–90% of them) too; the bot's
 # nearer-limit swap. v0.99.753 — with the ⚡ limits armed at 0.6 ATR, off at 1.0, the room by the score, the others
 # first, the open-risk cap 100%
-EXPECT_YEAR = {"dlm": {"p10": 510, "p50": 2961, "p90": 9905, "dd": 70, "last12": 3207},
-               "bundle": {"p10": 6852, "p50": 27795, "p90": 167055, "dd": 66, "last12": 19409},
-               "bundle_htf": {"p10": 8075, "p50": 28858, "p90": 193821, "dd": 66, "last12": 25558}}
+# v0.99.756 — at the 17x ceiling (money_expect4.py "...|cap=17")
+EXPECT_YEAR = {"dlm": {"p10": 414, "p50": 3319, "p90": 13274, "dd": 69, "last12": 4980},
+               "bundle": {"p10": 6622, "p50": 29986, "p90": 175652, "dd": 66, "last12": 31357},
+               "bundle_htf": {"p10": 7331, "p50": 28917, "p90": 198563, "dd": 66, "last12": 33485}}
 
 
 @app.route("/api/boot")

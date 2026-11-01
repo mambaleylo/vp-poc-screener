@@ -21215,3 +21215,17 @@ v0.99.755 — ⚡ backtest list: the $ of the last 50 trades by the bot's rules 
   the take with the old 2 / 1.1 exits and stop now (-103R), the 2286 takes earn +0.67R instead of +0.54R (+306R) — in
   all +764R vs +623R.
 - Tests: t_dlm_ui (the column vs an independent replica of the same rules) — OK.
+
+v0.99.756 — the cross leverage ceiling 17x (was 14x) (the user: "17", "Да")
+- The leverage by the windows' start year on the strictest money (tools/winrate money_deep.py / money_2022.py "lev": the
+  bundle + HTF, a year from $100, the usual year): 14x $15.8k / $62.6k / $30.8k for the windows starting in 2023 / 2024 /
+  2025, 17x $12.7k / $69.2k / $37.8k (-20% / +10% / +23%), 20x $9.9k / $80.8k / $43.8k; 2022 (the bear market) the same
+  at every ceiling (~$440 from $100, the drawdown 88%); the drawdown the same; no liquidation. The arming at 0.3 / 0.45
+  ATR checked the same way — better only in one period of three, not taken.
+- Also checked: the ⚡ models retrained on the labels of the 1.75 / 1.2 exits (dlm_relabel.py, run_relabel.sh) — the usual
+  year $20.3k vs $28.9k, the drawdown 76% vs 66%: the deployed models kept.
+- BN_CROSS_LEV 14 -> 17 (VP_BN_CROSS_LEV). EXPECT_YEAR at 17x: the bundle + HTF bad ~$7.3k · usual ~$28.9k · good ~$199k ·
+  drawdowns ~66%, the last 12 months ~$33.5k; without HTF $6.6k / $30.0k / $176k / 66%; ⚡ alone $0.4k / $3.3k / $13.3k /
+  69%. The settings' text.
+- The lab: supervise.sh (a long job restarted when it dies or stalls, a chain's whole process tree watched).
+- Tests: t_bn_others / t_dlm_binance (the default ceiling), t_hdr_htf, t_dlm_bot, t_mod_ui — OK.
