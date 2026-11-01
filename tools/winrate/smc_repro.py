@@ -23,4 +23,10 @@ sa, sb = a >= thr, b >= thr
 R = Dd["R"][2][te]
 f_ = lambda m_: f"{np.nanmean(R[m_]):+.3f}R ({int(m_.sum())})" if m_.any() else "—"
 print(f"обучающих {int(tr.sum())}, касаний 2026 {len(te)}, корреляция оценок {np.corrcoef(a, b)[0, 1]:.4f}; выше порога бота: пересборка {f_(sa)}, бот {f_(sb)}, общих {int((sa & sb).sum())}", flush=True)
+nb = int(sb.sum()); ra = te[np.argsort(-a)[:nb]]
+R_all = Dd["R"][2]
+print(f"при равном числе ({nb}): пересборка {np.nanmean(R_all[ra]):+.3f}R, бот {np.nanmean(R[sb]):+.3f}R", flush=True)
+a2 = np.mean([lgb.LGBMRegressor(random_state=s, **pr).fit(F[tr], y[tr]).predict(F[te]) for s in (2, 3)], axis=0)
+r2 = te[np.argsort(-a2)[:nb]]
+print(f"другие зёрна (2, 3), равное число: {np.nanmean(R_all[r2]):+.3f}R, общих с ботом {len(set(r2.tolist()) & set(te[sb].tolist()))}, с зёрнами 0-1 {len(set(r2.tolist()) & set(ra.tolist()))}; корреляция с ботом {np.corrcoef(a2, b)[0, 1]:.4f}", flush=True)
 print("smc repro done", flush=True)
