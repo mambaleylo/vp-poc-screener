@@ -23,6 +23,21 @@ def orders():
                         "lv": lv, "atr": a, "prio": float(z["score"][k]) / float(z["thr"][k]), "filled": f, "t1h": int(z["t1h"][k]), "e": e,
                         "r": float(z["R"][k]), "t1": int(z["tout"][k]), "st": sa * a / e, "sth": ha * a / e, "stream": st, "mod": "dlm"})
     out.sort(key=lambda o: o["t"]); return out
+EXITS = {}
+def orders_exits(OR, take, soft, hard=3.0):
+    """the same orders walked with other exits (dlm_engine.fill_walk on the 1h candles)"""
+    out = []; by = {}
+    for o in OR: by.setdefault((o["coin"], o["stream"]), []).append(o)
+    for (c, st), xs in by.items():
+        if c not in H1: H1[c] = DE.load1h(c)
+        T1, O1, Hh, Ll, C1, V1 = H1[c]; p = DE.STREAMS[st]; bs = p["hh"] * 3600
+        fl, t1h, fill, R, kind, tout = DE.fill_walk(T1, O1, Hh, Ll, C1, np.array([x["t"] for x in xs], np.int64), np.array([x["side"] for x in xs], np.int64),
+                                                    np.array([x["lv"] for x in xs]), np.array([x["atr"] for x in xs]), bs, p["ch"], DE.ALIVE, DE.HOLD, take, soft, hard,
+                                                    DE.FEE_IN, DE.FEE_TAKE, DE.FEE_OUT, DE.FUND)
+        for k, x in enumerate(xs):
+            f = bool(fl[k]); e = float(fill[k]) if f else x["lv"]
+            out.append(dict(x, filled=f, t1h=int(t1h[k]), e=e, r=float(R[k]), t1=int(tout[k]), st=soft * x["atr"] / e, sth=hard * x["atr"] / e))
+    out.sort(key=lambda o: o["t"]); return out
 H1 = {}
 def bar(coin, h):
     if coin not in H1: H1[coin] = DE.load1h(coin)
@@ -39,6 +54,10 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     if rk["dlm"] <= 0: OR = []   # ⚡ off
     if "mp" in kw: maxpos = int(kw["mp"])
     if "cap" in kw: cap = float(kw["cap"])
+    disarm = float(kw.get("dis", DISARM))
+    WF = {"osc": O.W_OSC, "nocut": lambda v: O.W_OSC(v) / M.W2S(v), "w2s": M.W2S,
+          "oldwt": lambda v: M.W2S(v) * ((1.25 if O.wt_x(v) <= -3 else (0.85 if O.wt_x(v) >= 22 else 1.0)) if v["mod"] == "dlm" else 1.0)}[kw.get("wf", "osc")]
+    if "ex" in kw: OR = EXITS[kw["ex"]]
     if "heat" in kw: heat = float(kw["heat"])
     oth = kw.get("oth") == "1"; ma = int(kw.get("ma", 999))   # the other modules take an armed ⚡ limit's room; at most `ma` armed ⚡ limits
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
@@ -49,7 +68,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         if v["mod"] == "dlm":
             r *= 0.625 if sum(1 for o in pos if o["mod"] == "dlm") + len(armed) < 5 else 1.25
             v = dict(v, t0=v.get("t0") or v["t"] + 3600)
-        return eq * r * O.W_OSC(v)
+        return eq * r * WF(v)
     def used(): return sum(o["heat"] for o in pos) + hf * sum(o["heat"] for o in armed.values())
     def fit(v, eq, extra=0.0):
         rd = rd_of(v, eq); hn = rd * v["sth"] / v["st"]; room = heat * eq - used() + extra
@@ -93,7 +112,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             hi, lo, cl = b; s = o["side"]
             near = ((lo - o["lv"]) if s > 0 else (o["lv"] - hi)) / o["atr"] <= arm_d
             touch = (lo <= o["lv"]) if s > 0 else (hi >= o["lv"])
-            far = s * (cl - o["lv"]) / o["atr"] > DISARM
+            far = s * (cl - o["lv"]) / o["atr"] > disarm
             k_ = id(o)
             if k_ in armed:
                 if touch:   # filled: the trade
@@ -142,6 +161,8 @@ _D = {}
 def _init(D): _D.update(D)
 def job(a):
     rule, sd, A = a
+    if "ex=" in rule and not EXITS:
+        EXITS["old"] = orders_exits(_D["or"], 1.1, 2.0)
     return rule, sd, A, run(_D["or"], _D["ot"], A, A + 365 * 86400, rule, sd)
 if __name__ == "__main__":
     D = {"or": orders(), "ot": [v for v in M.build("base") if v["mod"] != "dlm"]}

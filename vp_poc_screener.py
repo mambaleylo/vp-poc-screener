@@ -36478,11 +36478,11 @@ def _dlm_take_watch(t, mark=None, now=None):
 
 
 # ---- the exchange side: a real GTC limit, then the stop (trigger) and the take (a reduce-only limit = maker) ----
-DLM_ARM_ATR = float(os.environ.get("VP_DLM_ARM_ATR", "1.0"))   # v0.99.691 — a real limit goes on the exchange when the price is this close (v0.99.702: 0.3 -> 1.0 ATR — at 0.3 a fast spike through the level beat the 5 s polls: ~20% of the backtest's fills missed live, arm_miss.py on 1m; at 1.0 ~2%)
+DLM_ARM_ATR = float(os.environ.get("VP_DLM_ARM_ATR", "0.6"))   # v0.99.753 — 1.0 -> 0.6 (money_arm2.py: an armed limit holds room while it waits — 80–90% never fill; 0.3–0.7 the usual year ~3x of 1.0's; arm_miss1m.py: the fills missed on the fast drops ~15% at 0.6 vs ~10% at 1.0, their R negative). v0.99.691 — a real limit goes on the exchange when the price is this close (v0.99.702: 0.3 -> 1.0 ATR — at 0.3 a fast spike through the level beat the 5 s polls: ~20% of the backtest's fills missed live, arm_miss.py on 1m; at 1.0 ~2%)
 DLM_SWAP_ATR = 0.25   # v0.99.715 — the parallel stream's limit takes the coin's place on the exchange when this much nearer
 DLM_DISARM_ATR = 1.6   # ... and comes off again (back to waiting) when the price goes this far from it (v0.99.702: 1.0 -> 1.6)
 DLM_OTHERS_FIRST = os.environ.get("VP_DLM_OTHERS_FIRST", "1") == "1"   # v0.99.753 — a P/R / SMC / EMA / HTF entry takes an armed ⚡ limit's room (dlm_free_room)
-DLM_PRIO = os.environ.get("VP_DLM_PRIO", "0") == "1"   # v0.99.752 — no room: a higher-scored limit takes an armed lower one's place (_dlm_bump); off: with the never-filled limits in the money (money_arm2.py) no better at the 1 ATR arming
+DLM_PRIO = os.environ.get("VP_DLM_PRIO", "1") == "1"   # v0.99.753 — on (with the 0.6 ATR arming and the others first: better in 139 of 144 windows)   # v0.99.752 — no room: a higher-scored limit takes an armed lower one's place (_dlm_bump); off: with the never-filled limits in the money (money_arm2.py) no better at the 1 ATR arming
 DLM_THROUGH_ATR = 0.3   # v0.99.702 — the price already this far through a waiting order's level: no trade (another entry than the research's)
 
 

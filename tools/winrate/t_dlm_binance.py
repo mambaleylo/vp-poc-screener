@@ -343,12 +343,12 @@ for i_ in [int(q4["real"].get("id") or 0)] + [int((q4["real"].get(k) or [0, 0])[
 X["algo_api"] = True; X["dual"] = False; X["dual_lock"] = False; V._BNF["dual"] = None; X["pos"].clear()
 V._DLM.update({"orders": [], "trades": []}); V._BNO["pos"].clear()
 A4 = mk("EEE_USDT", 1, 10.0, 0.1); A4["id"] += "w4"; V._DLM["orders"].append(A4)
-X["px"] = {"EEEUSDT": 10.09}; V.dlm_real_tick(); a_id = (A4.get("real") or {}).get("id")   # the 4h one armed (0.9 ATR away)
+X["px"] = {"EEEUSDT": 10.05}; V.dlm_real_tick(); a_id = (A4.get("real") or {}).get("id")   # the 4h one armed (0.5 ATR away; v0.99.753: armed within 0.6)
 B2 = mk("EEE_USDT", 1, 9.995, 0.1); B2.update(id=B2["id"] + "c2", st="close2h", bs=7200); V._DLM["orders"].append(B2)
-V.dlm_real_tick()   # the 2h one 0.95 ATR away, farther than the 4h one: waits, says why
+V.dlm_real_tick()   # the 2h one 0.55 ATR away, farther than the 4h one: waits, says why
 far_hold = B2.get("real") is None and "другого потока" in (B2.get("hold") or "") and (A4.get("real") or {}).get("id") == a_id
-B3 = mk("EEE_USDT", 1, 10.06, 0.1); B3.update(id=B3["id"] + "c3", st="close2h", bs=7200); V._DLM["orders"].append(B3)
-V.dlm_real_tick()   # another 2h one 0.3 ATR away — nearer than the 4h one by more than 0.25 ATR: swapped
+B3 = mk("EEE_USDT", 1, 10.03, 0.1); B3.update(id=B3["id"] + "c3", st="close2h", bs=7200); V._DLM["orders"].append(B3)
+V.dlm_real_tick()   # another 2h one 0.2 ATR away — nearer than the 4h one by more than 0.25 ATR: swapped
 sw = (X["orders"][int(a_id)]["status"] == "CANCELED" and A4.get("real") is None and "снята с биржи" in (A4.get("hold") or "")
       and (B3.get("real") or {}).get("status") == "LIMIT" and B2.get("real") is None)
 V.dlm_real_tick(); sw = sw and A4.get("real") is None and (B3.get("real") or {}).get("status") == "LIMIT"   # no swap back
