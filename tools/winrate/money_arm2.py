@@ -10,7 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dlm_engine as DE, money_multi as M, money_expect as X, money_osc as O, money_params as MP
 from multiprocessing import Pool
 ARM, DISARM = 1.0, 1.6
-RULES = sys.argv[1].split(",") if len(sys.argv) > 1 else ["A", "Bn"]; SEEDS = [1, 2, 3]
+RULES = sys.argv[1].split(",") if len(sys.argv) > 1 else ["A", "Bn"]; SEEDS = [int(x) for x in (sys.argv[2] if len(sys.argv) > 2 else "1,2,3").split(",")]
+STEP = int(sys.argv[3]) if len(sys.argv) > 3 else 1   # every STEP-th window (a quick screen)
 MF = json.load(open("/home/user/vp-poc-screener/vp_dlm_model.json")); SS = {s["name"]: s for s in MF["streams"]}
 def orders():
     out = []
@@ -29,6 +30,10 @@ def bar(coin, h):
     return (H[i], L[i], C[i]) if i < len(T) and T[i] == h else None
 def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=100.0, maxpos=20):
     rng = np.random.default_rng(seed)
+    kw = dict(x.split("=") for x in rule.split("|")[1:]); rule = rule.split("|")[0]   # "A|arm=0.5|hf=0.5|cnt=0"
+    arm_d = float(kw.get("arm", ARM)); hf = float(kw.get("hf", 1.0)); cnt = kw.get("cnt", "1") == "1"
+    if "dlm" in kw: rk = dict(rk, dlm=float(kw["dlm"]))
+    if "mp" in kw: maxpos = int(kw["mp"])
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
     OR = [o for o in OR if A - 64 * 3600 <= o["t"] < B]; io = 0; act = []
     OT = sorted(OT, key=lambda v: v["t0"]); jo = bisect.bisect_left([v["t0"] for v in OT], A)
@@ -38,7 +43,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             r *= 0.625 if sum(1 for o in pos if o["mod"] == "dlm") + len(armed) < 5 else 1.25
             v = dict(v, t0=v.get("t0") or v["t"] + 3600)
         return eq * r * O.W_OSC(v)
-    def used(): return sum(o["heat"] for o in pos) + sum(o["heat"] for o in armed.values())
+    def used(): return sum(o["heat"] for o in pos) + hf * sum(o["heat"] for o in armed.values())
     def fit(v, eq, extra=0.0):
         rd = rd_of(v, eq); hn = rd * v["sth"] / v["st"]; room = heat * eq - used() + extra
         if hn > room:
@@ -73,7 +78,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             b = bar(o["coin"], h)
             if b is None: continue
             hi, lo, cl = b; s = o["side"]
-            near = ((lo - o["lv"]) if s > 0 else (o["lv"] - hi)) / o["atr"] <= ARM
+            near = ((lo - o["lv"]) if s > 0 else (o["lv"] - hi)) / o["atr"] <= arm_d
             touch = (lo <= o["lv"]) if s > 0 else (hi >= o["lv"])
             far = s * (cl - o["lv"]) / o["atr"] > DISARM
             k_ = id(o)
@@ -83,13 +88,19 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
                     if o["filled"] and o["t1h"] == h: pos.append(dict(o, **{x: a[x] for x in ("rd", "heat", "mg", "notional")})); n_fill += 1
                 elif far: del armed[k_]
             elif near:
-                want.append((o, touch))
+                want.append((o, touch, s * (cl - o["lv"]) / o["atr"], cl))
         order = sorted(want, key=lambda w: -w[0]["prio"]) if rule in ("Bn", "Bq") else [want[i] for i in rng.permutation(len(want))]
-        for o, touch in order:
+        if rule in ("A", "Ac"): order.sort(key=lambda w: w[2])   # the bot arms the nearest first (random among the same distance)
+        for o, touch, d_o, cl in order:
             k_ = id(o)
             if k_ in done or k_ in armed: continue
-            busy = any(p_["sym"] == o["sym"] for p_ in pos) or any(a["o"]["sym"] == o["sym"] for a in armed.values())
-            nd = sum(1 for p_ in pos if p_["mod"] == "dlm") + len(armed)
+            busy = any(p_["sym"] == o["sym"] for p_ in pos)
+            if not busy:   # the bot: one limit a coin on the exchange — the nearer one (DLM_SWAP_ATR 0.25): a farther armed one comes off
+                for k2, a in [(k2, a) for k2, a in armed.items() if a["o"]["sym"] == o["sym"]]:
+                    ao = a["o"]
+                    if touch or ao["side"] * (cl - ao["lv"]) / ao["atr"] > d_o + 0.25: del armed[k2]
+                    else: busy = True
+            nd = sum(1 for p_ in pos if p_["mod"] == "dlm") + (len(armed) if cnt else 0)
             s_, hn, room = (None, 0, 0) if busy or nd >= maxpos else fit(o, eq)
             if rule == "Ac" and s_ and s_["rd"] < rd_of(o, eq) * 0.999: s_ = None   # no scaled-down crumbs
             if rule == "Bn" and not busy and (s_ is None or s_["rd"] < rd_of(o, eq) * 0.999 or nd >= maxpos):
@@ -97,7 +108,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
                 freed = 0.0; n2 = nd
                 for k2, a in low:
                     if n2 < maxpos and room + freed >= hn and hn > 0: break
-                    del armed[k2]; freed += a["heat"]; n2 -= 1
+                    del armed[k2]; freed += hf * a["heat"]; n2 -= cnt
                 if freed or n2 < nd:
                     nd = n2; s_, hn, room = fit(o, eq) if nd < maxpos else (None, 0, 0)
             if s_ and nd < maxpos:
@@ -122,16 +133,16 @@ if __name__ == "__main__":
     D = {"or": orders(), "ot": [v for v in M.build("base") if v["mod"] != "dlm"]}
     print("⚡ orders", len(D["or"]), "filled", sum(o["filled"] for o in D["or"]), flush=True)
     with Pool(4, initializer=_init, initargs=(D,)) as Pl:
-        res = Pl.map(job, [(r, sd, A) for r in RULES for sd in SEEDS for A in X.STARTS + [X.LAST]], chunksize=6)
+        res = Pl.map(job, [(r, sd, A) for r in RULES for sd in SEEDS for A in X.STARTS[::STEP] + [X.LAST]], chunksize=6)
     R = {}
     for r, sd, A, v in res: R.setdefault((r, sd), {})[A] = v
     out = {}
     for r in RULES:
-        E = [np.array([R[(r, sd)][A][0] for A in X.STARTS]) for sd in SEEDS]; b = [np.array([R[(RULES[0], sd)][A][0] for A in X.STARTS]) for sd in SEEDS]
+        E = [np.array([R[(r, sd)][A][0] for A in X.STARTS[::STEP]]) for sd in SEEDS]; b = [np.array([R[(RULES[0], sd)][A][0] for A in X.STARTS[::STEP]]) for sd in SEEDS]
         o = {"p10": float(np.mean([np.percentile(e, 10) for e in E])), "p50": float(np.mean([np.median(e) for e in E])), "p90": float(np.mean([np.percentile(e, 90) for e in E])),
-             "dd": float(np.mean([np.median([R[(r, sd)][A][1] for A in X.STARTS]) for sd in SEEDS]) * 100), "last12": float(np.mean([R[(r, sd)][X.LAST][0] for sd in SEEDS])),
-             "fills": float(np.mean([np.mean([R[(r, sd)][A][2] for A in X.STARTS]) for sd in SEEDS])), "skips": float(np.mean([np.mean([R[(r, sd)][A][3] for A in X.STARTS]) for sd in SEEDS])),
+             "dd": float(np.mean([np.median([R[(r, sd)][A][1] for A in X.STARTS[::STEP]]) for sd in SEEDS]) * 100), "last12": float(np.mean([R[(r, sd)][X.LAST][0] for sd in SEEDS])),
+             "fills": float(np.mean([np.mean([R[(r, sd)][A][2] for A in X.STARTS[::STEP]]) for sd in SEEDS])), "skips": float(np.mean([np.mean([R[(r, sd)][A][3] for A in X.STARTS[::STEP]]) for sd in SEEDS])),
              "better": float(np.mean([(e > bb * 1.001).sum() for e, bb in zip(E, b)]))}
         out[r] = o
-        print(f"{r:3s} плохой ${o['p10']:>7,.0f} обычный ${o['p50']:>7,.0f} хороший ${o['p90']:>9,.0f} просадка {o['dd']:.0f}% посл.12 ${o['last12']:>8,.0f} | сделок ⚡ за год {o['fills']:.0f}, пропущено {o['skips']:.0f} | лучше {RULES[0]} в {o['better']:.0f}/144", flush=True)
+        print(f"{r:22s} плохой ${o['p10']:>7,.0f} обычный ${o['p50']:>7,.0f} хороший ${o['p90']:>9,.0f} просадка {o['dd']:.0f}% посл.12 ${o['last12']:>8,.0f} | сделок ⚡ за год {o['fills']:.0f}, пропущено {o['skips']:.0f} | лучше {RULES[0]} в {o['better']:.0f}/{len(X.STARTS[::STEP])}", flush=True)
     json.dump(out, open(f"{M.ST}/wf/money_arm2.json", "w"), indent=1)
