@@ -6,6 +6,7 @@ import os, sys, json, time, glob, calendar, numpy as np, lightgbm as lgb, warnin
 warnings.filterwarnings("ignore")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import treevec as TV
+from common import V   # dlm_wf2 maps the research coins with the bot's list
 ST = "/home/user/vp-lab-store"; ts = lambda y, m=1, d=1: calendar.timegm((y, m, d, 0, 0, 0)); A = ts(2026)
 sys.argv = sys.argv[:1] + ["x", "0", "12"]
 src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "dlm_wf2.py")).read()
