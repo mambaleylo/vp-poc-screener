@@ -21118,3 +21118,25 @@ v0.99.749 — 📈 EMA 3% on Binance (was 2%) and the open-risk cap 95% (was 90%
 - Tests: t_dlm_binance (the cap 95%: an order scaled to the room, no room -> waits), t_hdr_htf, t_bn_others, t_dlm_bot,
   t_dlm_ui, t_smc_bot, t_htf_bot, t_mod_ui, t_bno_stop, t_lab_export, t_model_refresh — OK (t_cfl_bot still needs its
   research files).
+
+v0.99.750 — ⚡ exits: the close stop 1.75 ATR (was 2), the take 1.2 ATR (was 1.1); the honest header; the ⚡ backtest list
+from the walk-forward pool (the user: "Да")
+- The exits on the walk-forward pool (tools/winrate dlm_exits.py / dlm_exits_grid.py: the pool's trades re-walked on the
+  1h candles, the close stop 1.5–2.25 x the take 1.0–1.5): a nearer close stop and a farther take better the trade on
+  the bot's coins (+0.22R -> +0.27R), the check coins (+0.24 -> +0.30R) and the 226 new coins the models never saw (+0.18
+  -> +0.22R), every year 2023–2026; 2 / 1.1 sat in a weak spot (every neighbour better). The bundle + HTF a year from $100
+  (the ⚡ trades of an hour in a random order — below): bad ~$7.6k -> $14.2k, usual ~$43k -> $72k, drawdowns 72 -> 70%,
+  better in 141 of 144 windows. The emergency stop stays 3 ATR (now ~1.7x the risk at it).
+- The order inside an hour (money_order.py): the lab gave the room to the ⚡ trades of an hour by the model's score; the
+  bot gives it to the level the price reaches first — at random, the money ~25% lower. Every money number now averages 5
+  random orders; v0.99.746–749's decisions re-checked that way (money_recheck.py): 14x, the 2h shorts x0.5, the
+  WaveTrend rule, EMA 3%, the cap 95% — each still better. A BTC regime rule over ⚡'s risk (dlm_btc.py, money_btc.py):
+  no gain, not used.
+- vp_dlm_model.json: both streams take_atr 1.2, stop_atr 1.75 (the same models and thresholds; the bots take the file
+  by its content). The settings' text. EXPECT_YEAR (money_expect2.py): the bundle + HTF bad ~$14.2k · usual ~$72k ·
+  good ~$450k · drawdowns ~70%; without HTF $13.1k / $63.5k / $394k / 70%; ⚡ alone $3.4k / $12.3k / $44.1k / 75%.
+- vp_bt_trades.json["dlm"]: the walk-forward pool 2023–2026 (2886 trades, +0.265R, WR 80%; dlm_bt_list.py) walked with
+  the new exits, instead of the deployed model's 2025–26 replay; "chk" = a coin the yearly models never trained on.
+- Tests: t_dlm_bot (the list's trades re-made by the bot with the threshold off — the list is the yearly models'
+  choice; the exits from the model), t_dlm_ui (a 2h stop of the new list), t_model_refresh, t_hdr_htf, t_dlm_binance,
+  t_bn_others, t_mod_ui, t_lab_export, t_bno_stop, t_dlm_engine — OK.

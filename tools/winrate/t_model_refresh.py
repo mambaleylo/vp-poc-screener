@@ -22,7 +22,7 @@ put(old); V.dlm_model()
 before = V._dlm_stream("close2h")
 done = V.model_refresh_once()
 V.dlm_model(); after = V._dlm_stream("close2h")   # the module reloads it on its next use
-r1 = "⚡ Лимитки 4ч+2ч" in done and before.get("stop_mode") is None and after.get("stop_mode") == "close1h" and after.get("take_atr") == 1.1
+r1 = "⚡ Лимитки 4ч+2ч" in done and before.get("stop_mode") is None and after.get("stop_mode") == "close1h" and after.get("take_atr") == next(s["take_atr"] for s in repo["streams"] if s["name"] == "close2h")
 print("(1) the same date, other rules -> taken:", r1, done); ok &= r1
 mt = os.path.getmtime(V.DLM_MODEL_FILE); os.utime(V.DLM_MODEL_FILE, (mt - 100, mt - 100)); mt = os.path.getmtime(V.DLM_MODEL_FILE)
 done2 = V.model_refresh_once()

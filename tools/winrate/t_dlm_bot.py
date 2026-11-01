@@ -63,6 +63,11 @@ def fake_range(sym, tf, a, z_):   # Gate: 4h, or 1h (the bot builds 2h from it �
 V._dlm_closed = fake_closed; V.get_candles_range = fake_range; V.bn_closed = lambda *a, **k: None
 V.dlm_save = lambda: None; V.heartbeat = lambda *a, **k: None; V.AUTOTRADE_ENABLED_DLM = False; V.DLM_BINANCE = False
 hits = 0
+# v0.99.750 — the list is the walk-forward pool (the yearly models' choices); the deployed models choose a little
+# differently, so here every limit of the bar is made (the threshold off) and the list's one is checked: its level, its
+# life and its walk to the list's R
+_thr0 = {x["name"]: x["thr"] for x in V.dlm_model()["streams"]}
+for x in V.dlm_model()["streams"]: x["thr"] = -1e9
 for t in picks:
     V.RESEARCH_COINS_211 = V.RESEARCH_COINS_127 = (t["s"],); V._research_syms = lambda coins, n=300, mode=None: list(coins)
     V._DLM.update({"orders": [], "trades": []})
@@ -108,6 +113,7 @@ cu3 = o_near.get("cu") is True and not o_far.get("cu") and o_far.get("cu_chk")
 print(f"   reached -> waits for the settle {o_near.get('cu') is True} · never reached -> armable at once {not o_far.get('cu')}"); cu2 = cu2 and cu3
 print(f"(3c) catch-up orders wait for the settle: {cu2}"); cu_ok = cu_ok and cu2
 ok &= cu_ok
+for x in V.dlm_model()["streams"]: x["thr"] = _thr0[x["name"]]
 # (4) the real path on a fake exchange (Gate)
 class X:
     def __init__(s): s.orders = {}; s.pos = {}; s.trig = {}; s.n = 0
@@ -158,7 +164,8 @@ mk = lambda sym, side, lv: {"id": f"dlm_{sym}_{side}_{tb}", "symbol": sym, "side
 a, b_, c = mk("AAA_USDT", 1, 1.0), mk("BBB_USDT", -1, 2.0), mk("CCC_USDT", 1, 3.0)
 V._DLM["orders"] += [a, b_, c]
 for o in (a, b_, c): V.dlm_real_place(o)
-placed = (all((o.get("real") or {}).get("id") for o in (a, b_, c)) and risks and all(abs(r - V.dlm_risk() * 0.625 * 1.5) < 1e-3 for r in risks)   # the risk (4.5% v0.99.718) x 0.625 (few open) x 3 / 2 at the emergency stop
+_st4 = V._dlm_stream("wick4h"); KX = _st4["hard_stop_atr"] / _st4["stop_atr"]; TK = _st4["take_atr"]   # v0.99.750 — the model's exits (1.75 / 1.2)
+placed = (all((o.get("real") or {}).get("id") for o in (a, b_, c)) and risks and all(abs(r - V.dlm_risk() * 0.625 * KX) < 1e-3 for r in risks)   # the risk (4.5% v0.99.718) x 0.625 (few open) x hard / soft at the emergency stop
           and all(abs(o["real"]["risk"] - V.dlm_risk() * 0.625) < 0.01 for o in (a, b_, c)))
 # v0.99.703 — the load: 5+ open -> x1.25, fewer -> x0.625; the old 4h-less trades (bs 900) not counted
 _tr0 = V._DLM["trades"]
@@ -173,8 +180,8 @@ V.dlm_real_tick()
 ta = next(t for t in V._DLM["trades"] if t["symbol"] == "AAA_USDT"); tb_ = next(t for t in V._DLM["trades"] if t["symbol"] == "BBB_USDT")
 exits_ok = bool(ta["real"].get("sl_id") and ta["real"].get("tp_id") and ta["real"].get("tp_kind") == "limit") and ta["hold"] == 32 and ta["until"] - ta["fbar"] == 32 * 14400
 tp_order = X_.orders[ta["real"]["tp_id"]]   # v0.99.692 — the take 1.1 ATR, the exchange's stop = the emergency 3 ATR
-tp_ok = (tp_order.get("reduce_only") and tp_order["size"] == -37 and abs(float(tp_order["price"]) - (ta["entry"] + 0.011)) < 1e-6
-         and abs(X_.trig[str(ta["real"]["sl_id"])][1] - (ta["entry"] - 0.03)) < 1e-6 and abs(ta["sl"] - (ta["entry"] - 0.02)) < 1e-9 and ta.get("smode") == "close1h")
+tp_ok = (tp_order.get("reduce_only") and tp_order["size"] == -37 and abs(float(tp_order["price"]) - (ta["entry"] + TK * 0.01)) < 1e-6
+         and abs(X_.trig[str(ta["real"]["sl_id"])][1] - (ta["entry"] - 0.03)) < 1e-6 and abs(ta["sl"] - (ta["entry"] - _st4["stop_atr"] * 0.01)) < 1e-9 and ta.get("smode") == "close1h")
 X_.fill(ta["real"]["tp_id"])           # the take fills: the position goes
 V.dlm_real_tick(); V.dlm_real_tick()
 win = ta["status"] == "CLOSED" and ta["result"] == "WIN" and ta["r"] > 0
@@ -216,7 +223,7 @@ arm_ok = arm_ok and (f_.get("real") or {}).get("status") == "SKIPPED" and not (f
 PX["EEE_USDT"] = 5.02   # 2 ATR away: the armed limit comes off, the order waits again
 V.dlm_real_tick()
 late_ok = arm_ok and e_.get("real") is None and e_["status"] == "OPEN"
-print(f"(4) load x0.625/x1.25 {load_ok} · placed at 4% {placed} · exits {exits_ok} · take 1.1 ATR + the emergency stop 3 ATR {bool(tp_ok)} · WIN {win} · a 4h close beyond the stop -> out (a wick / a 1h close: no) {cstop} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped} · armed near the price / waits far / no room at the touch -> none / off when far {late_ok}")
+print(f"(4) load x0.625/x1.25 {load_ok} · placed at 4% {placed} · exits {exits_ok} · take {TK} ATR + the emergency stop 3 ATR {bool(tp_ok)} · WIN {win} · a 4h close beyond the stop -> out (a wick / a 1h close: no) {cstop} (R {ta['r']}) · time exit {tx} · unfilled cancelled {cx} · triggers left {left} · position cap {capped} · armed near the price / waits far / no room at the touch -> none / off when far {late_ok}")
 ok &= load_ok and placed and exits_ok and bool(tp_ok) and cstop and win and tx and cx and not left and capped and late_ok
 # (5) v0.99.694 — the leverage: the liquidation at the model's "liq_buf" x the emergency stop's distance (the backtest's money
 # uses the same); the deployed model's value, a lower one -> more leverage, less margin
@@ -259,7 +266,7 @@ for g in pick:
 _om = V.dlm_osc_mult; V.dlm_osc_mult = lambda sym, side, now=None: 1.25
 _o0, _t0 = V._DLM["orders"], V._DLM["trades"]; V._DLM["orders"], V._DLM["trades"] = [], []
 risks.clear(); d_ = mk("DDD_USDT", 1, 4.0); V._DLM["orders"].append(d_); V.dlm_real_place(d_)
-want_r = V.dlm_risk() * V.dlm_load_mult() * 1.25 * 1.5
+want_r = V.dlm_risk() * V.dlm_load_mult() * 1.25 * KX
 placed_osc = bool((d_.get("real") or {}).get("id")) and risks and abs(risks[-1] - want_r) < 1e-3 and d_["real"].get("osc") == 1.25 and a["real"].get("osc") == 1.0
 V.dlm_osc_mult = _om; V._DLM["orders"], V._DLM["trades"] = _o0, _t0
 osc_ok = bool(osc) and worst_wt < 0.5 and mult_ok and n_up > 0 and n_dn > 0 and placed_osc

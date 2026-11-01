@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.749"
+APP_VERSION = "0.99.750"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28534,9 +28534,11 @@ _PROC_START = time.time()
 # the lost lab's pools and money sim — on the same new sim 10x gives the bundle + HTF $7.7k / $34.3k / $156k / 63%
 # v0.99.748 — with the daily WaveTrend x1.25 only at wt1 x side <= -33 (the model's osc_risk; money_osc.py)
 # v0.99.749 — EMA 3%, the open risk cap 95%
-EXPECT_YEAR = {"dlm": {"p10": 1899, "p50": 7678, "p90": 29950, "dd": 75, "last12": 21553},
-               "bundle": {"p10": 9566, "p50": 52166, "p90": 224192, "dd": 66, "last12": 61522},
-               "bundle_htf": {"p10": 10308, "p50": 58480, "p90": 304408, "dd": 66, "last12": 106791}}
+# v0.99.750 — ⚡'s exits 1.75 / 1.2 ATR, and the ⚡ trades of an hour in a random order (money_expect2.py, 5 orders averaged:
+# the bot gives the room to the first level the price reaches; the lab's score order was ~25% too kind)
+EXPECT_YEAR = {"dlm": {"p10": 3364, "p50": 12283, "p90": 44144, "dd": 75, "last12": 27206},
+               "bundle": {"p10": 13122, "p50": 63481, "p90": 393967, "dd": 70, "last12": 74927},
+               "bundle_htf": {"p10": 14175, "p50": 72018, "p90": 449826, "dd": 70, "last12": 123222}}
 
 
 @app.route("/api/boot")
@@ -42147,7 +42149,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">Работа (4ч + 2ч — 210 монет)</div>
-          <div class="sub">на закрытии каждой 4ч и 2ч свечи: у каждого вида своя модель, лучший ~1% моментов — лимитка (4ч: на 1 ATR за тенью свечи, 2ч: на 2 ATR от закрытия), живёт 4 свечи; исполнилась — тейк 1.1 ATR, стоп: свеча графика (4ч / 2ч) закрылась за 2 ATR (фитили не выбивают; аварийный стоп 3 ATR на бирже), выход через 32 свечи. Винрейт ~80%, ~3 сделки в день; без реальных сделок — виртуальный учёт</div>
+          <div class="sub">на закрытии каждой 4ч и 2ч свечи: у каждого вида своя модель, лучший ~1% моментов — лимитка (4ч: на 1 ATR за тенью свечи, 2ч: на 2 ATR от закрытия), живёт 4 свечи; исполнилась — тейк 1.2 ATR, стоп: свеча графика (4ч / 2ч) закрылась за 1.75 ATR (фитили не выбивают; аварийный стоп 3 ATR на бирже), выход через 32 свечи. Винрейт ~80%, ~3 сделки в день; без реальных сделок — виртуальный учёт</div>
         </div>
         <label class="switch"><input type="checkbox" id="setDlm"><span class="switchSlider"></span></label>
       </div>

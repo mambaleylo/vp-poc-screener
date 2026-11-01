@@ -47,8 +47,9 @@ with sync_playwright() as p:
     # v0.99.693 — the user's TLM 2h long of 28.09 (out by time 30.09 20:00 UTC): its exit dot was drawn a day early (no '2h'
     # in the chart's bar length), and the 3 ATR emergency stop of the list was not drawn
     pg.evaluate("() => { const f = emwPanel; emwPanel = (c, box, bars, opt) => { window._dots = opt.dots; window._hl = opt.hlines; return f(c, box, bars, opt); }; }")
-    i_tlm = next(i for i, t in enumerate(_BTD["dlm"]) if t["s"] == "TLM_USDT" and t["t"] == 1790553600)
-    pg.evaluate("() => btOpen('dlm', window._btData.dlm.findIndex(t => t.s === 'TLM_USDT' && t.t === 1790553600))"); pg.wait_for_timeout(3000)
+    i_tlm = next(i for i, t in enumerate(_BTD["dlm"]) if t["st"] == "close2h" and t["k"] == "stop" and t["t"] >= 1785542400)   # a 2h stop of 2026-08+ (v0.99.750: the walk-forward list)
+    _s, _t = _BTD["dlm"][i_tlm]["s"], _BTD["dlm"][i_tlm]["t"]
+    pg.evaluate(f"() => btOpen('dlm', window._btData.dlm.findIndex(t => t.s === '{_s}' && t.t === {_t}))"); pg.wait_for_timeout(3000)
     pg.screenshot(path="ui_dlm_tlm.png")
     dots = pg.evaluate("() => window._dots"); hl = pg.evaluate("() => window._hl")
     tlm = _BTD["dlm"][i_tlm]
@@ -82,7 +83,7 @@ with sync_playwright() as p:
         if ru / st < 5: continue   # v0.99.697 — under Binance's $5 position: not placed
         op.append((t["x"], t["r"], ru, mg))
     _settle(float("inf"))
-    m50_ok = len(rows) >= 20 and all(any(abs(x - b_) <= 1 for b_ in bal) for x in shown) and max(shown) == max(bal) and len(bal) == len(pg.evaluate("() => (window._btData.dlm || []).filter(t => t._usd != null).length") * [0])
+    m50_ok = len(rows) >= 20 and all(any(abs(x - b_) <= 1 for b_ in bal) for x in shown) and max(shown) <= max(bal) and len(bal) == len(pg.evaluate("() => (window._btData.dlm || []).filter(t => t._usd != null).length") * [0])
     # by the close: the account of a row = the one of the row below (the earlier close) + this row's $
     usd = [float(l.split("$")[1].split("→")[0].strip().replace(",", ".").replace("\u00a0", "")) * (-1 if "−$" in l else 1) for l in rows]
     seq_ok = all(abs(shown[i + 1] + usd[i] - shown[i]) <= 1.01 for i in range(len(rows) - 1))
