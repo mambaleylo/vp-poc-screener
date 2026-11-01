@@ -7,6 +7,8 @@ from multiprocessing import Pool
 F = "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0"
 RULES = {"сейчас (0.6 ATR, 14x)": F, "0.3 ATR": F.replace("arm=0.6", "arm=0.3"), "0.45 ATR": F.replace("arm=0.6", "arm=0.45"),
          "20x": F + "|cap=20", "0.3 ATR + 20x": F.replace("arm=0.6", "arm=0.3") + "|cap=20"}
+if len(sys.argv) > 1 and sys.argv[-1] == "lev":
+    RULES = {"сейчас (14x)": F, "16x": F + "|cap=16", "17x": F + "|cap=17", "18x": F + "|cap=18", "20x": F + "|cap=20"}
 SEEDS = [1, 2]
 _D = {}
 def _init(D): _D.update(D)
