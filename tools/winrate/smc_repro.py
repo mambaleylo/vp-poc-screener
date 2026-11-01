@@ -3,7 +3,8 @@ label E2 clipped to [-1.2, 6], 2 LightGBM (seeds 0, 1) on everything closed 14 d
 deployed trees on the 2026 touches: the correlation, the picks over the deployed threshold, the R of the picks"""
 import os, sys, json, numpy as np, lightgbm as lgb, warnings
 warnings.filterwarnings("ignore")
-HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE); sys.path.insert(0, os.path.join(HERE, "..", "new_ind"))
+HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE); sys.path.insert(0, os.path.join(HERE, "..", "new_ind")); sys.path += [os.path.join(HERE, "..", "zones_model"), os.path.join(HERE, "..", "neuro_model")]
+import types; sys.modules.setdefault("nx_h", types.SimpleNamespace(pain=None))   # lv_wf imports nx_h only for pain (its data load is not needed here)
 from lv_wf import load_dir, ts
 import lv_engine as LE, treevec as TV
 M = json.load(open(os.path.join(HERE, "..", "..", "vp_smc_model.json")))

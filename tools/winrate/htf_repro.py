@@ -4,8 +4,9 @@
 touches: the correlation, the picks (either model over its threshold), the R of the picks (the traded exit)"""
 import os, sys, json, glob, numpy as np, lightgbm as lgb, warnings
 warnings.filterwarnings("ignore")
-HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE); sys.path.insert(0, os.path.join(HERE, "..", "new_ind"))
+HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE); sys.path.insert(0, os.path.join(HERE, "..", "new_ind")); sys.path += [os.path.join(HERE, "..", "zones_model"), os.path.join(HERE, "..", "neuro_model")]
 from numba import njit
+import types; sys.modules.setdefault("nx_h", types.SimpleNamespace(pain=None))   # lv_wf imports nx_h only for pain (its data load is not needed here)
 from lv_wf import load_dir, ts
 import lv_engine as LE, treevec as TV
 M = json.load(open(os.path.join(HERE, "..", "..", "vp_htf_model.json")))
