@@ -3,3 +3,7 @@ ev3/
 data/
 fc_RF.npz
 fc_red_sc.npz
+s21h2/
+f2_s21h2/
+s21h2_models.json
+s21h2_mk/
