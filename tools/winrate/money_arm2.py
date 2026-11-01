@@ -5,7 +5,7 @@ it while it waits for room -> no trade; filled -> the trade (fill_walk's R / exi
 among the ones wanting it in an hour) / "Bn" the score over its stream's threshold first, an armed lower one taken off when
 there is no room. P/R, SMC, EMA, HTF at the market as money_multi. A year from $100, 144 weekly windows, 5 seeds.
 usage: money_arm2.py [rules] -> the table (+ <LABSTORE>/wf/money_arm2.json)"""
-import sys, os, json, bisect, numpy as np
+import sys, os, json, bisect, collections, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dlm_engine as DE, money_multi as M, money_expect as X, money_osc as O, money_params as MP
 from multiprocessing import Pool
@@ -66,6 +66,10 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     if "cap" in kw: cap = float(kw["cap"])
     disarm = float(kw.get("dis", DISARM))
     minn = float(kw.get("minn", 0)); vload = kw.get("vload") == "1"
+    # drawdown protection: "ddc=X/K/Y" — from X below the peak every risk x K until back within Y of it; "pz=D/X" — the
+    # equity X below its level D days ago -> no new trades for D days
+    ddc = tuple(float(x) for x in kw["ddc"].split("/")) if "ddc" in kw else None; cut_on = False
+    pz = tuple(float(x) for x in kw["pz"].split("/")) if "pz" in kw else None; pause_to = 0; eqh = collections.deque()
     ld = tuple(float(x) for x in kw.get("ld", "0.625/1.25/5").split("/"))   # the load multiplier: below n x lo, else x hi
     WF = {"osc": O.W_OSC, "nocut": lambda v: O.W_OSC(v) / M.W2S(v), "w2s": M.W2S,
           "oldwt": lambda v: M.W2S(v) * ((1.25 if O.wt_x(v) <= -3 else (0.85 if O.wt_x(v) >= 22 else 1.0)) if v["mod"] == "dlm" else 1.0)}[kw.get("wf", "osc")]
@@ -78,7 +82,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     OR = [o for o in OR if A - 64 * 3600 <= o["t"] < B]; io = 0; act = []
     OT = sorted(OT, key=lambda v: v["t0"]); jo = bisect.bisect_left([v["t0"] for v in OT], A)
     def rd_of(v, eq):
-        r = rk[v["mod"]] / 100
+        r = rk[v["mod"]] / 100 * (ddc[1] if cut_on else 1.0)
         if v["mod"] == "dlm":
             if vload:
                 T_, N_ = virt_open(); j_ = np.searchsorted(T_, v.get("t0") or v["t"] + 3600, side="right") - 1; n_ = int(N_[j_]) if j_ >= 0 else 0
@@ -111,9 +115,17 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         eq = cash + upnl
         if eq <= 0: return 0.0, 1.0, n_fill, n_skip
         peak = max(peak, eq); mdd = max(mdd, 1 - eq / peak)
+        if ddc:
+            if not cut_on and eq < peak * (1 - ddc[0]): cut_on = True
+            elif cut_on and eq >= peak * (1 - ddc[2]): cut_on = False
+        if pz:
+            eqh.append((h, eq))
+            while eqh and eqh[0][0] < h - pz[0] * 86400: eqh.popleft()
+            if eq < eqh[0][1] * (1 - pz[1]): pause_to = h + int(pz[0] * 86400)
+        paused = h < pause_to
         while jo < len(OT) and OT[jo]["t0"] <= h:   # the other modules at the market
             v = OT[jo]; jo += 1
-            if v["t0"] < h - 3600 or any(o["sym"] == v["sym"] for o in pos) or any(a["sym"] == v["sym"] for a in armed.values()): continue
+            if paused or v["t0"] < h - 3600 or any(o["sym"] == v["sym"] for o in pos) or any(a["sym"] == v["sym"] for a in armed.values()): continue
             s_, hn, room = fit(v, eq)
             if oth and armed and (s_ is None or s_["rd"] < rd_of(v, eq) * 0.999):   # no room: the armed ⚡ limits (the lowest priority first) make way
                 freed = 0.0
@@ -144,7 +156,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
                 want.append((o, touch, s * (cl - o["lv"]) / o["atr"], cl))
         order = sorted(want, key=lambda w: -w[0]["prio"]) if rule in ("Bn", "Bq") else [want[i] for i in rng.permutation(len(want))]
         if rule in ("A", "Ac"): order.sort(key=lambda w: w[2])   # the bot arms the nearest first (random among the same distance)
-        for o, touch, d_o, cl in order:
+        for o, touch, d_o, cl in ([] if paused else order):
             k_ = id(o)
             if k_ in done or k_ in armed: continue
             busy = any(p_["sym"] == o["sym"] for p_ in pos)
