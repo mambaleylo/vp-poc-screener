@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.754"
+APP_VERSION = "0.99.755"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -38036,6 +38036,7 @@ def dlm_stats():
             "catchup": _DLM.get("catchup"),   # v0.99.711 — the start's scans of the missed bars
             "more_coins": DLM_MORE_COINS, "coins_n": 210 if DLM_MORE_COINS else 127,   # v0.99.686
             "risk": dlm_risk(), "risk_set": MODULE_RISK_PCT.get("dlm"), "max_pos": DLM_MAX_POS,   # v0.99.687
+            "heat_max": BN_HEAT_MAX, "lev_cap": BN_CROSS_LEV, "c2h_short": DLM_STREAM_SIDE_RISK.get(("close2h", -1), 1.0),   # v0.99.755 — the list's money
             "model": dict({k: m.get(k) for k in ("ver", "q", "trained_to", "rule", "research", "side_cap", "liq_buf", "load_risk", "osc_risk")},
                           streams=[{k: x.get(k) for k in ("name", "tf", "anchor", "depth_atr", "thr", "alive_bars", "take_atr", "stop_atr", "hold_bars", "far_take_atr", "pull_atr", "hard_stop_atr", "stop_mode", "close_h")} for x in m.get("streams") or []]) if m else None,
             "err": err, "scan": scan, "orders": orders[:40], "orders_n": len(orders),
@@ -45983,29 +45984,31 @@ function btListHtml(mod) {
   const charts = [...new Set(all.map(btKey))];
   const idx = all.map((t, i) => i).filter(i => st.f === 'all' || btKey(all[i]) === st.f);
   const rs = idx.map(i => all[i].r), avg = rs.reduce((a, b) => a + b, 0) / (rs.length || 1), wr = rs.filter(r => r > 0).length / (rs.length || 1) * 100;
-  const m50 = mod === 'dlm' ? dlmMoney50(idx.map(i => all[i]), window._dlmCfg || {risk: 4, max_pos: 20, buf: 1.5}) : null;   // v0.99.696
+  const m50 = mod === 'dlm' ? dlmMoney50(idx.map(i => all[i]), window._dlmCfg || {risk: 4.5, max_pos: 20, heat: 1.0, lev: 14, c2h: 0.5}) : null;   // v0.99.696
   if (mod === 'dlm') {   // v0.99.697 — by the close (the account after each trade then reads row by row), the close's date
     idx.sort((a, b) => (all[b].x || 0) - (all[a].x || 0) || (all[b]._seq || 0) - (all[a]._seq || 0) || all[b].t - all[a].t);   // the same hour: the sim's order
     idx.forEach(i => { all[i]._byClose = true; });
   }
   const chip = (k, lbl, n) => `<span onclick="btSet('${mod}', 'f', '${k}')" style="display:inline-block;padding:3px 9px;margin:0 6px 6px 0;border-radius:999px;cursor:pointer;border:1px solid var(--line);${st.f === k ? 'background:var(--card);color:var(--tx);' : 'color:var(--tx-3);'}">${lbl} · ${n}</span>`;
   let h = `<div>${chip('all', 'все', all.length)}${charts.length > 1 ? charts.map(c => chip(c, BT_SMC_GRP[c] || BT_EMA_TF[c] || BT_CH[c] || c, all.filter(t => btKey(t) === c).length)).join('') : ''}</div>
-    <div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">${idx.length} сделок · в среднем ${avg > 0 ? '+' : ''}${avg.toFixed(2)}R · WR ${wr.toFixed(0)}% · тап по сделке — график${m50 ? ` · сделки по времени закрытия (дата — закрытия) · у последних ${m50.n} рядом с R — $ сделки и счёт после неё, со $100 при риске ${(window._dlmCfg || {}).risk || 4}% из настроек, до ${(window._dlmCfg || {}).max_pos || 20} сделок сразу; в пачке сигналов маржа кончается — следующие меньше («N% размера») или не открываются («нет маржи», позиция меньше $5)` : ''}</div>
+    <div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">${idx.length} сделок · в среднем ${avg > 0 ? '+' : ''}${avg.toFixed(2)}R · WR ${wr.toFixed(0)}% · тап по сделке — график${m50 ? ` · сделки по времени закрытия (дата — закрытия) · у последних ${m50.n} рядом с R — $ сделки и счёт после неё, со $100 по правилам бота: риск ${(window._dlmCfg || {}).risk || 4.5}% из настроек × загрузка, кросс-маржа, общий риск до ${Math.round(((window._dlmCfg || {}).heat || 1) * 100)}% счёта, до ${(window._dlmCfg || {}).max_pos || 20} сделок сразу; в пачке сигналов место в риске кончается — следующие меньше («N% размера») или не открываются («нет места в риске»); лимитки, которые выставлялись, но не исполнились, здесь не учтены — вживую места меньше` : ''}</div>
     <div id="btg_${mod}" style="font-size:var(--fs-xs);margin-bottom:6px;">${btGateHtml(mod)}</div>`;
   h += idx.slice(0, st.n).map(i => btRowHtml(all[i], `btOpen('${mod}', ${i})`)).join('');
   if (idx.length > st.n) h += `<div style="text-align:center;margin-top:6px;"><button class="btnNeutral" onclick="btSet('${mod}', 'n', ${st.n + 60})">ещё ${Math.min(60, idx.length - st.n)}</button></div>`;
   return h;
 }
 function dlmMoney50(list, cfg, n = 50) {   // v0.99.696 — the user: "на последних 50 сделках из бэктеста писать сколько было бы
-  // денег со 100$ с учётом пачек сигналов и риском из настроек": the last n trades (by the fill), $100, the risk % of the
-  // equity a trade at the 2 ATR stop, at most max_pos at once, the margin with the bot's leverage (the liquidation buf x
-  // the emergency stop, isolated, up to 20x) — a trade without a free slot is skipped, without the margin it is smaller
+  // денег со 100$ с учётом пачек сигналов и риском из настроек". v0.99.755 — by the bot's rules now (the user: "переделай $"):
+  // cross margin (the coin's leverage up to the bot's cap), the risk % x the load (fewer than n open -> lo, else hi) x the 2h
+  // shorts' cut at the 1.75 ATR close stop, the open risk (the losses at the emergency stops) <= the cap of the equity — a
+  // trade short of room is smaller ("N% размера") or none ("нет места в риске"), at most max_pos at once, under $5 none.
+  // The old one sized an isolated margin and ran out of it on the bunches ("нет маржи" on the takes of a burst)
   list.forEach(t => { delete t._usd; delete t._bal; delete t._skip; delete t._cut; delete t._seq; });
   let seq = 0;
   const tr = list.filter(t => t.r != null && t.f && t.x && t.e && t.sl).sort((a, b) => a.f - b.f || a.t - b.t || (a.s < b.s ? -1 : a.s > b.s ? 1 : 0)).slice(-n);   // one order for the same hour
   if (!tr.length) return null;
   let eq = 100, peak = 100, mdd = 0, skipped = 0, cut = 0;
-  const open = [];
+  const open = [], ld = cfg.load || {n: 5, lo: 0.625, hi: 1.25}, cap = cfg.heat || 1.0, lev = cfg.lev || 14;
   const settle = upto => {
     open.sort((a, b) => a.x - b.x);
     while (open.length && open[0].x <= upto) {
@@ -46015,15 +46018,19 @@ function dlmMoney50(list, cfg, n = 50) {   // v0.99.696 — the user: "на по
   };
   for (const t of tr) {
     settle(t.f);
-    if (open.length >= cfg.max_pos) { skipped++; t._skip = 'нет места'; continue; }
+    if (open.length >= cfg.max_pos || eq <= 0) { skipped++; t._skip = 'нет места'; continue; }
     const st = Math.max(0.002, Math.abs(t.e - t.sl) / t.e), sth = t.sl2 ? Math.abs(t.e - t.sl2) / t.e : st * 1.5;
-    const lev = Math.min(20, Math.floor(1 / (cfg.buf * sth + 0.0105)));
-    if (lev < 1 || eq <= 0) { skipped++; t._skip = 'нет места'; continue; }
-    const full = eq * cfg.risk / 100; let ru = full, mg = ru / st / lev;
-    const free = (eq - open.reduce((a, p) => a + p.mg, 0)) * 0.9;
-    if (mg > free) { ru *= Math.max(0, free) / mg; mg = Math.max(0, free); cut++; t._cut = ru / full; }
-    if (ru / st < 5) { skipped++; t._skip = 'нет маржи'; delete t._cut; continue; }   // Binance: a position under $5 is not placed
-    open.push({x: t.x, r: t.r, ru, mg, t});
+    const k = (open.length < (ld.n || 5) ? (ld.lo || 1) : (ld.hi || 1)) * (t.st === 'close2h' && t.d < 0 ? (cfg.c2h != null ? cfg.c2h : 0.5) : 1);
+    const full = eq * cfg.risk / 100 * k; let ru = full;
+    const room = cap * eq - open.reduce((a, p) => a + p.heat, 0), need = ru * sth / st;
+    if (need > room) {
+      if (room < need * 0.1) { skipped++; t._skip = 'нет места в риске'; continue; }
+      ru *= room / need; cut++; t._cut = ru / full;
+    }
+    let mg = ru / st / lev; const free = (eq - open.reduce((a, p) => a + p.mg, 0)) * 0.9;
+    if (mg > free) { if (free <= 0) { skipped++; t._skip = 'нет маржи'; delete t._cut; continue; } ru *= free / mg; mg = free; cut++; t._cut = ru / full; }
+    if (ru / st < 5) { skipped++; t._skip = 'меньше $5'; delete t._cut; continue; }   // Binance: a position under $5 is not placed
+    open.push({x: t.x, r: t.r, ru, mg, heat: ru * sth / st, t});
   }
   settle(Infinity);
   return {eq: Math.max(0, eq), n: tr.length, skipped, cut, mdd, from: tr[0].f, to: Math.max(...tr.map(t => t.x))};
@@ -46498,7 +46505,8 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
   const m = d.model, rs = (m && m.research) || {}, rule = (m && m.rule) || {};
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? `<span class="pill pos">${d.dry ? 'торгует (dry-run)' : 'торгует'}</span>` : '<span class="pill">виртуально</span>');
   const sts = (m && m.streams) || [];
-  window._dlmCfg = {risk: d.risk || 4, max_pos: d.max_pos || 20, buf: (m && m.liq_buf) || 1.5};   // v0.99.696 — the backtest list's money
+  window._dlmCfg = {risk: d.risk || 4, max_pos: d.max_pos || 20, buf: (m && m.liq_buf) || 1.5,   // v0.99.696 — the backtest list's money
+                    heat: d.heat_max || 1.0, lev: d.lev_cap || 14, c2h: d.c2h_short != null ? d.c2h_short : 0.5, load: (m && m.load_risk) || null};   // v0.99.755 — the bot's rules
   const dur = (bars, h) => { const x = bars * h; return x >= 24 ? `${Math.floor(x / 24)} дн${x % 24 ? ' ' + x % 24 + ' ч' : ''}` : `${x} ч`; };
   const stTxt = x => { const h = x.tf === '2h' ? 2 : 4; return `<b>${x.tf === '2h' ? '2ч' : '4ч'}</b> — лимитка на ${x.depth_atr} ATR ${x.anchor === 'wick' ? 'за тенью только что закрытой свечи (под минимумом для лонга, над максимумом для шорта)' : 'от цены закрытия свечи'}, живёт ${x.alive_bars || 4} свечи (${dur(x.alive_bars || 4, h)}); ${x.far_take_atr ? `тейк ${x.far_take_atr} ATR, но если цена сначала уйдёт против на ${x.pull_atr} ATR (раньше, чем дойдёт до +${x.take_atr || 1} ATR) — тейк ${x.take_atr || 1} ATR` : `тейк ${x.take_atr || 1} ATR`}, ${x.stop_mode === 'close1h' ? `стоп — если ${(x.close_h || 1) > 1 ? x.close_h + '-часовая свеча графика' : 'часовая свеча'} закрылась за ${x.stop_atr || 2} ATR (аварийный стоп на бирже — ${x.hard_stop_atr || 3} ATR)` : `стоп ${x.stop_atr || 2} ATR`}, выход через ${dur(x.hold_bars || 32, h)}`; };
   let top = `<div class="dim hintx">Модель смотрит все ${d.coins_n || 210} монет на закрытии каждой свечи и в лучшем ~${m && m.q ? +((1 - m.q) * 100).toFixed(0) : 1}% моментов ставит лимитку — ловит продолжение прострела. Два вида, у каждого своя модель:<br>${sts.length ? sts.map(stTxt).join(';<br>') : stTxt({tf: '4h', anchor: 'wick', depth_atr: 1})}.<br>Если по монете стоят обе — сделкой становится та, что исполнилась первой, вторая снимается. Сделок до ${d.max_pos || 20} сразу, каждая на ${d.risk}% счёта.</div>`;

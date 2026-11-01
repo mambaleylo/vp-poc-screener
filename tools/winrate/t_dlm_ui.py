@@ -65,23 +65,30 @@ with sync_playwright() as p:
     rows = [l for l in pg.locator("#btBox_dlm").inner_text().split("\n") if "→ $" in l]
     import re as _re
     shown = [int(_re.sub(r"\D", "", l.split("→ $")[1].split("·")[0])) for l in rows]
-    rk, mp, buf = V.dlm_risk(), V.DLM_MAX_POS, float(V.dlm_model().get("liq_buf") or 1.5)
+    # v0.99.755 — the bot's rules: cross margin up to the leverage cap, the risk x the load x the 2h shorts' cut, the open
+    # risk at the emergency stops <= the cap, max_pos at once, under $5 none
+    rk, mp = V.dlm_risk(), V.DLM_MAX_POS; lr = V.dlm_model().get("load_risk") or {"n": 5, "lo": 1, "hi": 1}
+    capH, levC, c2h = V.BN_HEAT_MAX, V.BN_CROSS_LEV, V.DLM_STREAM_SIDE_RISK.get(("close2h", -1), 1.0)
     tr = sorted([t for t in _BTD["dlm"] if t.get("r") is not None], key=lambda t: (t["f"], t["t"], t["s"]))[-50:]
     eq, op, bal = 100.0, [], []
     def _settle(upto):
         global eq
         for p_ in sorted([p_ for p_ in op if p_[0] <= upto]): eq += p_[1] * p_[2]; op.remove(p_); bal.append(round(eq))
-    for t in tr:   # the same bunches, independently: close what ended, a slot, the margin by the leverage at the emergency stop
+    for t in tr:
         _settle(t["f"])
-        if len(op) >= mp: continue
+        if len(op) >= mp or eq <= 0: continue
         st = max(0.002, abs(t["e"] - t["sl"]) / t["e"]); sth = abs(t["e"] - t["sl2"]) / t["e"]
-        lev = min(20, int(1 / (buf * sth + 0.0105)))
-        if lev < 1: continue
-        ru = eq * rk / 100; mg = ru / st / lev; free = (eq - sum(p_[3] for p_ in op)) * 0.9
+        k = (lr["lo"] if len(op) < lr["n"] else lr["hi"]) * (c2h if t.get("st") == "close2h" and t["d"] < 0 else 1)
+        ru = eq * rk / 100 * k; need = ru * sth / st; room = capH * eq - sum(p_[4] for p_ in op)
+        if need > room:
+            if room < need * 0.1: continue
+            ru *= room / need
+        mg = ru / st / levC; free = (eq - sum(p_[3] for p_ in op)) * 0.9
         if mg > free:
-            ru *= max(0.0, free) / mg; mg = max(0.0, free)
-        if ru / st < 5: continue   # v0.99.697 — under Binance's $5 position: not placed
-        op.append((t["x"], t["r"], ru, mg))
+            if free <= 0: continue
+            ru *= free / mg; mg = free
+        if ru / st < 5: continue
+        op.append((t["x"], t["r"], ru, mg, ru * sth / st))
     _settle(float("inf"))
     m50_ok = len(rows) >= 20 and all(any(abs(x - b_) <= 1 for b_ in bal) for x in shown) and max(shown) <= max(bal) and len(bal) == len(pg.evaluate("() => (window._btData.dlm || []).filter(t => t._usd != null).length") * [0])
     # by the close: the account of a row = the one of the row below (the earlier close) + this row's $

@@ -21203,3 +21203,15 @@ v0.99.754 — ⚡ real trading: the load multiplier counts the real positions + 
   (bno_open) — nothing held on the exchange before (the money right for them); a stricter ⚡ threshold (score >= 1.03 /
   1.06 / 1.1 x the year's) and a shorter limit life (2 / 3 bars) — all worse.
 - Tests: t_dlm_binance (8 virtual open -> x lo; 3 real + 2 armed -> x hi), t_dlm_bot, t_bn_others — OK.
+
+v0.99.755 — ⚡ backtest list: the $ of the last 50 trades by the bot's rules (the user: "переделай $")
+- dlmMoney50 sized an isolated margin by the emergency stop (the rules before v0.99.717) and ran out of it on the bunches:
+  with the 1.75 ATR stop (bigger positions for the same risk) the takes of a burst showed "нет маржи" while the stops got
+  the money — the column looked as if only the losses traded. Now the bot's rules: the risk % x the load (lo below n open,
+  hi from n) x the 2h shorts' cut, cross margin up to the leverage cap (14x), the open risk at the emergency stops <= the
+  cap (100%) — short of room smaller ("N% размера") or none ("нет места в риске"), max_pos at once, under $5 none. The
+  status gives heat_max / lev_cap / c2h_short. The caption says the never-filled armed limits are not in it.
+- The user's WLD / TLM (stopped at the 1.75 ATR close stop, the price at the take later): of the pool's 2886 trades 58 took
+  the take with the old 2 / 1.1 exits and stop now (-103R), the 2286 takes earn +0.67R instead of +0.54R (+306R) — in
+  all +764R vs +623R.
+- Tests: t_dlm_ui (the column vs an independent replica of the same rules) — OK.
