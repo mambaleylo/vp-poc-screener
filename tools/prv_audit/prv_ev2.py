@@ -1,6 +1,5 @@
 """prv_ev.py on the lab-store's candles (the old research folder with its data is gone): Binance 1h of the 211 P/R coins
-from <LABSTORE>/data/1h/*.csv.gz; the funding history is not in the store (and the network policy denies Binance) ->
-the Neuro funding features are empty (NaN) — the models of this round are trained without them, and so must the bot's be.
+from <LABSTORE>/data/1h/*.csv.gz; the funding history from <LABSTORE>/data/funding (dl_fund2.py, data.binance.vision).
 -> <LABSTORE>/prv_ev/<SYM>.npz.  usage: prv_ev2.py [coins...]"""
 import sys, os, gzip, re
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -25,6 +24,8 @@ def load(sym, tf="1h"):
 
 
 common.load = load; common.D = ST
+import nx_build
+nx_build.D = ST   # the funding: <LABSTORE>/data/funding (dl_fund2.py)
 import prv_ev as PE
 PE.load = load; PE.D = ST
 
