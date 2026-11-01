@@ -40,3 +40,8 @@ above its daily EMA50 (feature `s_b_ema50` > 0) — top 3%: +0.65R instead of +0
 year better; top 10%: x18.8 instead of x10.1 at an equal drawdown. Not kept: entering on the touch hour's close back
 above the EMA (worse on both sets), at most 2 / 4 entries an hour, at most 6 / 20 open, BTC's 7-day move, and a model
 retrained on longs only (labels 4R and 3R: worse on both sets than the deployed model + the long filter). Model ver 5.
+
+Audit 2026-11-01 (`run_ema_repro.sh`: `dl.py 1h` -> `er_build` -> `er_df` -> `er_lab3` -> `er_pen` -> `ema_repro.py`, ~1.5 h):
+the chain from scratch gives the same 1,146,895 touches up to 2026-09-28 23:00 (= the model's trained_to); the retrained
+trees are not byte-identical but the scores correlate 0.987 and the top 4% overlap 91% with the same R (+1.23R vs +1.21R).
+So the deployed model is reproducible; retrain with this chain (move the dl.py months forward for fresh data). Needs pyarrow.
