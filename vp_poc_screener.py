@@ -36481,6 +36481,7 @@ def _dlm_take_watch(t, mark=None, now=None):
 DLM_ARM_ATR = float(os.environ.get("VP_DLM_ARM_ATR", "1.0"))   # v0.99.691 — a real limit goes on the exchange when the price is this close (v0.99.702: 0.3 -> 1.0 ATR — at 0.3 a fast spike through the level beat the 5 s polls: ~20% of the backtest's fills missed live, arm_miss.py on 1m; at 1.0 ~2%)
 DLM_SWAP_ATR = 0.25   # v0.99.715 — the parallel stream's limit takes the coin's place on the exchange when this much nearer
 DLM_DISARM_ATR = 1.6   # ... and comes off again (back to waiting) when the price goes this far from it (v0.99.702: 1.0 -> 1.6)
+DLM_OTHERS_FIRST = os.environ.get("VP_DLM_OTHERS_FIRST", "1") == "1"   # v0.99.753 — a P/R / SMC / EMA / HTF entry takes an armed ⚡ limit's room (dlm_free_room)
 DLM_PRIO = os.environ.get("VP_DLM_PRIO", "0") == "1"   # v0.99.752 — no room: a higher-scored limit takes an armed lower one's place (_dlm_bump); off: with the never-filled limits in the money (money_arm2.py) no better at the 1 ATR arming
 DLM_THROUGH_ATR = 0.3   # v0.99.702 — the price already this far through a waiting order's level: no trade (another entry than the research's)
 
@@ -36534,6 +36535,37 @@ def _dlm_prio(o):
     return float(o.get("score") or 0) / thr if thr > 0 else float(o.get("score") or 0)
 
 
+def _dlm_armed_heat(a):
+    """$ an armed ⚡ limit holds in the open-risk cap (bn_heat's way: its size to its exchange stop)"""
+    r = a.get("real") or {}; scl = float(r.get("scl") or 1.0)
+    sp = float(r.get("pre_sl_px") or 0) or (a["lv"] - a["side"] * 3.0 * (a.get("atr") or 0)) * scl
+    return float(r.get("qty") or 0) * max(0.0, a["side"] * (float(r.get("price") or a["lv"]) * scl - sp))
+
+
+def dlm_free_room(need, room, who):
+    """v0.99.753 — a P/R / SMC / EMA / HTF entry short of room in the open-risk cap: the armed, not filled ⚡ limits (the lowest
+    priority first) back to waiting until it fits (tools/winrate money_arm2.py "oth": their trades earn more a trade, and
+    the ⚡ limits that never fill — 80–90% — held the room) -> the room freed ($)"""
+    if not DLM_OTHERS_FIRST or room >= need:
+        return 0.0
+    with _dlm_lock:
+        armed = [o for o in _DLM["orders"] if o["status"] == "OPEN" and (o.get("real") or {}).get("id") and (o.get("real") or {}).get("ex") == "binance"]
+    freed = 0.0
+    for a in sorted(armed, key=_dlm_prio):
+        if room + freed >= need:
+            break
+        h = _dlm_armed_heat(a)
+        try:
+            if not _dlm_cancel_back(a):
+                continue
+        except Exception as e:
+            log_error(f"dlm free room {a['symbol']}: {e}")
+            continue
+        a["hold"] = f"снята с биржи: место в общем риске отдано сделке {who} — снова ждёт места"
+        freed += h
+    return freed
+
+
 def _dlm_bump(o, armed):
     """v0.99.752 — the room by the score (tools/winrate money_arm.py — the bot's arming in the money: a limit holds its risk
     from the moment it goes on the exchange; with "the first come takes the room" a year from $100 the usual $37.9k, the bad
@@ -36564,8 +36596,7 @@ def _dlm_bump(o, armed):
         _sl, kx = _dlm_size_stop(o, rule)
         need = eq * dlm_risk(eq) * dlm_load_mult() * dlm_osc_mult(o["symbol"], o["side"]) * kx * dlm_stream_mult(o) / 100
         room = BN_HEAT_MAX * eq - bn_heat(eq)
-    heat_of = lambda a: (lambda r: float(r.get("qty") or 0) * max(0.0, a["side"] * (float(r.get("price") or a["lv"]) * float(r.get("scl") or 1.0)
-                         - (float(r.get("pre_sl_px") or 0) or (a["lv"] - a["side"] * 3.0 * (a.get("atr") or 0)) * float(r.get("scl") or 1.0)))))(a["real"])
+    heat_of = _dlm_armed_heat
     fits = lambda: n_all < cap_n and n_side < side_cap and room >= need * 0.999
     off = []
     for a in low:
@@ -36956,6 +36987,11 @@ def bno_open(mode, symbol, direction, entry, sl, tp, kx=1.0):
     risk = float(MODULE_RISK_PCT.get(mode) or BN_OTHERS_RISK.get(mode, 1.0)) * kx   # v0.99.700: kx — the stop sl is the emergency one
     mt = bn_margin_mode(bsym)   # v0.99.717 — cross (the open risk capped; v0.99.744: the coin's highest leverage) or isolated (the leverage by the stop)
     if mt == "CROSSED":
+        try:   # v0.99.753 — short of room: the armed ⚡ limits make way
+            eq_ = acct["equity"]
+            dlm_free_room(eq_ * risk / 100, BN_HEAT_MAX * eq_ - bn_heat(eq_), {"prv": "P/R", "smc": "🧱 SMC", "emw": "📈 EMA", "htf": "📏 HTF", "cfl": "🔄 Классика"}.get(mode, mode))
+        except Exception as e:
+            log_error(f"bn others free room: {e}")
         risk, why = bn_heat_cap(risk, acct["equity"])
         if why:
             return {"status": "SKIPPED", "detail": why}

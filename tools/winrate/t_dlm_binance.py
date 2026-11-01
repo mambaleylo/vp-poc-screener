@@ -283,6 +283,13 @@ low = dict(mk("AAA_USDT", 1, 5.0, 0.05), score=0.20, st="wick4h"); V._DLM["order
 V.dlm_real_tick()
 kept = low.get("real") is None and bool((lo2.get("real") or {}).get("id")) and bool((hi.get("real") or {}).get("id")) and "заняты все" in (low.get("hold") or "")
 print(f"   the room by the score: two armed {both} · a higher one takes the lowest one's place {bumped} · a lower one waits {kept}")
+# v0.99.753 — a P/R / SMC / EMA / HTF entry short of room: the armed ⚡ limits make way, the lowest priority first, only as many as needed
+_h_lo2, _h_hi = V._dlm_armed_heat(lo2), V._dlm_armed_heat(hi)
+_fr = V.dlm_free_room(_h_lo2 * 0.5, 0.0, "🧱 SMC")   # needs half of the lower one's room
+_fr_ok = (abs(_fr - _h_lo2) < 1e-6 and lo2.get("real") is None and "сделке 🧱 SMC" in (lo2.get("hold") or "") and bool((hi.get("real") or {}).get("id"))
+          and V.dlm_free_room(10.0, 50.0, "P/R") == 0.0 and bool((hi.get("real") or {}).get("id")))   # room enough -> nothing taken off
+print(f"   the others first: freed {_fr:.1f}$ (the lower one's {_h_lo2:.1f}$), the higher one kept {_fr_ok}")
+res["the others first: a P/R / SMC entry takes the lowest armed ⚡ limit's room"] = _fr_ok
 res["the room by the score: a higher-scored limit takes an armed lower one's place"] = both and bumped and kept
 for o_ in V._DLM["orders"]:
     if (o_.get("real") or {}).get("id"): V._dlm_cancel_back(o_)
