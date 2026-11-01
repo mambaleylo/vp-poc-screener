@@ -21191,3 +21191,15 @@ first; the open-risk cap 100% (the user: "Да, но давай выложим �
 - Tests: t_dlm_binance (the room by the score, the others first, the parallel stream's swap within 0.6 ATR, the cap
   100%), t_hdr_htf, t_smc_bot / t_htf_bot (the engine's folder from any working directory), t_dlm_bot, t_dlm_ui,
   t_bn_others, t_mod_ui, t_model_refresh, t_lab_export, t_bno_stop — OK.
+
+v0.99.754 — ⚡ real trading: the load multiplier counts the real positions + the armed limits (the user: "Да")
+- dlm_load_mult (x0.625 below 5 open ⚡ trades, x1.25 from 5) counted every open ⚡ trade, the virtual ones too. On the
+  strictest money (money_arm2.py, vload=1) that gave x1.25 at the market-wide drops where the exchange had no room — the
+  big trades ate the room, the good fills skipped: the bundle + HTF a year from $100 usual ~$12.7k vs ~$27.2k when it
+  counts what is on the exchange (the header of v0.99.753 assumed this); without the multiplier ~$20.2k.
+- Real trading on Binance (autotrade on, not dry-run): n = the real open ⚡ positions + the armed real limits; virtual
+  trading as before. DLM_LOAD_REAL (VP_DLM_LOAD_REAL=0 -> the old count).
+- Also checked: Binance's $5 minimum order (no change in the money); P/R / SMC / EMA / HTF / 🔄 enter at the market
+  (bno_open) — nothing held on the exchange before (the money right for them); a stricter ⚡ threshold (score >= 1.03 /
+  1.06 / 1.1 x the year's) and a shorter limit life (2 / 3 bars) — all worse.
+- Tests: t_dlm_binance (8 virtual open -> x lo; 3 real + 2 armed -> x hi), t_dlm_bot, t_bn_others — OK.
