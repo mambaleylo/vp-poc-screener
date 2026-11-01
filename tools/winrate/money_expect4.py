@@ -5,7 +5,7 @@ import sys, os, json, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import money_arm2 as MA2, money_multi as M, money_expect as X
 from multiprocessing import Pool
-RULE = sys.argv[1] if len(sys.argv) > 1 else "A"; SEEDS = [1, 2, 3]
+RULE = sys.argv[1] if len(sys.argv) > 1 else "A"; SEEDS = [int(x) for x in (sys.argv[2] if len(sys.argv) > 2 else "1,2,3").split(",")]
 _D = {}
 def _init(D): _D.update(D)
 def job(a):

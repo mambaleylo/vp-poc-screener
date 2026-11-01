@@ -21169,3 +21169,25 @@ v0.99.752 — the honest header: the armed ⚡ limits hold room, the never-fille
   stream's threshold back to waiting) and the arming by the priority — in the code, off (VP_DLM_PRIO=1 turns it on): at
   the 1 ATR arming it is no better (56 of 144 windows).
 - Tests: t_dlm_binance (the rule's mechanics with it on), t_hdr_htf — OK.
+
+v0.99.753 — ⚡ limits: armed at 0.6 ATR (was 1), off at 1.0 (was 1.6), the room by the score, P/R / SMC / EMA / HTF
+first; the open-risk cap 100% (the user: "Да, но давай выложим после всех проверок", "Обе, выкладывай")
+- The strictest money (money_arm2.py: every ⚡ order 2023–2026, the never-filled ones holding room too) showed the room as
+  ⚡'s real limit: the armed limits that never fill (80–90%) hold the 20 places and the open-risk cap at the market-wide
+  drops, when the best fills come. A year from $100, 144 windows (the bundle + HTF, the usual year): the bot of v0.99.752
+  ~$7.2k; the arming at 0.3–0.7 ATR with the room by the score and the others first ~$21–29k (0.6: better in 139 of 144);
+  + off at 1.0 ATR and the cap 100% — bad ~$8.1k · usual ~$28.9k · good ~$194k · drawdowns ~66% (better than the plain
+  new rules in 129 of 144). Turning ⚡ off: the bundle ~$1.9k — ⚡ is needed.
+- The fills the closer arming misses (arm_miss1m.py, 498 fills on Binance's 1-min candles): a wick through and back
+  within a minute / closed > 0.3 ATR through — ~15% at 0.6 vs ~10% at 1.0 ATR; their R negative (-0.21R at 0.6, all
+  +0.21R): the fast drops; missing them costs nothing.
+- Re-checked on the strictest money with the new rules: 14x (10x / 20x worse), the cap (90% worse, 100% better), ⚡ 4.5%,
+  EMA 3%, SMC / P/R / HTF risks, the exits 1.75 / 1.2 (2 / 1.1 worse in 34 of 36), the 2h shorts x0.5, the WaveTrend rule.
+- DLM_ARM_ATR 1.0 -> 0.6, DLM_DISARM_ATR 1.6 -> 1.0, DLM_PRIO on (_dlm_bump: no room -> an armed, not filled ⚡ limit of
+  a lower score over its stream's threshold back to waiting; the near ones armed by that priority), DLM_OTHERS_FIRST on
+  (dlm_free_room: a P/R / SMC / EMA / HTF entry short of room takes the armed ⚡ limits' room, the lowest priority
+  first), BN_HEAT_MAX 0.95 -> 1.00. EXPECT_YEAR: the bundle + HTF bad ~$8.1k · usual ~$28.9k · good ~$194k · drawdowns
+  ~66%; without HTF $6.9k / $27.8k / $167k / 66%; ⚡ alone $0.5k / $3.0k / $9.9k / 70%. The settings' text (100%).
+- Tests: t_dlm_binance (the room by the score, the others first, the parallel stream's swap within 0.6 ATR, the cap
+  100%), t_hdr_htf, t_smc_bot / t_htf_bot (the engine's folder from any working directory), t_dlm_bot, t_dlm_ui,
+  t_bn_others, t_mod_ui, t_model_refresh, t_lab_export, t_bno_stop — OK.

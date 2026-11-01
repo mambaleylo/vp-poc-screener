@@ -7,9 +7,9 @@ from common import V
 import os; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "new_ind"))
 import lv_engine as LE
 def _lv2(sym):   # the research engine's levels of the coin (lv2/<sym>.npz), re-made in seconds when missing (the restored lab)
-    if not os.path.exists(f"lv2/{sym}.npz"):
-        os.makedirs("lv2", exist_ok=True); LE.run(sym)
-    return np.load(f"lv2/{sym}.npz")
+    if not os.path.exists(f"{LE.OUT}/{sym}.npz"):   # the engine's own folder (any working directory)
+        os.makedirs(LE.OUT, exist_ok=True); LE.run(sym)
+    return np.load(f"{LE.OUT}/{sym}.npz")
 ok = True
 def bars(sym):
     T, O, H, L, C, Vv = LE.load_np(sym)

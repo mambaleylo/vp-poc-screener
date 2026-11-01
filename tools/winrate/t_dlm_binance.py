@@ -374,12 +374,12 @@ V._DLM["catchup"] = cu0
 # (b) no room -> waits saying why, (c) Binance refusing the margin type change -> the isolated way (the leverage by the stop)
 X["algo_api"] = True; X["dual"] = False; X["dual_lock"] = False; V._BNF["dual"] = None; X["pos"].clear()
 V._DLM.update({"orders": [], "trades": []}); V._BNO["pos"].clear(); X["wallet"] = X["free"] = 1000.0
-V._BNO["pos"]["ZZ_USDT"] = {"mode": "smc", "bsym": "ZZUSDT", "side": 1, "qty": 100.0, "entry": 10.0, "sl_px": 1.3}   # $870 at its stop (v0.99.749: the cap 95% -> $80 room)
+V._BNO["pos"]["ZZ_USDT"] = {"mode": "smc", "bsym": "ZZUSDT", "side": 1, "qty": 100.0, "entry": 10.0, "sl_px": 10.0 - (V.BN_HEAT_MAX * 1000 - 80) / 100}   # $80 below the cap at its stop (v0.99.753: the cap 100%)
 h0 = V.bn_heat(1000.0)
 c1 = mk("AAA_USDT", 1, 10.0, 0.1); c1["id"] += "x1"; V._DLM["orders"].append(c1); V.dlm_real_place(c1)
 rc = c1.get("real") or {}; oc = X["orders"].get(int(rc.get("id") or 0)) or {}
 loss_c = float(oc.get("quantity", 0)) * (10.0 - float(rc.get("pre_sl_px") or 0))   # at its stop on the exchange
-scaled = rc.get("status") == "LIMIT" and rc.get("margin") == "CROSSED" and rc.get("lev") == 14 and V.BN_HEAT_MAX * 1000 - 890 <= loss_c <= V.BN_HEAT_MAX * 1000 - 869   # the cap - $870 room (v0.99.749: 95%)
+scaled = rc.get("status") == "LIMIT" and rc.get("margin") == "CROSSED" and rc.get("lev") == 14 and 60 <= loss_c <= 81   # scaled to the $80 room
 c2 = mk("BBB_USDT", 1, 5.0, 0.05); c2["id"] += "x2"; V._DLM["orders"].append(c2); V.dlm_real_place(c2)
 full = c2.get("real") is None and "общий риск" in (c2.get("hold") or "")
 V._DLM["orders"] = [x for x in V._DLM["orders"] if x is not c2]; V._dlm_cancel_back(c1); V._DLM["orders"] = []; V._BNO["pos"].clear()
@@ -387,7 +387,7 @@ X["mt_lock"] = {"AAAUSDT"}; X["mtype"]["AAAUSDT"] = "ISOLATED"
 c3 = mk("AAA_USDT", 1, 10.0, 0.1); c3["id"] += "x3"; V._DLM["orders"].append(c3); V.dlm_real_place(c3)
 iso = (c3.get("real") or {}).get("margin") == "ISOLATED" and X["mtype"]["AAAUSDT"] == "ISOLATED"
 print(f"   cross: heat before {h0:.0f}$ · scaled to the room {scaled} (loss at the stop {loss_c:.0f}$) · no room -> waits {full} · refused -> isolated {iso}, lev {(c3.get('real') or {}).get('lev')}")
-res["cross: the open risk capped at 95%, a refused change -> isolated"] = abs(h0 - 870) < 0.01 and scaled and full and iso
+res["cross: the open risk capped (100%), a refused change -> isolated"] = abs(h0 - (V.BN_HEAT_MAX * 1000 - 80)) < 0.01 and scaled and full and iso
 if (c3.get("real") or {}).get("id"): V._dlm_cancel_back(c3)
 X["mt_lock"] = set(); V._DLM["orders"] = []
 # v0.99.708 — (a) the limit goes with its stop + take (closePosition triggers) and a GTD; (b) "another phone": the state lost ->

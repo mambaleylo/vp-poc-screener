@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.752"
+APP_VERSION = "0.99.753"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28538,10 +28538,11 @@ _PROC_START = time.time()
 # the bot gives the room to the first level the price reaches; the lab's score order was ~25% too kind)
 # v0.99.752 — the strictest money (tools/winrate money_arm2.py / money_expect4.py): every ⚡ order hour by hour — an armed
 # limit holds its room from the moment it goes on the exchange, the never-filled ones (80–90% of them) too; the bot's
-# nearer-limit swap; the earlier numbers had counted the room only from the fill
-EXPECT_YEAR = {"dlm": {"p10": 248, "p50": 679, "p90": 2624, "dd": 85, "last12": 370},
-               "bundle": {"p10": 2014, "p50": 5325, "p90": 17750, "dd": 83, "last12": 1625},
-               "bundle_htf": {"p10": 2439, "p50": 7248, "p90": 23587, "dd": 83, "last12": 5446}}
+# nearer-limit swap. v0.99.753 — with the ⚡ limits armed at 0.6 ATR, off at 1.0, the room by the score, the others
+# first, the open-risk cap 100%
+EXPECT_YEAR = {"dlm": {"p10": 510, "p50": 2961, "p90": 9905, "dd": 70, "last12": 3207},
+               "bundle": {"p10": 6852, "p50": 27795, "p90": 167055, "dd": 66, "last12": 19409},
+               "bundle_htf": {"p10": 8075, "p50": 28858, "p90": 193821, "dd": 66, "last12": 25558}}
 
 
 @app.route("/api/boot")
@@ -36480,7 +36481,7 @@ def _dlm_take_watch(t, mark=None, now=None):
 # ---- the exchange side: a real GTC limit, then the stop (trigger) and the take (a reduce-only limit = maker) ----
 DLM_ARM_ATR = float(os.environ.get("VP_DLM_ARM_ATR", "0.6"))   # v0.99.753 — 1.0 -> 0.6 (money_arm2.py: an armed limit holds room while it waits — 80–90% never fill; 0.3–0.7 the usual year ~3x of 1.0's; arm_miss1m.py: the fills missed on the fast drops ~15% at 0.6 vs ~10% at 1.0, their R negative). v0.99.691 — a real limit goes on the exchange when the price is this close (v0.99.702: 0.3 -> 1.0 ATR — at 0.3 a fast spike through the level beat the 5 s polls: ~20% of the backtest's fills missed live, arm_miss.py on 1m; at 1.0 ~2%)
 DLM_SWAP_ATR = 0.25   # v0.99.715 — the parallel stream's limit takes the coin's place on the exchange when this much nearer
-DLM_DISARM_ATR = 1.6   # ... and comes off again (back to waiting) when the price goes this far from it (v0.99.702: 1.0 -> 1.6)
+DLM_DISARM_ATR = 1.0   # v0.99.753 — 1.6 -> 1.0 (money_arm2.py: an armed limit the price left frees its room sooner; 0.4 ATR above the 0.6 arming, no on / off churn) ... and comes off again (back to waiting) when the price goes this far from it (v0.99.702: 1.0 -> 1.6)
 DLM_OTHERS_FIRST = os.environ.get("VP_DLM_OTHERS_FIRST", "1") == "1"   # v0.99.753 — a P/R / SMC / EMA / HTF entry takes an armed ⚡ limit's room (dlm_free_room)
 DLM_PRIO = os.environ.get("VP_DLM_PRIO", "1") == "1"   # v0.99.753 — on (with the 0.6 ATR arming and the others first: better in 139 of 144 windows)   # v0.99.752 — no room: a higher-scored limit takes an armed lower one's place (_dlm_bump); off: with the never-filled limits in the money (money_arm2.py) no better at the 1 ATR arming
 DLM_THROUGH_ATR = 0.3   # v0.99.702 — the price already this far through a waiting order's level: no trade (another entry than the research's)
@@ -36827,7 +36828,7 @@ BN_OTHERS = os.environ.get("VP_BN_OTHERS", "0") == "1"
 # the cut) for ~5% more median. No liquidation in any
 BN_CROSS = os.environ.get("VP_BN_CROSS", "1") == "1"
 BN_CROSS_LEV = int(os.environ.get("VP_BN_CROSS_LEV", "14"))   # the ceiling; the coin's bracket and the account's cap may give less
-BN_HEAT_MAX = 0.95   # v0.99.749 — 0.90 -> 0.95 (the user: "3% и 95%"; money_params.py on the restored lab: the usual year +8%, the drawdown 61 -> 66%)
+BN_HEAT_MAX = 1.00   # v0.99.753 — 0.95 -> 1.00 (the user: "Обе"; money_arm2.py with the new arming: the usual year +12%, the drawdown 63 -> 66%). v0.99.749 — 0.90 -> 0.95 (the user: "3% и 95%"; money_params.py on the restored lab: the usual year +8%, the drawdown 61 -> 66%)
 
 
 def bn_margin_mode(bsym):
@@ -42322,7 +42323,7 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow subRow">
         <div>
-          <div class="label">↳ 💱 Кросс-маржа, плечо до 14x (или максимум монеты), общий риск до 95%</div>
+          <div class="label">↳ 💱 Кросс-маржа, плечо до 14x (или максимум монеты), общий риск до 100%</div>
           <div class="sub hintx">новые позиции на Binance — в кросс-марже с наибольшим плечом, которое Binance даёт монете при этом размере позиции (не больше лимита аккаунта; потеря на стопе от плеча не зависит — размер позиции считается от риска, а маржи на позицию нужно меньше), а предел — сам риск: сумма потерь всех открытых позиций и выставленных лимиток ⚡, если все сработают по стопам на бирже, не больше 90% счёта (новая сделка урезается, чтобы в него уложиться). В изолированной марже пределом была маржа: на истории она урезала 31% сделок и отменяла ещё 20% — долгие позиции SMC / P/R / EMA держали её, когда приходили лучшие пачки ⚡. За год со $100: плохой год $1 631 → $2 393, медиана $17 743 → $24 773, последние 12 мес $37 206 → $72 757, просадка та же ~61%. Выключено — как раньше: изолированная, плечо по стопу. Монета, где Binance не даёт сменить режим (на ней позиция или ордер), торгуется по-старому</div>
         </div>
         <label class="switch"><input type="checkbox" id="setBnCross"><span class="switchSlider"></span></label>
