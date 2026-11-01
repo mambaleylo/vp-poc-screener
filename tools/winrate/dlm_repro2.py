@@ -54,4 +54,8 @@ for stream in STREAMS:
     sb, sl = set(pb.tolist()), set(pl.tolist())
     print(f"ИТОГ {stream}: отбор бота {nb}: {f_(pb)} | отбор пересборки {nb}: {f_(pl)} | общих {len(sb & sl)} | только бот {f_(np.array(sorted(sb - sl)))} | "
           f"только пересборка {f_(np.array(sorted(sl - sb)))} | корреляция в лучших 20% {np.corrcoef(bot, sct)[0, 1]:.3f}", flush=True)
+    SD = D["side"]
+    for sd_, nm_ in ((1, "лонги"), (-1, "шорты")):
+        b_ = pb[SD[pb] == sd_]; l_ = pl[SD[pl] == sd_]
+        print(f"   {stream} {nm_}: бот {f_(b_)} | пересборка {f_(l_)} | общих {len(set(b_.tolist()) & set(l_.tolist()))}", flush=True)
 print("repro2 done", flush=True)
