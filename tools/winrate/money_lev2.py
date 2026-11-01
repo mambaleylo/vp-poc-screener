@@ -9,7 +9,8 @@ ARGV, sys.argv = sys.argv[1:], sys.argv[:1]
 import money_arm2 as MA2, money_multi as M, money_expect as X, money_rbx as RB
 from multiprocessing import Pool
 F = RB.F; SEEDS = (1, 2)
-VARS = {f"{c}x": F.replace("cap=17", f"cap={c}") for c in (17, 20, 25, 30, 40, 50)}
+LEVS = [int(x) for x in os.environ.get("LEVS", "17,20,25,30,40,50").split(",")]   # 150 = no ceiling: each coin its own Binance maximum at the position's size
+VARS = {(f"{c}x" if c < 150 else "максимум монеты"): F.replace("cap=17", f"cap={c}") for c in LEVS}
 _D = {}
 def _init(D): _D.update(D)
 def job(a):
