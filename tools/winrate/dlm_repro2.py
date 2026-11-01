@@ -12,7 +12,10 @@ sys.argv = sys.argv[:1] + ["x", "0", "12"]
 src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "dlm_wf2.py")).read()
 exec(src[src.index("C = json.load"):src.index("OUT = f")])   # GROUP, pr — exactly dlm_wf2's
 M = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "vp_dlm_model.json")))
-for stream in ("wick4h", "close2h"):
+import dlm_engine as DE
+LABEL = os.environ.get("LABEL", "now")   # "e1": the label the deployed models learned (take 1 / stop 2 ATR by a touch / 32 bars)
+STREAMS = os.environ.get("STREAMS", "wick4h,close2h").split(",")
+for stream in STREAMS:
     S = [s for s in M["streams"] if s["name"] == stream][0]
     rows = {k: [] for k in ("coin", "t", "side", "F", "R", "tout")}
     for c, g in GROUP.items():
@@ -22,10 +25,20 @@ for stream in ("wick4h", "close2h"):
         if not len(z["t"]): continue
         rows["coin"].append(np.full(len(z["t"]), c))
         for k in ("t", "side", "F", "R", "tout"): rows[k].append(z[k])
-    D = {k: np.concatenate(v) for k, v in rows.items()}
+        if LABEL == "e1":
+            T1, O1, H1, L1, C1, V1 = DE.load1h(c); p_ = DE.STREAMS[stream]; bs = p_["hh"] * 3600
+            fl, _, _, R1, _, to1 = DE.fill_walk(T1, O1, H1, L1, C1, z["t"].astype(np.int64), z["side"].astype(np.int64), z["lv"], z["atr"], bs, p_["ch"],
+                                                DE.ALIVE, 32, 1.0, 2.0, 2.0, DE.FEE_IN, DE.FEE_TAKE, DE.FEE_OUT, DE.FUND)
+            rows.setdefault("RE1", []).append(np.where(fl, R1, np.nan)); rows.setdefault("TE1", []).append(np.where(fl, to1, z["tout"]))
+    D = {k: np.concatenate(v) for k, v in rows.items() if v}
     TR = np.array([GROUP[c] == "train" for c in D["coin"]]); T = D["t"]; F = D["F"]
     tr = np.flatnonzero(TR & (D["tout"] < A - 3 * 86400)); te = np.flatnonzero((T >= A) & (T < ts(2026, 11)))
-    yv = np.clip(D["R"], -1.5, 1.5); sc = np.zeros(len(te)); k = 0; t0 = time.time()
+    if LABEL == "e1":
+        tr = np.flatnonzero(TR & (D["TE1"] < A - 3 * 86400) & np.isfinite(D["RE1"]))
+        yv = np.clip(np.nan_to_num(D["RE1"]), -1.5, 1.5)
+    else:
+        yv = np.clip(D["R"], -1.5, 1.5)
+    sc = np.zeros(len(te)); k = 0; t0 = time.time()
     for X in (F[:, :28], F):
         for seed in range(10):
             sc += lgb.LGBMRegressor(random_state=seed, **pr).fit(X[tr], yv[tr]).predict(X[te]); k += 1
