@@ -49,7 +49,7 @@ def build(pool_name):
                        "e": t["e"] * scl, "stream": None})
     EV.sort(key=lambda v: v["t0"])
     return EV
-def run(EV, A, B, cap=20.0, wf=None, eq0=200.0):
+def run(EV, A, B, cap=20.0, wf=None, eq0=200.0, heat=0.9, side_cap=20, rk_=None, load=(5, 0.625, 1.25)):
     """one window [A, B): the equity at B (open trades marked), cut / skipped, the hourly drawdown, the liquidation hours"""
     cash = eq0; opn = []; i = bisect.bisect_left([v["t0"] for v in EV], A); cut = skip = 0; peak = eq0; mdd = 0.0; liq = 0; mmx = 0.0
     for h in range(A, B, 3600):
@@ -68,12 +68,12 @@ def run(EV, A, B, cap=20.0, wf=None, eq0=200.0):
             v = EV[i]; i += 1
             if v["t0"] < h - 3600: continue
             if any(o["sym"] == v["sym"] for o in opn): continue
-            if v["mod"] == "dlm" and sum(1 for o in opn if o["mod"] == "dlm") >= 20: continue
-            rk = RK[v["mod"]] / 100
+            if v["mod"] == "dlm" and sum(1 for o in opn if o["mod"] == "dlm") >= side_cap: continue   # the bot: DLM_MAX_POS 20 at once (and 20 a side)
+            rk = (rk_ or RK)[v["mod"]] / 100
             if v["mod"] == "dlm":
-                rk *= 0.625 if sum(1 for o in opn if o["mod"] == "dlm") < 5 else 1.25
+                rk *= load[1] if sum(1 for o in opn if o["mod"] == "dlm") < load[0] else load[2]
             if wf: rk *= wf(v)
-            rd = eq * rk; hn = rd * v["sth"] / v["st"]; room = 0.9 * eq - sum(o["heat"] for o in opn)
+            rd = eq * rk; hn = rd * v["sth"] / v["st"]; room = heat * eq - sum(o["heat"] for o in opn)
             if hn > room:
                 if room < hn * 0.1: skip += 1; continue
                 rd *= room / hn; cut += 1
