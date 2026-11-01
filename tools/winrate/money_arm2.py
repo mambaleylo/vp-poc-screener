@@ -38,6 +38,14 @@ def orders_exits(OR, take, soft, hard=3.0):
             f = bool(fl[k]); e = float(fill[k]) if f else x["lv"]
             out.append(dict(x, filled=f, t1h=int(t1h[k]), e=e, r=float(R[k]), t1=int(tout[k]), st=soft * x["atr"] / e, sth=hard * x["atr"] / e))
     out.sort(key=lambda o: o["t"]); return out
+VOPEN = None
+def virt_open():
+    """the bot's virtual ⚡ trades open at each hour (dlm_load_mult counts them): the pool's trades (dlm_pool's rules)"""
+    global VOPEN
+    if VOPEN is None:
+        P = json.load(open(f"{M.ST}/wf/pool_base.json")); ev = sorted([(x["t1h"] + 3600, 1) for x in P] + [(x["tout"], -1) for x in P])
+        VOPEN = (np.array([e[0] for e in ev]), np.cumsum([e[1] for e in ev]))
+    return VOPEN
 H1 = {}
 def bar(coin, h):
     if coin not in H1: H1[coin] = DE.load1h(coin)
@@ -55,6 +63,8 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     if "mp" in kw: maxpos = int(kw["mp"])
     if "cap" in kw: cap = float(kw["cap"])
     disarm = float(kw.get("dis", DISARM))
+    minn = float(kw.get("minn", 0)); vload = kw.get("vload") == "1"
+    ld = tuple(float(x) for x in kw.get("ld", "0.625/1.25/5").split("/"))   # the load multiplier: below n x lo, else x hi
     WF = {"osc": O.W_OSC, "nocut": lambda v: O.W_OSC(v) / M.W2S(v), "w2s": M.W2S,
           "oldwt": lambda v: M.W2S(v) * ((1.25 if O.wt_x(v) <= -3 else (0.85 if O.wt_x(v) >= 22 else 1.0)) if v["mod"] == "dlm" else 1.0)}[kw.get("wf", "osc")]
     if "ex" in kw: OR = EXITS[kw["ex"]]
@@ -66,7 +76,11 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     def rd_of(v, eq):
         r = rk[v["mod"]] / 100
         if v["mod"] == "dlm":
-            r *= 0.625 if sum(1 for o in pos if o["mod"] == "dlm") + len(armed) < 5 else 1.25
+            if vload:
+                T_, N_ = virt_open(); j_ = np.searchsorted(T_, v.get("t0") or v["t"] + 3600, side="right") - 1; n_ = int(N_[j_]) if j_ >= 0 else 0
+            else:
+                n_ = sum(1 for o in pos if o["mod"] == "dlm") + len(armed)
+            r *= ld[0] if n_ < ld[2] else ld[1]
             v = dict(v, t0=v.get("t0") or v["t"] + 3600)
         return eq * r * WF(v)
     def used(): return sum(o["heat"] for o in pos) + hf * sum(o["heat"] for o in armed.values())
@@ -75,10 +89,13 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         if hn > room:
             if room < hn * 0.1: return None, hn, room
             rd *= room / hn
-        notional = rd / v["st"]; mg = notional / M.lev_real(v["sym"], notional, cap); free = eq - sum(o["mg"] for o in pos) - sum(o["mg"] for o in armed.values())
+        notional = rd / v["st"]
+        if notional < minn: return None, hn, room   # under Binance's minimum order: not opened
+        mg = notional / M.lev_real(v["sym"], notional, cap); free = eq - sum(o["mg"] for o in pos) - sum(o["mg"] for o in armed.values())
         if mg > 0.9 * free:
             if free <= 1: return None, hn, room
             q = 0.9 * free / mg; rd *= q; notional *= q; mg *= q
+            if notional < minn: return None, hn, room
         return {"rd": rd, "heat": rd * v["sth"] / v["st"], "mg": mg, "notional": notional}, hn, room
     for h in range(A, B, 3600):
         for o in [o for o in pos if o["t1"] <= h]:

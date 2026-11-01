@@ -471,6 +471,19 @@ res["the real fills: the exit, the real R, the slippage on the tab"] = (abs(_rr.
     and _rr.get("fills") == 3 and _st.get("slip") and abs(_st["slip"]["worst"] - (round(_want, 4) + 1.0)) < 1e-3)
 print("   real fills:", {k: _rr.get(k) for k in ("e_real", "x_real", "r_real", "fills")}, "· slip", _st.get("slip"))
 V._DLM["trades"].remove(_tf); X["fills"] = []
+# v0.99.754 — real trading: the load multiplier counts the real ⚡ positions + armed limits, not the virtual trades
+_o1, _t1, _au, _dr = V._DLM["orders"], V._DLM["trades"], V.AUTOTRADE_ENABLED_DLM, V.AUTOTRADE_DRY_RUN
+V.AUTOTRADE_ENABLED_DLM, V.AUTOTRADE_DRY_RUN = True, False
+_mdl0 = V._DLM.get("model"); V._DLM["model"] = dict(_mdl0 or {}, load_risk={"n": 5, "lo": 0.625, "hi": 1.25})
+_vt = lambda i, real: {"id": f"ld{i}", "symbol": f"L{i}_USDT", "side": 1, "status": "OPEN", "bs": 14400, "real": ({"ex": "binance"} if real else None)}
+V._DLM["orders"], V._DLM["trades"] = [], [_vt(i, False) for i in range(8)]
+_m_virt = V.dlm_load_mult()   # 8 virtual open, none real: x lo
+V._DLM["trades"] = [_vt(i, i < 3) for i in range(8)]; V._DLM["orders"] = [{"id": f"lo{i}", "status": "OPEN", "real": {"id": str(i), "ex": "binance"}} for i in range(2)]
+_m_real = V.dlm_load_mult()   # 3 real positions + 2 armed limits: x hi
+_lr = V._DLM["model"]["load_risk"]
+V._DLM["orders"], V._DLM["trades"], V.AUTOTRADE_ENABLED_DLM, V.AUTOTRADE_DRY_RUN = _o1, _t1, _au, _dr; V._DLM["model"] = _mdl0
+res["the load: the real positions + armed limits (not the virtual trades)"] = _m_virt == _lr.get("lo") and _m_real == _lr.get("hi")
+print("   load: 8 virtual ->", _m_virt, "· 3 real + 2 armed ->", _m_real)
 # v0.99.748 — the daily WaveTrend: x1.25 only at wt1 x side <= -33, no x0.85 (the model file's osc_risk)
 _m0 = V._DLM.get("model"); V._DLM["model"] = json.load(open(os.path.join(os.path.dirname(os.path.abspath(V.__file__)), "vp_dlm_model.json")))
 _day = int(time.time() // 86400); _wo = []

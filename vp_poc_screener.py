@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.753"
+APP_VERSION = "0.99.754"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -36083,7 +36083,13 @@ def dlm_load_mult():
     if not lr:
         return 1.0
     with _dlm_lock:
-        n = sum(1 for t in _DLM["trades"] if t["status"] == "OPEN" and int(t.get("bs") or 900) != 900)
+        if DLM_LOAD_REAL and DLM_BINANCE and AUTOTRADE_ENABLED_DLM and not AUTOTRADE_DRY_RUN:
+            # v0.99.754 — real trading: the real ⚡ positions + the armed limits (money_arm2.py: counting the virtual ones
+            # too, x1.25 came where the exchange had no room — the usual year $27.2k -> $12.7k)
+            n = (sum(1 for t in _DLM["trades"] if t["status"] == "OPEN" and t.get("real") and int(t.get("bs") or 900) != 900)
+                 + sum(1 for o in _DLM["orders"] if o["status"] == "OPEN" and (o.get("real") or {}).get("id")))
+        else:
+            n = sum(1 for t in _DLM["trades"] if t["status"] == "OPEN" and int(t.get("bs") or 900) != 900)
     return float(lr.get("lo", 1.0)) if n < int(lr.get("n", 5)) else float(lr.get("hi", 1.0))
 
 
@@ -36483,6 +36489,7 @@ DLM_ARM_ATR = float(os.environ.get("VP_DLM_ARM_ATR", "0.6"))   # v0.99.753 — 1
 DLM_SWAP_ATR = 0.25   # v0.99.715 — the parallel stream's limit takes the coin's place on the exchange when this much nearer
 DLM_DISARM_ATR = 1.0   # v0.99.753 — 1.6 -> 1.0 (money_arm2.py: an armed limit the price left frees its room sooner; 0.4 ATR above the 0.6 arming, no on / off churn) ... and comes off again (back to waiting) when the price goes this far from it (v0.99.702: 1.0 -> 1.6)
 DLM_OTHERS_FIRST = os.environ.get("VP_DLM_OTHERS_FIRST", "1") == "1"   # v0.99.753 — a P/R / SMC / EMA / HTF entry takes an armed ⚡ limit's room (dlm_free_room)
+DLM_LOAD_REAL = os.environ.get("VP_DLM_LOAD_REAL", "1") == "1"   # v0.99.754 — the load multiplier counts the real ⚡ positions + armed limits
 DLM_PRIO = os.environ.get("VP_DLM_PRIO", "1") == "1"   # v0.99.753 — on (with the 0.6 ATR arming and the others first: better in 139 of 144 windows)   # v0.99.752 — no room: a higher-scored limit takes an armed lower one's place (_dlm_bump); off: with the never-filled limits in the money (money_arm2.py) no better at the 1 ATR arming
 DLM_THROUGH_ATR = 0.3   # v0.99.702 — the price already this far through a waiting order's level: no trade (another entry than the research's)
 
