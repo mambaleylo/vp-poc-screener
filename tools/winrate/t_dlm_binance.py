@@ -101,6 +101,8 @@ def fake(method, url, headers=None, timeout=None, **k):
             else:
                 return R(400, {"code": -2011, "msg": "Unknown order sent."})
         return R(200, o)
+    if path == "/fapi/v1/userTrades":   # v0.99.751 — the account's fills of the coin
+        return R(200, [f for f in X.get("fills", []) if f["symbol"] == p["symbol"] and f["time"] >= int(p.get("startTime") or 0)])
     if path == "/fapi/v1/allOrders":   # v0.99.742 — the coin's orders, the newest last (the id as the time)
         return R(200, [dict(o, clientOrderId=o.get("newClientOrderId", ""), updateTime=i) for i, o in sorted(X["orders"].items()) if o.get("symbol") == p["symbol"]])
     if path == "/fapi/v1/openOrders":   # v0.99.708
@@ -426,6 +428,21 @@ res["the manual ones: quiet, asked once"] = not any(("EEE" in l_ or "FFF" in l_)
 for k_ in ("EEEUSDT", "FFFUSDT"): X["pos"].pop(k_, None)
 V._dlm_atr_at = _atr
 print("   adopt:", got, got2, got3)
+# v0.99.751 — a closed real trade: its real fills -> the real exit and R (the stop slipped: 9.70 instead of 9.80)
+_now = time.time()
+_tf = {"id": "fillx", "symbol": "FIL_USDT", "side": 1, "direction": "LONG", "entry": 10.0, "lv": 10.0, "atr": 0.1, "sl": 9.8, "tp": 10.12, "status": "CLOSED",
+       "result": "LOSS", "r": -1.0, "exit": 9.8, "t_in": _now - 4000, "t_out": _now - 100, "rv": V.DLM_MODEL_VER, "st": "close2h", "bs": 7200,
+       "real": {"ex": "binance", "bsym": "FILUSDT", "scl": 1.0}}
+X["fills"] = [{"symbol": "FILUSDT", "side": "BUY", "qty": "10", "price": "10.0", "commission": "0.02", "commissionAsset": "USDT", "time": int((_now - 3990) * 1000)},
+              {"symbol": "FILUSDT", "side": "SELL", "qty": "4", "price": "9.75", "commission": "0.0195", "commissionAsset": "USDT", "time": int((_now - 101) * 1000)},
+              {"symbol": "FILUSDT", "side": "SELL", "qty": "6", "price": "9.6667", "commission": "0.029", "commissionAsset": "USDT", "time": int((_now - 100) * 1000)}]
+V._DLM["trades"].append(_tf); V._dlm_bn_fills(_now)
+_rr = _tf["real"]; _want = ((9.75 * 4 + 9.6667 * 6) / 10 - 10.0 - 0.0685 / 100 * 10.0) / 0.2
+_st = V.dlm_stats()
+res["the real fills: the exit, the real R, the slippage on the tab"] = (abs(_rr.get("x_real", 0) - 9.70002) < 1e-4 and abs(_rr.get("r_real", 0) - _want) < 1e-3
+    and _rr.get("fills") == 3 and _st.get("slip") and abs(_st["slip"]["worst"] - (round(_want, 4) + 1.0)) < 1e-3)
+print("   real fills:", {k: _rr.get(k) for k in ("e_real", "x_real", "r_real", "fills")}, "· slip", _st.get("slip"))
+V._DLM["trades"].remove(_tf); X["fills"] = []
 # v0.99.748 — the daily WaveTrend: x1.25 only at wt1 x side <= -33, no x0.85 (the model file's osc_risk)
 _m0 = V._DLM.get("model"); V._DLM["model"] = json.load(open(os.path.join(os.path.dirname(os.path.abspath(V.__file__)), "vp_dlm_model.json")))
 _day = int(time.time() // 86400); _wo = []

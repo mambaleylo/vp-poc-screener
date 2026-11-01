@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.750"
+APP_VERSION = "0.99.751"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -37237,6 +37237,44 @@ def _dlm_touch_note(o, r, now):
     return o["touch"]
 
 
+def _dlm_bn_fills(now=None, most=3):
+    """v0.99.751 — a closed real ⚡ trade on Binance: its real fills (/fapi/v1/userTrades) -> the real entry / exit prices
+    and the real R ("r_real": the price move less the commissions, per the trade's stop distance — the same unit as "r",
+    which the bot counts at the planned take / stop price). The slippage (r_real - r) shows on the tab and in the lab
+    upload (the user's COW: the stop cost 12% instead of the planned 4.5%, nowhere seen). Up to `most` trades a call,
+    20 s .. 3 days after the close -> changed"""
+    now = now or time.time()
+    with _dlm_lock:
+        todo = [t for t in _DLM["trades"] if t.get("status") == "CLOSED" and (t.get("real") or {}).get("ex") == "binance"
+                and "fills" not in t["real"] and 20 <= now - int(t.get("t_out") or 0) <= 3 * 86400][:most]
+    changed = False
+    for t in todo:
+        r = t["real"]; s = int(t["side"]); scl = float(r.get("scl") or 1.0)
+        try:
+            xs = bnf_req("GET", "/fapi/v1/userTrades", {"symbol": r["bsym"], "startTime": int((t["t_in"] - 600) * 1000), "limit": 200}) or []
+        except BinanceError as e:
+            log_error(f"dlm binance fills {r['bsym']}: {e}")
+            continue
+        op_side = "BUY" if s > 0 else "SELL"
+        t_end = (int(t["t_out"]) + 600) * 1000
+        o_ = [x for x in xs if x.get("side") == op_side and int(x.get("time") or 0) <= t_end]
+        c_ = [x for x in xs if x.get("side") != op_side and int(x.get("time") or 0) <= t_end]
+        q = lambda L: sum(float(x["qty"]) for x in L)
+        vw = lambda L: sum(float(x["qty"]) * float(x["price"]) for x in L) / q(L) if L and q(L) > 0 else None
+        e_r, x_r = vw(o_), vw(c_)
+        upd = {"fills": len(o_) + len(c_)}
+        if e_r and x_r:
+            notional = sum(float(x["qty"]) * float(x["price"]) for x in o_)
+            fee = sum(float(x.get("commission") or 0) for x in o_ + c_ if x.get("commissionAsset") in ("USDT", "USDC")) / notional if notional else 0.0
+            e_r, x_r = e_r / scl, x_r / scl
+            dist = abs(float(t["entry"]) - float(t["sl"])) or 1e-12
+            upd.update({"e_real": e_r, "x_real": x_r, "r_real": round((s * (x_r - e_r) - fee * e_r) / dist, 4)})
+        with _dlm_lock:
+            r.update(upd)
+        changed = True
+    return changed
+
+
 def dlm_bn_tick(orders, trades):
     """dlm_real_tick() for the Binance orders and trades -> changed"""
     now = time.time()
@@ -37368,6 +37406,10 @@ def dlm_bn_tick(orders, trades):
             t.update({"status": "CLOSED", "result": kind, "exit": ex, "t_out": int(now), "r": _dlm_r_h(t, ex, (now - t["t_in"]) / 3600, kind) if t.get("smode") else _dlm_r(t, ex, int((now - t["fbar"]) // int(t.get("bs") or 900)), kind)})
         changed = True
         notify_trade_result("dlm", t["symbol"], t["direction"], t["entry"], ex, kind, t["r"], real=True, note=f"⚡ лимитка {DLM_TF.get(t.get('bs'), '4h')} · Binance")
+    try:
+        changed = _dlm_bn_fills(now) or changed   # v0.99.751 — the real fills of the closed ones
+    except Exception as e:
+        log_error(f"dlm binance fills: {e}")
     return changed
 
 
@@ -37892,6 +37934,8 @@ def dlm_stats():
             "n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for t in fin if t["result"] == "WIN") / len(fin), 1) if fin else None,
             "sum": round(sum(rs), 2) if rs else None, "per_day": round(len(fin) / days, 1) if days else None,
             "real_n": len(real), "real_sum": round(sum(t["r"] for t in real), 2) if real else None,
+            "slip": (lambda L: {"n": len(L), "avg": round(sum(L) / len(L), 3), "worst": round(min(L), 3)} if L else None)(   # v0.99.751 — the real fills vs the plan
+                [t["real"]["r_real"] - t["r"] for t in real if (t.get("real") or {}).get("r_real") is not None]),
             "old_n": len(old), "old_sum": round(sum(t["r"] for t in old), 2) if old else None,
             "live_check": live_vs_bt("dlm", rs),
             "streams": {n: {"n": len(x), "avg": round(sum(t["r"] for t in x) / len(x), 3) if x else None,
@@ -46421,7 +46465,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
       <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;"><span style="white-space:nowrap;"><b>${coin(t.symbol)}</b> <span class="${t.side > 0 ? 'win' : 'loss'}">${t.side > 0 ? 'лонг' : 'шорт'}</span><span class="dim">${t.bs ? (t.bs === 7200 ? ' · 2ч' : (t.bs === 900 ? ' · 15м' : ' · 4ч')) : ''}${t.real ? ' · 💰 на бирже' : ' · виртуально'}</span></span>
       <span class="dim" style="white-space:nowrap;">вход ${fmtNum(t.entry)} · тейк ${fmtNum(t.tp)} · до ${hm(t.until)}</span></div>${!t.real && (t.why || d.dry || !d.auto) ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:2px;">не на бирже: ${t.why || (!d.auto ? 'автоторговля ⚡ выключена' : 'включена «Бумажная торговля (dry-run)» в настройках — ордера на биржу не отправляются; выключите её, чтобы торговать')}</div>` : ''}</div>`;
   const opReal = op.filter(t => t.real).length;   // v0.99.701 — the user: "открыта 1, но по факту 0": a virtual trade is not on the exchange
-  h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, op.length ? (opReal ? `на бирже ${opReal}${op.length > opReal ? ` · виртуально ${op.length - opReal}` : ''}` : (!d.auto ? 'виртуально — автоторговля ⚡ выключена' : (d.dry ? 'виртуально — включена бумажная торговля (dry-run)' : 'виртуально — причина под сделкой'))) : `из ${d.max_pos || 20} возможных`)}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_day != null ? `~${d.per_day} в день` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.real_n ? `реальных ${d.real_n}: ${sgR(d.real_sum)}` : 'виртуально')}</div>
+  h += card('📈 Сделки', `<div class="ztiles z3">${tile('открыто', op.length, op.length ? (opReal ? `на бирже ${opReal}${op.length > opReal ? ` · виртуально ${op.length - opReal}` : ''}` : (!d.auto ? 'виртуально — автоторговля ⚡ выключена' : (d.dry ? 'виртуально — включена бумажная торговля (dry-run)' : 'виртуально — причина под сделкой'))) : `из ${d.max_pos || 20} возможных`)}${tile('закрыто', d.n || 0, d.n ? `${sgR(d.avg)} · WR ${d.wr}%` : (d.per_day != null ? `~${d.per_day} в день` : ''))}${tile('итого', d.n ? sgR(d.sum) : '—', d.real_n ? `реальных ${d.real_n}: ${sgR(d.real_sum)}${d.slip ? ` · по исполнению на бирже ${sgR(d.slip.avg)} на сделку (худшее ${sgR(d.slip.worst)}, ${d.slip.n} сд.)` : ''}` : 'виртуально')}</div>
     ${op.length ? `<div style="margin-top:8px;">${op.slice(-40).reverse().map((t, i) => row(t, i)).join('')}</div>` : ''}
     ${liveCheckHtml(d.live_check)}
     ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length}${lastSplit(d.last)})</summary>${d.last.map((t, i) => btRowHtml(btFromDlm(t), `btLiveOpen('dlm', ${Math.min(40, op.length) + i})`)).join('')}</details>` : ''}

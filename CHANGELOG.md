@@ -21140,3 +21140,13 @@ from the walk-forward pool (the user: "Да")
 - Tests: t_dlm_bot (the list's trades re-made by the bot with the threshold off — the list is the yearly models'
   choice; the exits from the model), t_dlm_ui (a 2h stop of the new list), t_model_refresh, t_hdr_htf, t_dlm_binance,
   t_bn_others, t_mod_ui, t_lab_export, t_bno_stop, t_dlm_engine — OK.
+
+v0.99.751 — ⚡ real trades: the real fills from Binance (the lab's "live vs backtest" check found the gap)
+- A real ⚡ trade on Binance was closed in the bot's books at the planned price (the take / the stop), so a slipped stop
+  (the user's COW: 12% lost instead of 4.5%) showed nowhere — neither on the tab nor in the lab upload. Now, 20 s .. 3
+  days after the close, _dlm_bn_fills reads the coin's fills (/fapi/v1/userTrades): the real entry / exit (volume-weighted)
+  and "r_real" — the move less the commissions per the trade's stop distance (the unit of "r"). The ⚡ tab's total says
+  the real fills' average and worst difference from the plan; the lab upload carries them (prices and R, no money).
+- The lab upload of 31.10 (lab-data): 31 ⚡ trades since 22.10, 17 real — too few to judge; the real fills will tell.
+- Tests: t_dlm_binance (a stop filled at 9.70 instead of 9.80 in two fills with commissions -> the exit 9.70, r_real
+  -1.53 vs -1.0, the tab's slippage), t_dlm_ui, t_bn_others, t_mod_ui, t_lab_export — OK.
