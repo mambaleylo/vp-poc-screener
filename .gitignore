@@ -1,0 +1,7 @@
+# rebuilt in minutes from data/ (see README) — not stored
+prv_ev/
+prv_ev.nofund/
+wf/prv_lab_ev.npz
+wf/prv_lab2_ev.npz
+wf/old/
+feat_v175/
