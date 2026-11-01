@@ -8,6 +8,10 @@ import money_arm2 as MA2, money_multi as M
 from multiprocessing import Pool
 RULES = {"бот до v0.99.753": "A", "сейчас (v0.99.754)": "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0", "сейчас, плечо 20x": "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0|cap=20",
          "сейчас, риск ⚡ 3%": "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0|dlm=3"}
+if len(sys.argv) > 1 and sys.argv[1] == "deep":
+    F = "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0"
+    RULES = {"сейчас (0.6 ATR, 14x)": F, "0.3 ATR": F.replace("arm=0.6", "arm=0.3"), "0.45 ATR": F.replace("arm=0.6", "arm=0.45"),
+             "20x": F + "|cap=20", "0.3 ATR + 20x": F.replace("arm=0.6", "arm=0.3") + "|cap=20"}
 W = [(M.ts(2022, m), M.ts(2022, m) + 182 * 86400) for m in range(1, 8)] + [(M.ts(2022, 1), M.ts(2023, 1))]
 SEEDS = [1, 2, 3]
 _D = {}
