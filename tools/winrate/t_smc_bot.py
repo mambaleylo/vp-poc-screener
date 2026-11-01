@@ -4,7 +4,12 @@ the bot arms that level (candles mocked from Binance history) and a touch opens 
 same result as the backtest list; (4) the risk fields are number fields (saved as numbers)."""
 import sys, bisect, json, time, numpy as np
 from common import V
+import os; sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "new_ind"))
 import lv_engine as LE
+def _lv2(sym):   # the research engine's levels of the coin (lv2/<sym>.npz), re-made in seconds when missing (the restored lab)
+    if not os.path.exists(f"lv2/{sym}.npz"):
+        os.makedirs("lv2", exist_ok=True); LE.run(sym)
+    return np.load(f"lv2/{sym}.npz")
 ok = True
 def bars(sym):
     T, O, H, L, C, Vv = LE.load_np(sym)
@@ -27,7 +32,7 @@ B = series("BTCUSDT")
 rng = np.random.default_rng(1); tot = miss = 0; worst = np.zeros(29)
 for sym in ("SOLUSDT", "1000PEPEUSDT", "LINKUSDT"):
     h, hT, h4, d = series(sym)
-    z = np.load(f"lv2/{sym}.npz")
+    z = _lv2(sym)
     idx = np.flatnonzero((z["fam"] >= 33) & (z["t"] >= 1672531200))
     for i in rng.choice(idx, 40, replace=False):
         t = int(z["t"][i]); J = bisect.bisect_left(hT, t); bj = bisect.bisect_left(B[1], t)

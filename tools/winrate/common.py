@@ -34,10 +34,13 @@ D = os.path.dirname(os.path.abspath(__file__))
 
 def load(bsym):
     fn = os.path.join(D, "data", "1h", f"{bsym}.csv")
+    if not os.path.exists(fn):   # the restored lab keeps the candles in the lab-store branch (LAB_README.md)
+        fn = os.path.join(os.environ.get("LABSTORE", "/home/user/vp-lab-store"), "data", "1h", f"{bsym}.csv.gz")
     if not os.path.exists(fn):
         return None
+    import gzip
     out = []
-    for line in open(fn):
+    for line in (gzip.open(fn, "rt") if fn.endswith(".gz") else open(fn)):
         p = line.strip().split(",")
         if len(p) >= 6:
             out.append({"time": int(float(p[0])), "open": float(p[1]), "high": float(p[2]), "low": float(p[3]), "close": float(p[4]), "volume": float(p[5])})

@@ -11,14 +11,18 @@ V._DLM["trades"] = [{"id": "t1", "symbol": "DOGE_USDT", "side": -1, "direction":
                     {"id": "t3", "symbol": "XRP_USDT", "side": 1, "direction": "LONG", "entry": 2.0, "lv": 2.0, "atr": 0.01, "sl": 1.98, "tp": 2.005, "score": 0.1, "t0": tb - 99999, "fbar": tb - 99000, "t_in": now - 99000, "until": 0, "status": "CLOSED", "result": "WIN", "r": 0.22, "exit": 2.005, "t_out": now - 90000, "real": None, "rv": 1}]
 V.dlm_save = lambda: None
 _BTD = json.load(open("/home/user/vp-poc-screener/vp_bt_trades.json")); V.bt_trades = lambda need=None: _BTD
-import s20h4_engine as E
-import os; os.environ["TFH"] = "2"
-import s21h2_engine as E2   # v0.99.689 — the 2h stream's charts
-seen_ch = []
+from common import load as load1h   # the restored lab: the 1h candles (lab-store) made into the chart's bars
+seen_ch = []; _H1 = {}
 def fake_bars(symbol, ch, start, end):
     seen_ch.append(ch)
-    T, O, H, L, C, Vv = (E2 if ch == "2h" else E).load15(symbol.replace("_USDT", "") + "USDT")
-    return [{"time": int(t), "open": o, "high": h, "low": l, "close": c} for t, o, h, l, c in zip(T, O, H, L, C) if start <= t <= end]
+    b = symbol.replace("_USDT", "")
+    if b not in _H1: _H1[b] = load1h(b + "USDT") or load1h("1000" + b + "USDT") or []
+    sec = {"1h": 3600, "2h": 7200, "4h": 14400}.get(ch, 3600); out = []
+    for c in _H1[b]:
+        ps = c["time"] // sec * sec
+        if not out or out[-1]["time"] != ps: out.append(dict(c, time=ps))
+        else: o = out[-1]; o["high"] = max(o["high"], c["high"]); o["low"] = min(o["low"], c["low"]); o["close"] = c["close"]
+    return [c for c in out if start <= c["time"] <= end]
 V.bt_gate_bars = fake_bars
 threading.Thread(target=lambda: V.app.run(port=5103, use_reloader=False), daemon=True).start(); time.sleep(2)
 from playwright.sync_api import sync_playwright

@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.748"
+APP_VERSION = "0.99.749"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28533,9 +28533,10 @@ _PROC_START = time.time()
 # 144 windows from each week of 2023-02..2025-10) at v0.99.746's 14x with the 2h shorts x0.5. The old numbers came from
 # the lost lab's pools and money sim — on the same new sim 10x gives the bundle + HTF $7.7k / $34.3k / $156k / 63%
 # v0.99.748 — with the daily WaveTrend x1.25 only at wt1 x side <= -33 (the model's osc_risk; money_osc.py)
-EXPECT_YEAR = {"dlm": {"p10": 1880, "p50": 6505, "p90": 27984, "dd": 72, "last12": 21808},
-               "bundle": {"p10": 7139, "p50": 49233, "p90": 201323, "dd": 63, "last12": 61733},
-               "bundle_htf": {"p10": 7622, "p50": 49792, "p90": 269054, "dd": 61, "last12": 107660}}
+# v0.99.749 — EMA 3%, the open risk cap 95%
+EXPECT_YEAR = {"dlm": {"p10": 1899, "p50": 7678, "p90": 29950, "dd": 75, "last12": 21553},
+               "bundle": {"p10": 9566, "p50": 52166, "p90": 224192, "dd": 66, "last12": 61522},
+               "bundle_htf": {"p10": 10308, "p50": 58480, "p90": 304408, "dd": 66, "last12": 106791}}
 
 
 @app.route("/api/boot")
@@ -36727,7 +36728,7 @@ BN_OTHERS = os.environ.get("VP_BN_OTHERS", "0") == "1"
 # the cut) for ~5% more median. No liquidation in any
 BN_CROSS = os.environ.get("VP_BN_CROSS", "1") == "1"
 BN_CROSS_LEV = int(os.environ.get("VP_BN_CROSS_LEV", "14"))   # the ceiling; the coin's bracket and the account's cap may give less
-BN_HEAT_MAX = 0.90
+BN_HEAT_MAX = 0.95   # v0.99.749 — 0.90 -> 0.95 (the user: "3% и 95%"; money_params.py on the restored lab: the usual year +8%, the drawdown 61 -> 66%)
 
 
 def bn_margin_mode(bsym):
@@ -36796,7 +36797,7 @@ def bn_size(direction, e, sl_x, cap, mmr, equity, risk, bsym, tb, mt, safety=Non
         margin, lev = margin * lev / lev2, lev2
     return margin, lev, skip
 BN_OTHERS_MODES = ("prv", "smc", "emw", "htf", "cfl")
-BN_OTHERS_RISK = {"prv": 3.0, "smc": 2.5, "emw": 2.0, "htf": 2.0, "cfl": 1.0}   # v0.99.740 — 🔄 Классика наоборот 1% (its real trades off by default). v0.99.737 — 📏 HTF 2% (htf_lab6r.py: with the friction better in 95% of the 12-month windows, 98% since Dec 2024, the median x1.03, the worst window x0.97; less ⚡ or a higher open-risk cap — worse). v0.99.732 — 📏 HTF 1.5% (htf_money5.py: with the friction the last 12 months $129.7k -> $196.3k, better in 94% of the windows; 2% adds ~nothing). v0.99.727 — SMC 2.5% + EMA 2% (port_risk2/3.py: with the cross margin and SMC's break-even the bundle is better in every 12-month window, with and without friction); v0.99.718 — P/R 3% with cross margin (port_717*.py); v0.99.712 — EMA 1% (port_w709.py: every number better); v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
+BN_OTHERS_RISK = {"prv": 3.0, "smc": 2.5, "emw": 3.0, "htf": 2.0, "cfl": 1.0}   # v0.99.749 — 📈 EMA 3% (money_params.py / money_stress.py: better in 125 of 144 windows, no worse than 2% even with its trades 0.35R below the list). v0.99.740 — 🔄 Классика наоборот 1% (its real trades off by default). v0.99.737 — 📏 HTF 2% (htf_lab6r.py: with the friction better in 95% of the 12-month windows, 98% since Dec 2024, the median x1.03, the worst window x0.97; less ⚡ or a higher open-risk cap — worse). v0.99.732 — 📏 HTF 1.5% (htf_money5.py: with the friction the last 12 months $129.7k -> $196.3k, better in 94% of the windows; 2% adds ~nothing). v0.99.727 — SMC 2.5% + EMA 2% (port_risk2/3.py: with the cross margin and SMC's break-even the bundle is better in every 12-month window, with and without friction); v0.99.718 — P/R 3% with cross margin (port_717*.py); v0.99.712 — EMA 1% (port_w709.py: every number better); v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
 BNO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_bn_others.json")
 _BNO = {"pos": {}}   # Gate contract -> the Binance position this bot opened for P/R / SMC / EMA
 _bno_lock = threading.Lock()
@@ -42173,7 +42174,7 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow subRow">
         <div>
-          <div class="label">↳ 💱 Кросс-маржа, плечо до 14x (или максимум монеты), общий риск до 90%</div>
+          <div class="label">↳ 💱 Кросс-маржа, плечо до 14x (или максимум монеты), общий риск до 95%</div>
           <div class="sub hintx">новые позиции на Binance — в кросс-марже с наибольшим плечом, которое Binance даёт монете при этом размере позиции (не больше лимита аккаунта; потеря на стопе от плеча не зависит — размер позиции считается от риска, а маржи на позицию нужно меньше), а предел — сам риск: сумма потерь всех открытых позиций и выставленных лимиток ⚡, если все сработают по стопам на бирже, не больше 90% счёта (новая сделка урезается, чтобы в него уложиться). В изолированной марже пределом была маржа: на истории она урезала 31% сделок и отменяла ещё 20% — долгие позиции SMC / P/R / EMA держали её, когда приходили лучшие пачки ⚡. За год со $100: плохой год $1 631 → $2 393, медиана $17 743 → $24 773, последние 12 мес $37 206 → $72 757, просадка та же ~61%. Выключено — как раньше: изолированная, плечо по стопу. Монета, где Binance не даёт сменить режим (на ней позиция или ордер), торгуется по-старому</div>
         </div>
         <label class="switch"><input type="checkbox" id="setBnCross"><span class="switchSlider"></span></label>
@@ -42469,7 +42470,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow" style="flex-wrap:wrap;">
         <div style="flex:1 1 100%;">
           <div class="label">Риск на сделку — у каждого модуля свой</div>
-          <div class="sub">% от счёта, который теряется на стопе (0.1–100). Пустое поле — значение модуля по умолчанию (на Binance, по истории связки): ⚡ 4.5% · P/R 3% · 🧱 SMC 2.5% · EMA 2%; остальные модули — 0.5%. У ⚡ к своему % ещё множители: загрузка (×0.625 / ×1.25), дневной WaveTrend (×1.25, если монета на дневке сильно растянута против сделки) и шорты 2ч-потока ×0.5</div>
+          <div class="sub">% от счёта, который теряется на стопе (0.1–100). Пустое поле — значение модуля по умолчанию (на Binance, по истории связки): ⚡ 4.5% · P/R 3% · 🧱 SMC 2.5% · EMA 3%; остальные модули — 0.5%. У ⚡ к своему % ещё множители: загрузка (×0.625 / ×1.25), дневной WaveTrend (×1.25, если монета на дневке сильно растянута против сделки) и шорты 2ч-потока ×0.5</div>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro 0.5" title="Нейро: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">

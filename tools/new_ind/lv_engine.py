@@ -30,7 +30,10 @@ OUT = f"{D}/lv2"
 
 
 def load_np(sym):
-    a = np.loadtxt(f"{D}/data/1h/{sym}.csv", delimiter=",", ndmin=2)
+    fn = f"{D}/data/1h/{sym}.csv"
+    if not os.path.exists(fn):   # the restored lab keeps the candles in the lab-store branch (LAB_README.md)
+        fn = os.path.join(os.environ.get("LABSTORE", "/home/user/vp-lab-store"), "data", "1h", f"{sym}.csv.gz")
+    a = np.loadtxt(fn, delimiter=",", ndmin=2)
     t = a[:, 0].astype(np.int64)
     keep = np.concatenate([[True], np.diff(t) > 0])
     a = a[keep]

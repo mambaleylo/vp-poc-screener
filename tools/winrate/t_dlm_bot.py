@@ -6,15 +6,20 @@ DLM_MAX_POS positions. Run from the research folder (common.py, s20h4/ and the d
 import sys, json, time, bisect, numpy as np
 from common import V
 import os; os.environ["TFH"] = "4"
-import s23_engine as E
-import s21h2_engine as E2
 from common import load as load1h
+LABSTORE = os.environ.get("LABSTORE", "/home/user/vp-lab-store")   # the restored lab (LAB_README.md): candles, engine v2 events, pools
 ok = True
 def bars(sym, tf="4h"):
     if tf == "1h":
         return [dict(c, volume=c.get("volume", 0)) for c in load1h(sym)]
-    T, O, H, L, C, Vv = (E2 if tf == "2h" else E).load15(sym)
-    return [{"time": int(t), "open": o, "high": h, "low": l, "close": c, "volume": v} for t, o, h, l, c, v in zip(T, O, H, L, C, Vv)]
+    sec = {"2h": 7200, "4h": 14400}[tf]; out = []   # the chart's bars from the 1h candles (UTC-aligned, as the research)
+    for c in load1h(sym) or []:
+        ps = c["time"] // sec * sec
+        if not out or out[-1]["time"] != ps: out.append(dict(c, time=ps, volume=c.get("volume", 0)))
+        else:
+            o = out[-1]; o["high"] = max(o["high"], c["high"]); o["low"] = min(o["low"], c["low"]); o["close"] = c["close"]; o["volume"] += c.get("volume", 0)
+    if not out: raise FileNotFoundError(sym)
+    return out
 CACHE = {}
 def series(sym, tf="4h"):
     if (sym, tf) not in CACHE:
@@ -23,11 +28,10 @@ def series(sym, tf="4h"):
 # (1) parity through the bot
 B, BT = series("BTCUSDT")
 rng = np.random.default_rng(5); tot = miss = 0; worst = np.zeros(33)
-for sym in ("SOLUSDT", "DOGEUSDT"):
-    b, bT = series(sym); z = np.load(f"s23_4h/{sym}.npz"); F2 = np.load(f"s24_4h/{sym}.npz")["F2"][:, [0, 1, 2, 5, 8]]
-    F33 = np.full((len(z["t"]), 33), np.nan); F33[:, :28] = z["F"]; F33[z["fam"] == 2, 28:] = F2
-    for k in rng.choice(np.flatnonzero((z["fam"] == 2) & (z["t"] >= 1704067200)), 30, replace=False):
-        i = int(z["i"][k]); bj = bisect.bisect_right(BT, bT[i])
+for sym in ("SOLUSDT", "DOGEUSDT"):   # the engine v2 events of the 4h stream (dlm_engine.py, its own parity: t_dlm_engine.py)
+    b, bT = series(sym); z = np.load(f"{LABSTORE}/feat/wick4h/{sym}.npz"); F33 = z["F"]
+    for k in rng.choice(np.flatnonzero(z["t"] >= 1704067200), 30, replace=False):
+        i = bisect.bisect_left(bT, int(z["t"][k]) - 14400); bj = bisect.bisect_right(BT, bT[i])
         cs = V.dlm_candidates4(b[max(0, i - 2999):i + 1], B[max(0, bj - 3000):bj], min_bars=0)
         m = [c for c in cs if c["side"] == int(z["side"][k])]
         tot += 1
@@ -234,7 +238,11 @@ def daily(sym):
                         "low": min(a[i]["low"] for i in ix), "close": a[ix[-1]]["close"]})
     return out
 osc = (V._DLM.get("model") or {}).get("osc_risk") or {}
-G = [g for g in json.load(open("gh_dlm.json")) if g]
+import money_osc as MO   # the lab's WaveTrend (all of the 1h history made into UTC days)
+G = []
+for p_ in json.load(open(f"{LABSTORE}/wf/pool_base.json")):
+    u_, w_ = MO.wt_days(p_["coin"]); j_ = np.searchsorted(u_, p_["t1h"] // 86400) - 1
+    if j_ >= 300: G.append({"sym": p_["coin"], "d": p_["side"], "te": p_["t1h"], "wt_1d": float(w_[j_]) * p_["side"]})
 pick = [G[i] for i in np.random.default_rng(7).choice(len(G), 40, replace=False)]
 DCACHE = {}; worst_wt = 0.0; mult_ok = True; n_up = n_dn = 0
 for g in pick:

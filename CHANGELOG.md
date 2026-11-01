@@ -21101,3 +21101,20 @@ v0.99.748 — the ⚡ daily WaveTrend multiplier: x1.25 only on the most stretch
 - EXPECT_YEAR re-counted with it: the bundle + HTF bad ~$7.6k · usual ~$49.8k · good ~$269k · drawdowns ~61%; without HTF
   $7.1k / $49.2k / $201k / 63%; ⚡ alone $1.9k / $6.5k / $28.0k / 72%. The settings' / ⚡ tab's texts.
 - Tests: t_dlm_binance (x1.25 only at the extreme both sides, no x0.85, from the model file), t_hdr_htf — OK.
+
+v0.99.749 — 📈 EMA 3% on Binance (was 2%) and the open-risk cap 95% (was 90%) (the user: "3% и 95%")
+- The bundle's risk parameters re-checked on the restored lab (tools/winrate money_params.py: a year from $100, 144 weekly
+  windows, 14x, the 2h shorts x0.5, WaveTrend x1.25 at <= -33): ⚡'s load multiplier, ⚡ 4.5%, its 20 at once, P/R 3%,
+  SMC 2.5%, HTF 2% — each near its best; EMA 2% too little (few trades, +0.70R): 3% better in 125 of 144 windows, and
+  with its trades 0.35R worse than the list no worse than 2% (money_stress.py; 4% would lose there). The open-risk cap:
+  95% the usual year +8%, the drawdown 61 -> 66%; 100% +17% at 70%.
+- BN_OTHERS_RISK["emw"] 2 -> 3 (an EMA risk field set by hand keeps its value), BN_HEAT_MAX 0.90 -> 0.95; the settings'
+  texts. EXPECT_YEAR re-counted: the bundle + HTF bad ~$10.3k · usual ~$58.5k · good ~$304k · drawdowns ~66%; without HTF
+  $9.6k / $52.2k / $224k / 66%; ⚡ alone $1.9k / $7.7k / $30.0k / 75%.
+- The lab's broken tests back (their research files were lost with the old scratch folder): the candles read from the
+  lab-store branch when the research folder has none (common.load, lv_engine.load_np); t_smc_bot / t_htf_bot re-make the
+  research engine's levels (lv2/<coin>.npz) when missing; t_dlm_ui builds the charts from the 1h candles; t_dlm_bot checks
+  the bot's ⚡ features against the engine v2 events and its daily WaveTrend against the lab's (money_osc.py) — all OK.
+- Tests: t_dlm_binance (the cap 95%: an order scaled to the room, no room -> waits), t_hdr_htf, t_bn_others, t_dlm_bot,
+  t_dlm_ui, t_smc_bot, t_htf_bot, t_mod_ui, t_bno_stop, t_lab_export, t_model_refresh — OK (t_cfl_bot still needs its
+  research files).
