@@ -22,7 +22,7 @@ def cap_open(tr, n=None, side_n=None):
 
 
 F = RB.F
-VARS = {   # name: (the list's filter, the breakout's risk %, the rule string, the other risks x)
+VARS1 = {   # name: (the list's filter, the breakout's risk %, the rule string, the other risks x)
     "без пробоя": (None, 0.0, F, 1.0),
     "A 1% (как было)": ("all", 1.0, F, 1.0),
     "A 0.75%": ("all", 0.75, F, 1.0),
@@ -39,6 +39,17 @@ VARS = {   # name: (the list's filter, the breakout's risk %, the rule string, t
     "A 1% + риск x0.5 после просадки 35%": ("all", 1.0, F + "|ddc=0.35/0.5/0.15", 1.0),
     "без пробоя + все риски x0.75": (None, 0.0, F, 0.75),
 }
+VARS2 = {
+    "без пробоя": (None, 0.0, F, 1.0),
+    "A 1% (как было)": ("all", 1.0, F, 1.0),
+    **{f"A 1% + лимит риска {h}%": ("all", 1.0, F.replace("heat=1.0", f"heat={h / 100:g}"), 1.0) for h in (90, 85, 70, 60)},
+    **{f"A 1% + плечо 14x + лимит риска {h}%": ("all", 1.0, F.replace("heat=1.0", f"heat={h / 100:g}").replace("cap=17", "cap=14"), 1.0) for h in (90, 80)},
+    "A 1% + риск x0.75 после просадки 40%": ("all", 1.0, F + "|ddc=0.4/0.75/0.2", 1.0),
+    "A 1% + риск x0.75 после просадки 50%": ("all", 1.0, F + "|ddc=0.5/0.75/0.25", 1.0),
+    "A 1% + риск x0.5 после просадки 50%": ("all", 1.0, F + "|ddc=0.5/0.5/0.25", 1.0),
+    "A 1% + лимит 90% + риск x0.75 после 40%": ("all", 1.0, F.replace("heat=1.0", "heat=0.9") + "|ddc=0.4/0.75/0.2", 1.0),
+}
+VARS = VARS2 if os.environ.get("ROUND") == "2" else VARS1
 _D = {}
 def _init(D): _D.update(D)
 def job(a):
