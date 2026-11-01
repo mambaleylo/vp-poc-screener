@@ -46,7 +46,7 @@ for stream in ("wick4h", "close2h"):
         print(stream, Y, "train", len(tr), "thr", round(THR[Y], 4), f"{time.time() - t0:.0f}s", flush=True)
     st = S[stream]; p = DE.STREAMS[stream]; bs = p["hh"] * 3600; B = DE.btc_ctx(stream)
     out = {k: [] for k in ("coin", "t", "side", "lv", "atr", "score", "thr", "filled", "t1h", "fill", "R", "kind", "tout", "grp")}
-    for k, c in enumerate(C["base"]):
+    for k, c in enumerate(C[os.environ.get("COINS", "base")]):   # COINS=new: the 226 new coins
         h1 = DE.load1h(c); ev = DE.features(c, stream, B, h1)
         if ev is None: continue
         tsc = ev["t"] + bs; yr = tsc.astype("datetime64[s]").astype("datetime64[Y]").astype(int) + 1970
@@ -63,7 +63,7 @@ for stream in ("wick4h", "close2h"):
         fl, t1h, fill, R, kind, tout = DE.fill_walk(T1, O1, H1, L1, C1, tsc[ii], ev["side"][ii].astype(np.int64), ev["lv"][ii], ev["atr"][ii], bs, p["ch"],
                                                     DE.ALIVE, DE.HOLD, st["take_atr"], st["stop_atr"], st["hard_stop_atr"], DE.FEE_IN, DE.FEE_TAKE, DE.FEE_OUT, DE.FUND)
         for key, v in (("coin", np.full(len(ii), c)), ("t", tsc[ii]), ("side", ev["side"][ii]), ("lv", ev["lv"][ii]), ("atr", ev["atr"][ii]), ("score", sc[ii]),
-                       ("thr", th[ii]), ("filled", fl), ("t1h", t1h), ("fill", fill), ("R", R), ("kind", kind), ("tout", tout), ("grp", np.full(len(ii), GROUP[c]))):
+                       ("thr", th[ii]), ("filled", fl), ("t1h", t1h), ("fill", fill), ("R", R), ("kind", kind), ("tout", tout), ("grp", np.full(len(ii), GROUP.get(c, "new")))):
             out[key].append(v)
         if k % 50 == 0: print(stream, k, c, f"{time.time() - t0:.0f}s", flush=True)
     O = {k: np.concatenate(v) for k, v in out.items()}

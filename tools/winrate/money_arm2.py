@@ -13,15 +13,17 @@ ARM, DISARM = 1.0, 1.6
 RULES = sys.argv[1].split(",") if len(sys.argv) > 1 else ["A", "Bn"]; SEEDS = [int(x) for x in (sys.argv[2] if len(sys.argv) > 2 else "1,2,3").split(",")]
 STEP = int(sys.argv[3]) if len(sys.argv) > 3 else 1   # every STEP-th window (a quick screen)
 MF = json.load(open("/home/user/vp-poc-screener/vp_dlm_model.json")); SS = {s["name"]: s for s in MF["streams"]}
-def orders():
+def orders(suf=None):
     out = []
     for st in ("wick4h", "close2h"):
-        z0 = np.load(f"{M.ST}/wf/allorders_{st}{os.environ.get('ALLSUF', '')}.npz", allow_pickle=True); z = {k: z0[k] for k in z0.files}; bs = DE.STREAMS[st]["hh"] * 3600; sa, ha = SS[st]["stop_atr"], SS[st]["hard_stop_atr"]
+        z0 = np.load(f"{M.ST}/wf/allorders_{st}{os.environ.get('ALLSUF', '') if suf is None else suf}.npz", allow_pickle=True); z = {k: z0[k] for k in z0.files}; bs = DE.STREAMS[st]["hh"] * 3600; sa, ha = SS[st]["stop_atr"], SS[st]["hard_stop_atr"]
         for k in range(len(z["t"])):
             lv, a = float(z["lv"][k]), float(z["atr"][k]); f = bool(z["filled"][k]); e = float(z["fill"][k]) if f else lv
             out.append({"coin": str(z["coin"][k]), "sym": M.bn(str(z["coin"][k])), "t": int(z["t"][k]), "until": int(z["t"][k]) + 4 * bs, "side": int(z["side"][k]),
                         "lv": lv, "atr": a, "prio": float(z["score"][k]) / float(z["thr"][k]), "filled": f, "t1h": int(z["t1h"][k]), "e": e,
                         "r": float(z["R"][k]), "t1": int(z["tout"][k]), "st": sa * a / e, "sth": ha * a / e, "stream": st, "mod": "dlm"})
+    if os.environ.get("PLUSNEW") and suf is None:   # + the new coins' ⚡ orders (dlm_allorders.py with COINS=new, OUTSUF=_newc)
+        out += orders("_newc")
     out.sort(key=lambda o: o["t"]); return out
 EXITS = {}
 def orders_exits(OR, take, soft, hard=3.0):
