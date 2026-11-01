@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.755"
+APP_VERSION = "0.99.756"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -36834,7 +36834,7 @@ BN_OTHERS = os.environ.get("VP_BN_OTHERS", "0") == "1"
 # $7.2k / 63% / 73%, better than 10x in 10 of 12; 15x+ a deeper drawdown and a lower worst year (20x $3.7k / 82% without
 # the cut) for ~5% more median. No liquidation in any
 BN_CROSS = os.environ.get("VP_BN_CROSS", "1") == "1"
-BN_CROSS_LEV = int(os.environ.get("VP_BN_CROSS_LEV", "14"))   # the ceiling; the coin's bracket and the account's cap may give less
+BN_CROSS_LEV = int(os.environ.get("VP_BN_CROSS_LEV", "17"))   # v0.99.756 — 14 -> 17 (the user: "17"; money_deep.py lev: the windows of 2024 / 2025 +10% / +23%, of 2023 -20%, 2022 the same, the drawdown the same)   # the ceiling; the coin's bracket and the account's cap may give less
 BN_HEAT_MAX = 1.00   # v0.99.753 — 0.95 -> 1.00 (the user: "Обе"; money_arm2.py with the new arming: the usual year +12%, the drawdown 63 -> 66%). v0.99.749 — 0.90 -> 0.95 (the user: "3% и 95%"; money_params.py on the restored lab: the usual year +8%, the drawdown 61 -> 66%)
 
 
@@ -42331,7 +42331,7 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow subRow">
         <div>
-          <div class="label">↳ 💱 Кросс-маржа, плечо до 14x (или максимум монеты), общий риск до 100%</div>
+          <div class="label">↳ 💱 Кросс-маржа, плечо до 17x (или максимум монеты), общий риск до 100%</div>
           <div class="sub hintx">новые позиции на Binance — в кросс-марже с наибольшим плечом, которое Binance даёт монете при этом размере позиции (не больше лимита аккаунта; потеря на стопе от плеча не зависит — размер позиции считается от риска, а маржи на позицию нужно меньше), а предел — сам риск: сумма потерь всех открытых позиций и выставленных лимиток ⚡, если все сработают по стопам на бирже, не больше 90% счёта (новая сделка урезается, чтобы в него уложиться). В изолированной марже пределом была маржа: на истории она урезала 31% сделок и отменяла ещё 20% — долгие позиции SMC / P/R / EMA держали её, когда приходили лучшие пачки ⚡. За год со $100: плохой год $1 631 → $2 393, медиана $17 743 → $24 773, последние 12 мес $37 206 → $72 757, просадка та же ~61%. Выключено — как раньше: изолированная, плечо по стопу. Монета, где Binance не даёт сменить режим (на ней позиция или ордер), торгуется по-старому</div>
         </div>
         <label class="switch"><input type="checkbox" id="setBnCross"><span class="switchSlider"></span></label>
