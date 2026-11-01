@@ -77,10 +77,11 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     if "pm" in kw: OR = [o for o in OR if o["prio"] >= float(kw["pm"])]   # a stricter threshold: the score >= pm x the year's
     if "life" in kw: OR = [dict(o, until=o["t"] + int((o["until"] - o["t"]) * float(kw["life"]) / 4)) for o in OR]   # the limit's life in bars (4)
     if "heat" in kw: heat = float(kw["heat"])
-    oth = kw.get("oth") == "1"; ma = int(kw.get("ma", 999))
+    oth = kw.get("oth") == "1"; ma = int(kw.get("ma", 999))   # the other modules take an armed ⚡ limit's room; at most `ma` armed ⚡ limits
     # the open risk a side: "sh=X" — the longs' (the shorts') losses at their stops <= X of the equity; "net=X" — the one side's
     # minus the other's <= X (the alts fall with BTC together: the drawdown is the side's, not the total's)
-    sh = float(kw.get("sh", 0)); net = float(kw.get("net", 0))   # the other modules take an armed ⚡ limit's room; at most `ma` armed ⚡ limits
+    sh = float(kw.get("sh", 0)); net = float(kw.get("net", 0))
+    nomg = kw.get("nomg") == "1"
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
     OR = [o for o in OR if A - 64 * 3600 <= o["t"] < B]; io = 0; act = []
     OT = sorted(OT, key=lambda v: v["t0"]); jo = bisect.bisect_left([v["t0"] for v in OT], A)
@@ -106,6 +107,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         notional = rd / v["st"]
         if notional < minn: return None, hn, room   # under Binance's minimum order: not opened
         mg = notional / M.lev_real(v["sym"], notional, cap); free = eq - sum(o["mg"] for o in pos) - sum(o["mg"] for o in armed.values())
+        if nomg: mg = 0.0   # "nomg=1": the margin never short (what the free margin costs)
         if mg > 0.9 * free:
             if free <= 1: return None, hn, room
             q = 0.9 * free / mg; rd *= q; notional *= q; mg *= q

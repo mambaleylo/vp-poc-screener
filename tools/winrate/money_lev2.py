@@ -11,6 +11,7 @@ from multiprocessing import Pool
 F = RB.F; SEEDS = (1, 2)
 LEVS = [int(x) for x in os.environ.get("LEVS", "17,20,25,30,40,50").split(",")]   # 150 = no ceiling: each coin its own Binance maximum at the position's size
 VARS = {(f"{c}x" if c < 150 else "максимум монеты"): F.replace("cap=17", f"cap={c}") for c in LEVS}
+if os.environ.get("NOMG"): VARS["маржа без ограничений"] = F + "|nomg=1"
 _D = {}
 def _init(D): _D.update(D)
 def job(a):
