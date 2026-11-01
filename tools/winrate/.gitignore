@@ -1,1 +1,5 @@
 lv2/
+ev3/
+data/
+fc_RF.npz
+fc_red_sc.npz

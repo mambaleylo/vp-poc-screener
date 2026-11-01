@@ -1,0 +1,5 @@
+data/
+er/
+er3/
+*.parquet
+er_sc_*.npz
