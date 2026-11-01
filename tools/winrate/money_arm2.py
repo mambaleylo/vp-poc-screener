@@ -77,7 +77,10 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     if "pm" in kw: OR = [o for o in OR if o["prio"] >= float(kw["pm"])]   # a stricter threshold: the score >= pm x the year's
     if "life" in kw: OR = [dict(o, until=o["t"] + int((o["until"] - o["t"]) * float(kw["life"]) / 4)) for o in OR]   # the limit's life in bars (4)
     if "heat" in kw: heat = float(kw["heat"])
-    oth = kw.get("oth") == "1"; ma = int(kw.get("ma", 999))   # the other modules take an armed ⚡ limit's room; at most `ma` armed ⚡ limits
+    oth = kw.get("oth") == "1"; ma = int(kw.get("ma", 999))
+    # the open risk a side: "sh=X" — the longs' (the shorts') losses at their stops <= X of the equity; "net=X" — the one side's
+    # minus the other's <= X (the alts fall with BTC together: the drawdown is the side's, not the total's)
+    sh = float(kw.get("sh", 0)); net = float(kw.get("net", 0))   # the other modules take an armed ⚡ limit's room; at most `ma` armed ⚡ limits
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
     OR = [o for o in OR if A - 64 * 3600 <= o["t"] < B]; io = 0; act = []
     OT = sorted(OT, key=lambda v: v["t0"]); jo = bisect.bisect_left([v["t0"] for v in OT], A)
@@ -92,8 +95,11 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             v = dict(v, t0=v.get("t0") or v["t"] + 3600)
         return eq * r * WF(v)
     def used(): return sum(o["heat"] for o in pos) + hf * sum(o["heat"] for o in armed.values())
+    def sused(s): return sum(o["heat"] for o in pos if o["side"] == s) + hf * sum(a["heat"] for a in armed.values() if a["o"]["side"] == s)
     def fit(v, eq, extra=0.0):
         rd = rd_of(v, eq); hn = rd * v["sth"] / v["st"]; room = heat * eq - used() + extra
+        if sh: room = min(room, sh * eq - sused(v["side"]) + extra)
+        if net: room = min(room, net * eq - (sused(v["side"]) - sused(-v["side"])) + extra)
         if hn > room:
             if room < hn * 0.1: return None, hn, room
             rd *= room / hn
@@ -131,6 +137,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
                 freed = 0.0
                 for k2, a in sorted(armed.items(), key=lambda x: x[1]["o"]["prio"]):
                     if room + freed >= hn: break
+                    if (sh or net) and a["o"]["side"] != v["side"]: continue   # the other side's limit frees nothing of this side
                     del armed[k2]; freed += hf * a["heat"]
                 s_, hn, room = fit(v, eq)
             if s_: pos.append(dict(v, **s_))
@@ -169,7 +176,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             s_, hn, room = (None, 0, 0) if busy or nd >= maxpos else fit(o, eq)
             if rule == "Ac" and s_ and s_["rd"] < rd_of(o, eq) * 0.999: s_ = None   # no scaled-down crumbs
             if rule == "Bn" and not busy and (s_ is None or s_["rd"] < rd_of(o, eq) * 0.999 or nd >= maxpos):
-                low = sorted([(k2, a) for k2, a in armed.items() if a["o"]["prio"] < o["prio"]], key=lambda x: x[1]["o"]["prio"])
+                low = sorted([(k2, a) for k2, a in armed.items() if a["o"]["prio"] < o["prio"] and not ((sh or net) and a["o"]["side"] != o["side"])], key=lambda x: x[1]["o"]["prio"])
                 freed = 0.0; n2 = nd
                 for k2, a in low:
                     if n2 < maxpos and room + freed >= hn and hn > 0: break
