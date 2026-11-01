@@ -26,7 +26,8 @@ for st in ("wick4h", "close2h"):
     z0 = np.load(f"{M.ST}/wf/allorders_{st}.npz", allow_pickle=True); z = {k: z0[k] for k in z0.files}; bs = 14400 if st == "wick4h" else 7200
     for k in np.flatnonzero((z["t"] >= M.ts(2025, 11)) & (z["t"] < M.ts(2026, 10))):
         O.append({"coin": str(z["coin"][k]), "t": int(z["t"][k]), "until": int(z["t"][k]) + 4 * bs, "side": int(z["side"][k]), "lv": float(z["lv"][k]),
-                  "atr": float(z["atr"][k]), "prio": float(z["score"][k]) / float(z["thr"][k])})
+                  "atr": float(z["atr"][k]), "prio": float(z["score"][k]) / float(z["thr"][k]),
+                  "tout": int(z["tout"][k]) if z["filled"][k] else 0})
 days = collections.Counter()
 for o in O:
     for d in range(o["t"] // 86400, o["until"] // 86400 + 1): days[d] += 1
@@ -42,35 +43,41 @@ for d in busy:
         if len(a): data[c] = {int(r[0]): r for r in a if A <= r[0] < B}
     print(f"== {np.datetime64(A, 's').astype('datetime64[D]')}: orders {len(act)}, coins with 1m {len(data)}", flush=True)
     for nm, (ARM, DIS, PRIO) in RULES.items():
-        armed = {}; done = set(); ev = collections.Counter(); per_min = []
+        armed = {}; done = set(); pos = {}; ev = collections.Counter(); per_min = []   # pos: the coin -> the position's end
         for mt in range(A, B, 60):
             req = 0
+            for c in [c for c, e in pos.items() if e <= mt]: del pos[c]
+            for i in [i for i in armed if mt >= act[i]["until"]]: del armed[i]; req += 4; ev["снятие (срок)"] += 1
+            want = []
             for i, o in enumerate(act):
-                if i in done or not (o["t"] <= mt < o["until"]): 
-                    if i in armed and mt >= o["until"]: del armed[i]; req += 4; ev["снятие (срок)"] += 1
-                    continue
+                if i in done or not (o["t"] <= mt < o["until"]): continue
                 r = data.get(o["coin"], {}).get(mt)
                 if r is None: continue
-                s, lv, a_ = o["side"], o["lv"], o["atr"]
-                hi, lo, cl = r[2], r[3], r[4]
+                s, lv, a_ = o["side"], o["lv"], o["atr"]; hi, lo, cl = r[2], r[3], r[4]
                 near = ((lo - lv) if s > 0 else (lv - hi)) / a_ <= ARM; touch = (lo <= lv) if s > 0 else (hi >= lv); far = s * (cl - lv) / a_ > DIS
                 if i in armed:
-                    if touch: del armed[i]; done.add(i); ev["исполнение"] += 1; req += 2
+                    if touch:
+                        del armed[i]; done.add(i); ev["исполнение"] += 1; req += 2; pos[o["coin"]] = max(o["tout"], mt + 3600)
                     elif far: del armed[i]; req += 4; ev["снятие (ушла цена)"] += 1
                     continue
-                if not near: continue
+                if near and o["coin"] not in pos: want.append((i, touch, s * (cl - lv) / a_, cl))
+            want.sort(key=(lambda w: -act[w[0]]["prio"]) if PRIO else (lambda w: w[2]))   # the bot: by the priority (now) / the distance (before)
+            for i, touch, di, cl in want:
+                o = act[i]
+                if i in armed or o["coin"] in pos: continue
                 same = [j for j in armed if act[j]["coin"] == o["coin"]]
                 if same:
-                    j = same[0]; dj = act[j]["side"] * (cl - act[j]["lv"]) / act[j]["atr"]; di = s * (cl - lv) / a_
+                    j = same[0]; dj = act[j]["side"] * (cl - act[j]["lv"]) / act[j]["atr"]
                     if dj > di + 0.25: del armed[j]; req += 4; ev["замена ближней"] += 1
                     else: continue
-                if len(armed) >= 20:
-                    if not PRIO: continue
+                if len(armed) + len(pos) >= 20:
+                    if not PRIO or not armed: continue
                     low = min(armed, key=lambda j: act[j]["prio"])
                     if act[low]["prio"] >= o["prio"]: continue
                     del armed[low]; req += 4; ev["вытеснение"] += 1
-                armed[i] = 1; req += 3 + 1; ev["выставление"] += 1   # the limit + the stop + the take, the leverage
-                if touch: del armed[i]; done.add(i); ev["исполнение"] += 1; req += 2
+                armed[i] = 1; req += 4; ev["выставление"] += 1   # the limit + the stop + the take + the leverage
+                if touch:
+                    del armed[i]; done.add(i); ev["исполнение"] += 1; req += 2; pos[o["coin"]] = max(o["tout"], mt + 3600)
             per_min.append(req)
         pm = np.array(per_min)
         print(f"   {nm:30s} запросов за день {pm.sum():5d}, в минуту: среднее {pm.mean():.1f}, максимум {pm.max()}, 99% {np.percentile(pm, 99):.0f} | "
