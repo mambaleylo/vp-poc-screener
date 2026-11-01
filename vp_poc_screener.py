@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.751"
+APP_VERSION = "0.99.752"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28536,9 +28536,11 @@ _PROC_START = time.time()
 # v0.99.749 — EMA 3%, the open risk cap 95%
 # v0.99.750 — ⚡'s exits 1.75 / 1.2 ATR, and the ⚡ trades of an hour in a random order (money_expect2.py, 5 orders averaged:
 # the bot gives the room to the first level the price reaches; the lab's score order was ~25% too kind)
-EXPECT_YEAR = {"dlm": {"p10": 3364, "p50": 12283, "p90": 44144, "dd": 75, "last12": 27206},
-               "bundle": {"p10": 13122, "p50": 63481, "p90": 393967, "dd": 70, "last12": 74927},
-               "bundle_htf": {"p10": 14175, "p50": 72018, "p90": 449826, "dd": 70, "last12": 123222}}
+# v0.99.752 — the bot's arming in the money (a limit holds its risk from the moment it goes on the exchange; money_arm.py,
+# money_expect3.py) and the room by the score (DLM_PRIO); the never-filled armed limits are not in the lab (they hold room too)
+EXPECT_YEAR = {"dlm": {"p10": 4431, "p50": 15585, "p90": 62177, "dd": 71, "last12": 25443},
+               "bundle": {"p10": 16857, "p50": 82177, "p90": 951994, "dd": 60, "last12": 67874},
+               "bundle_htf": {"p10": 17032, "p50": 90565, "p90": 1033108, "dd": 60, "last12": 79159}}
 
 
 @app.route("/api/boot")
@@ -36478,6 +36480,7 @@ def _dlm_take_watch(t, mark=None, now=None):
 DLM_ARM_ATR = float(os.environ.get("VP_DLM_ARM_ATR", "1.0"))   # v0.99.691 — a real limit goes on the exchange when the price is this close (v0.99.702: 0.3 -> 1.0 ATR — at 0.3 a fast spike through the level beat the 5 s polls: ~20% of the backtest's fills missed live, arm_miss.py on 1m; at 1.0 ~2%)
 DLM_SWAP_ATR = 0.25   # v0.99.715 — the parallel stream's limit takes the coin's place on the exchange when this much nearer
 DLM_DISARM_ATR = 1.6   # ... and comes off again (back to waiting) when the price goes this far from it (v0.99.702: 1.0 -> 1.6)
+DLM_PRIO = os.environ.get("VP_DLM_PRIO", "1") == "1"   # v0.99.752 — no room: a higher-scored limit takes an armed lower one's place (_dlm_bump)
 DLM_THROUGH_ATR = 0.3   # v0.99.702 — the price already this far through a waiting order's level: no trade (another entry than the research's)
 
 
@@ -36522,6 +36525,66 @@ def _dlm_cancel_back(o):
     return True
 
 
+def _dlm_prio(o):
+    """v0.99.752 — an order's priority: its model score over its stream's threshold (the streams' scores are on their own
+    scales; money_arm.py: by the raw score the usual year $77k, by this $91k)"""
+    st = _dlm_stream(o.get("st") or "wick4h") or {}
+    thr = float(st.get("thr") or 0)
+    return float(o.get("score") or 0) / thr if thr > 0 else float(o.get("score") or 0)
+
+
+def _dlm_bump(o, armed):
+    """v0.99.752 — the room by the score (tools/winrate money_arm.py — the bot's arming in the money: a limit holds its risk
+    from the moment it goes on the exchange; with "the first come takes the room" a year from $100 the usual $37.9k, the bad
+    10% $10.9k, the drawdown 71%; when the room is short and an armed, not yet filled limit of a lower priority comes off for
+    a higher one — $90.6k / $17.0k / 60%, better in 143 of 144 windows). Before o goes on the exchange: no room (the positions
+    + limits cap, its side's cap, or — cross margin — the open-risk cap below its full risk) -> the armed lower-priority ⚡
+    limits (the lowest first) back to waiting until it fits; none lower -> nothing (o waits as before) -> the ones taken off"""
+    if not DLM_PRIO or o.get("score") is None:
+        return []
+    p0 = _dlm_prio(o)
+    low = sorted([a for a in armed if a is not o and a["status"] == "OPEN" and (a.get("real") or {}).get("id") and a["symbol"] != o["symbol"]
+                  and a.get("score") is not None and _dlm_prio(a) < p0], key=_dlm_prio)
+    if not low:
+        return []
+    with _dlm_lock:
+        live = [x for x in _DLM["orders"] if (x.get("real") or {}).get("id") and x["status"] == "OPEN"]
+        held = [t for t in _DLM["trades"] if t.get("real") and t["status"] == "OPEN"]
+    cap_n = min(DLM_MAX_POS, DLM_MAX_LIVE_ORDERS); side_cap = int((_DLM.get("model") or {}).get("side_cap") or 20)
+    n_all = len(held) + len(live); n_side = sum(1 for t in held if t["side"] == o["side"]) + sum(1 for x in live if x["side"] == o["side"])
+    need = room = 0.0
+    if DLM_BINANCE and BN_CROSS:
+        try:
+            eq = bnf_account()["equity"]
+        except Exception as e:
+            log_error(f"dlm bump account: {e}")
+            return []
+        rule = ((_DLM.get("model") or {}).get("rule") or {})
+        _sl, kx = _dlm_size_stop(o, rule)
+        need = eq * dlm_risk(eq) * dlm_load_mult() * dlm_osc_mult(o["symbol"], o["side"]) * kx * dlm_stream_mult(o) / 100
+        room = BN_HEAT_MAX * eq - bn_heat(eq)
+    heat_of = lambda a: (lambda r: float(r.get("qty") or 0) * max(0.0, a["side"] * (float(r.get("price") or a["lv"]) * float(r.get("scl") or 1.0)
+                         - (float(r.get("pre_sl_px") or 0) or (a["lv"] - a["side"] * 3.0 * (a.get("atr") or 0)) * float(r.get("scl") or 1.0)))))(a["real"])
+    fits = lambda: n_all < cap_n and n_side < side_cap and room >= need * 0.999
+    off = []
+    for a in low:
+        if fits():
+            break
+        if n_side >= side_cap and a["side"] != o["side"] and n_all < cap_n and room >= need * 0.999:
+            continue   # its side is full: only a limit of the same side frees it
+        h = heat_of(a)
+        try:
+            if not _dlm_cancel_back(a):
+                continue
+        except Exception as e:
+            log_error(f"dlm bump {a['symbol']}: {e}")
+            continue
+        a["hold"] = (f"снята с биржи: место отдано лимитке с более высокой оценкой модели ({o['symbol'].replace('_USDT', '')}, "
+                     f"{p0:.2f} против {_dlm_prio(a):.2f} от порога) — снова ждёт места")
+        off.append(a); n_all -= 1; n_side -= a["side"] == o["side"]; room += h
+    return off
+
+
 def _dlm_arm(now):
     """v0.99.691 — the real limits follow the price instead of standing from the scan (the audit: with the limit of 26
     limits + positions the real account took 188 of the backtest's 406 trades in Jun–Oct 2026; deciding when the price
@@ -36543,10 +36606,10 @@ def _dlm_arm(now):
                 _dlm_cancel_back(o)
             except Exception as e:
                 log_error(f"dlm disarm {o['symbol']}: {e}")
-    for o in sorted((o for o in wait if o["symbol"] in px), key=dist):
+    near = [o for o in wait if o["symbol"] in px and dist(o) <= DLM_ARM_ATR]
+    # v0.99.752 — the ones within reach by priority (the score over its stream's threshold), not by the distance
+    for o in (sorted(near, key=lambda o: -_dlm_prio(o)) if DLM_PRIO else sorted(near, key=dist)):
         d = dist(o)
-        if d > DLM_ARM_ATR:
-            break
         if d < -DLM_THROUGH_ATR:   # far through the level (the bot was down / no prices): a fill now would be another trade
             o["real"] = {"status": "SKIPPED", "detail": "цена проскочила лимитку раньше, чем бот выставил её на биржу (резкий прострел, бот был занят пересчётом или не работал)"}
             continue
@@ -36564,6 +36627,8 @@ def _dlm_arm(now):
             except Exception as e:
                 log_error(f"dlm swap {o['symbol']}: {e}")
         try:
+            for a in _dlm_bump(o, armed):   # v0.99.752 — no room: a lower-priority armed limit makes way
+                armed.remove(a)
             dlm_real_place(o)
         except Exception as e:
             log_error(f"dlm place {o['symbol']}: {e}")

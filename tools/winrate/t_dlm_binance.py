@@ -266,6 +266,26 @@ res["armed on Binance as the price comes"] = far_wait and og.get("type") == "LIM
 X["px"] = {"BBBUSDT": 5.2}   # 4 ATR away again: off, waiting
 V.dlm_real_tick()
 res["armed on Binance as the price comes"] &= og.get("status") == "CANCELED" and g.get("real") is None and g["status"] == "OPEN"
+# (7d) v0.99.752 — the room by the score: 2 places, two armed limits of a low score; a higher-scored one near the price takes
+# the lowest one's place (that one back to waiting, saying why); a still lower one waits and takes nothing
+_mp0, _o0, _t0, _px0 = V.DLM_MAX_POS, V._DLM["orders"], V._DLM["trades"], dict(X.get("px", {}))
+V.DLM_MAX_POS = 2; V._DLM["orders"], V._DLM["trades"] = [], []
+_pos0 = dict(X["pos"]); X["pos"].clear()
+lo1 = dict(mk("BBB_USDT", 1, 2.0, 0.02), score=0.30, st="wick4h"); lo2 = dict(mk("EEE_USDT", 1, 3.0, 0.03), score=0.40, st="wick4h")
+V._DLM["orders"] += [lo1, lo2]; X["px"] = {"BBBUSDT": 2.01, "EEEUSDT": 3.01}
+V.dlm_real_tick(); both = bool((lo1.get("real") or {}).get("id")) and bool((lo2.get("real") or {}).get("id"))
+hi = dict(mk("FFF_USDT", 1, 4.0, 0.04), score=0.90, st="wick4h"); V._DLM["orders"].append(hi); X["px"]["FFFUSDT"] = 4.01
+V.dlm_real_tick()
+bumped = (lo1.get("real") is None and "место отдано лимитке с более высокой оценкой" in (lo1.get("hold") or "") and bool((lo2.get("real") or {}).get("id"))
+          and bool((hi.get("real") or {}).get("id")))
+low = dict(mk("AAA_USDT", 1, 5.0, 0.05), score=0.20, st="wick4h"); V._DLM["orders"].append(low); X["px"]["AAAUSDT"] = 5.01
+V.dlm_real_tick()
+kept = low.get("real") is None and bool((lo2.get("real") or {}).get("id")) and bool((hi.get("real") or {}).get("id")) and "заняты все" in (low.get("hold") or "")
+print(f"   the room by the score: two armed {both} · a higher one takes the lowest one's place {bumped} · a lower one waits {kept}")
+res["the room by the score: a higher-scored limit takes an armed lower one's place"] = both and bumped and kept
+for o_ in V._DLM["orders"]:
+    if (o_.get("real") or {}).get("id"): V._dlm_cancel_back(o_)
+V.DLM_MAX_POS, V._DLM["orders"], V._DLM["trades"] = _mp0, _o0, _t0; X["px"] = _px0; X["pos"].update(_pos0)
 # (8) the free margin: the risk scaled down; (9) below the minimum notional -> skipped
 V.apply_settings({"risk_pct_dlm2": 50}); X["free"] = 5.0
 e = mk("AAA_USDT", 1, 10.0, 0.1); e["id"] += "e"; V._DLM["orders"].append(e)
