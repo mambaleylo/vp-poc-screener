@@ -21294,3 +21294,14 @@ v0.99.762 — the widget: every closed trade of the bundle, a new look
 - The widget app 1.1 (tools/android_widget, "некрасивый виджет"): the balance and the year side by side, the balance curve
   filling the widget's height (drawn on the phone), the modules' line, the days / trades / WR / R, "⚠ мало сделок".
 - t_widget: the bundle's trades (the old 15m ⚡, the unselected EMA coins, the unfilled not counted; the risks; the curve).
+
+v0.99.763 — the widget: the money put in vs the real PnL
+- The user: "а виджет отличает пополнения баланса и реальный pnl", then "да": Binance's income history (/fapi/v1/income,
+  every kind; 90 days back the first time, then the new rows every 5 min; kept in vp_bn_income.json, not in git): the
+  transfers in / out (+ a bonus, a coin swap) = the money put in; the realized PnL, the commissions, the funding … = the
+  real PnL (+ the open positions'); a BNB commission at today's mark price. /api/widget: real (dep / pnl / upnl / real /
+  real_pct / kinds), real_line "внесено $… · реально +$… (…%), открытые …", rcurve (the real wallet along the history, the
+  last point today's equity), rdeps (the transfers).
+- The widget app 1.2: the line under the balance; the chart = the real balance (green / red by the real PnL), the
+  top-ups as blue dots with their sum; the forecast's curve when there is no Binance history.
+- t_widget: the income split, the BNB commission, the 5-min pause, the restart from the kept file's last row.

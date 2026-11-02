@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.762"
+APP_VERSION = "0.99.763"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -38455,6 +38455,120 @@ def api_dlm_adopt():
 
 _WIDGET = {"t": 0.0, "d": None}
 
+# v0.99.763 — the user: "а виджет отличает пополнения баланса и реальный pnl", then "да": Binance's income history
+# (/fapi/v1/income, every kind) kept in vp_bn_income.json (the API gives ~3 months back; kept here, it stays): the transfers
+# in / out = the money put in, everything else (the realized PnL, the commissions, the funding …) = the real PnL; the wallet's
+# path along it = the real balance curve, the transfers marked on it. Other assets (a BNB commission) at today's mark price
+BN_INCOME_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_bn_income.json")
+BN_INC_DEP = {"TRANSFER", "INTERNAL_TRANSFER", "CROSS_COLLATERAL_TRANSFER", "COIN_SWAP_DEPOSIT", "COIN_SWAP_WITHDRAW",
+              "STRATEGY_UMFUTURES_TRANSFER", "AUTO_EXCHANGE", "WELCOME_BONUS"}
+BN_INC_USD = {"USDT", "USDC", "FDUSD", "BFUSD"}
+_INC = {"rows": None, "t_fetch": 0.0, "err": None}
+_inc_lock = threading.Lock()
+
+
+def bn_income_sync(now=None):
+    """the new income rows since the last kept one (the first time: 90 days back), by 7-day windows of up to 1000 rows; at most
+    every 5 min; -> the kept rows [(t ms, kind, amount, asset, key)]"""
+    now = now or time.time()
+    with _inc_lock:
+        if _INC["rows"] is None:
+            try:
+                with open(BN_INCOME_FILE) as f:
+                    _INC["rows"] = [tuple(x) for x in json.load(f)]
+            except Exception:
+                _INC["rows"] = []
+        if now - _INC["t_fetch"] < 300:
+            return list(_INC["rows"])
+        _INC["t_fetch"] = now
+        rows = list(_INC["rows"])
+    seen = {r[4] for r in rows}
+    start = (rows[-1][0] + 1) if rows else int((now - 90 * 86400) * 1000)
+    end_all = int(now * 1000); added = 0
+    try:
+        while start < end_all:
+            end = min(end_all, start + 7 * 86400 * 1000 - 1)
+            xs = bnf_req("GET", "/fapi/v1/income", {"startTime": start, "endTime": end, "limit": 1000}) or []
+            for x in xs:
+                k = f"{x.get('tranId')}|{x.get('incomeType')}|{x.get('symbol')}|{x.get('asset')}|{x.get('time')}"
+                if k not in seen:
+                    seen.add(k); added += 1
+                    rows.append((int(x.get("time") or 0), str(x.get("incomeType") or ""), float(x.get("income") or 0), str(x.get("asset") or ""), k))
+            if len(xs) >= 1000:
+                start = int(xs[-1].get("time") or start) + 1
+            else:
+                start = end + 1
+        _INC["err"] = None
+    except Exception as e:
+        _INC["err"] = str(e)[:120]
+        log_error(f"binance income: {e}")
+    rows.sort(key=lambda r: r[0])
+    with _inc_lock:
+        _INC["rows"] = rows
+    if added:
+        try:
+            tmp = BN_INCOME_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(rows, f)
+            os.replace(tmp, BN_INCOME_FILE)
+        except Exception as e:
+            log_error(f"binance income save: {e}")
+    return rows
+
+
+def _bn_usd_px(asset):
+    """an asset's price in $ (Binance's USDT perpetual mark price; a stable coin 1.0; unknown -> None)"""
+    if asset in BN_INC_USD:
+        return 1.0
+    try:
+        j = bnf_req("GET", "/fapi/v1/premiumIndex", {"symbol": asset + "USDT"}, signed=False)
+        return float(j.get("markPrice")) if isinstance(j, dict) and j.get("markPrice") else None
+    except Exception:
+        return None
+
+
+def bn_income_summary(rows, equity, upnl, now=None, px=None):
+    """the money put in vs the real PnL from the income rows, and the real balance curve: the wallet before the first row =
+    today's wallet less every row; then each row moves it (by the hour), the last point = today's equity (with the open
+    positions' PnL); the transfers as their own points -> dict"""
+    now = now or time.time()
+    px = px or _bn_usd_px; P = {}
+    for a_ in {r[3] for r in rows}:
+        P[a_] = px(a_)
+    rs = [(r[0], r[1], r[2] * P[r[3]], r[3], r[4]) for r in rows if P.get(r[3])]   # BNB commissions at today's price
+    if not rs:
+        return None
+    dep = sum(r[2] for r in rs if r[1] in BN_INC_DEP)
+    pnl = sum(r[2] for r in rs if r[1] not in BN_INC_DEP)
+    kinds = {}
+    for r in rs:
+        if r[1] not in BN_INC_DEP:
+            kinds[r[1]] = kinds.get(r[1], 0.0) + r[2]
+    wallet = equity - upnl
+    w = wallet - sum(r[2] for r in rs); t0 = rs[0][0] / 1000.0
+    pts, deps, hour = [[0.0, round(max(w, 0.0), 2)]], [], None
+    for r in rs:
+        w += r[2]; d_ = (r[0] / 1000.0 - t0) / 86400
+        if r[1] in BN_INC_DEP:
+            deps.append([round(d_, 3), round(r[2], 2)])
+            pts.append([round(d_, 3), round(w, 2)]); hour = None
+            continue
+        h = r[0] // 3600000
+        if h == hour and len(pts) > 1:
+            pts[-1] = [round(d_, 3), round(w, 2)]
+        else:
+            pts.append([round(d_, 3), round(w, 2)]); hour = h
+    pts.append([round((now - t0) / 86400, 3), round(equity, 2)])
+    if len(pts) > 160:   # thinned, the transfers' points kept
+        keep = {i for i, p in enumerate(pts) if any(abs(p[0] - x[0]) < 1e-9 for x in deps)}
+        step = len(pts) / 150.0
+        keep |= {int(i * step) for i in range(150)} | {0, len(pts) - 1}
+        pts = [pts[i] for i in sorted(keep)]
+    real = pnl + upnl
+    return {"dep": round(dep, 2), "pnl": round(pnl, 2), "upnl": round(upnl, 2), "real": round(real, 2), "kinds": {k: round(v, 2) for k, v in kinds.items()},
+            "real_pct": round(100 * real / dep, 1) if dep > 0 else None, "days": round((now - t0) / 86400, 1), "rcurve": pts, "rdeps": deps}
+
+
 
 def _fmt_usd(x):
     """$1 234 / $12.34 (a space between the thousands, cents under $100)"""
@@ -38501,6 +38615,7 @@ def widget_data():
     if _WIDGET["d"] and now - _WIDGET["t"] < 60:
         return _WIDGET["d"]
     d = {"ok": True, "err": None, "t": int(now), "upd": time.strftime("%H:%M", time.localtime(now))}
+    a = None
     try:
         if BINANCE_API_KEY and BINANCE_API_SECRET:
             a = bnf_account(); bal, d["ex"] = a["equity"], "Binance"
@@ -38508,6 +38623,18 @@ def widget_data():
             bal, d["ex"] = float(get_futures_total_equity() or 0), "Gate"
     except Exception as e:
         bal = None; d["ok"] = False; d["err"] = f"баланс: {str(e)[:80]}"
+    d.update({"real": None, "real_line": "", "rcurve": [], "rdeps": []})
+    if a:   # v0.99.763 — the money put in vs the real PnL (Binance's income history)
+        try:
+            sm = bn_income_summary(bn_income_sync(now), a["equity"], a.get("upnl") or 0.0, now)
+        except Exception as e:
+            sm = None; log_error(f"widget income: {e}")
+        if sm:
+            sgn = "+" if sm["real"] >= 0 else "−"
+            d.update({"real": sm, "rcurve": sm["rcurve"], "rdeps": sm["rdeps"],
+                      "real_line": f"внесено {_fmt_usd(sm['dep'])} · реально {sgn}{_fmt_usd(abs(sm['real']))}"
+                                   + (f" ({sm['real_pct']:+.0f}%)" if sm["real_pct"] is not None else "")
+                                   + (f", открытые {'+' if sm['upnl'] >= 0 else '−'}{_fmt_usd(abs(sm['upnl']))}" if abs(sm["upnl"]) >= 0.01 else "")})
     rows, mods = [], []
     for k, lab, tr, risk in _widget_mods():
         rr = []

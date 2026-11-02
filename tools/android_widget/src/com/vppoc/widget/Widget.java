@@ -89,7 +89,7 @@ public class Widget extends AppWidgetProvider {
     static int dp(Context c, float v) { return Math.round(v * c.getResources().getDisplayMetrics().density); }
 
     /** the balance curve along the trades (the bot's "curve": [days, $]) as a bitmap of the chart's size */
-    static Bitmap chart(Context c, JSONArray pts, int w, int h) {
+    static Bitmap chart(Context c, JSONArray pts, JSONArray deps, Boolean good, int w, int h) {
         Bitmap b = Bitmap.createBitmap(Math.max(w, 10), Math.max(h, 10), Bitmap.Config.ARGB_8888);
         Canvas cv = new Canvas(b);
         Paint tx = new Paint(Paint.ANTI_ALIAS_FLAG); tx.setColor(0xFF6B7684); tx.setTextSize(dp(c, 10));
@@ -115,7 +115,7 @@ public class Widget extends AppWidgetProvider {
             xs[i] = X; ys[i] = Y;
         }
         fill.lineTo(xs[n - 1], bot); fill.close();
-        boolean up = ys[n - 1] <= ys[0];
+        boolean up = good != null ? good : ys[n - 1] <= ys[0];
         int col = up ? 0xFF4ADE80 : 0xFFF87171;
         Paint f = new Paint(Paint.ANTI_ALIAS_FLAG);
         f.setShader(new LinearGradient(0, top, 0, bot, (col & 0x00FFFFFF) | 0x55000000, col & 0x00FFFFFF, Shader.TileMode.CLAMP));
@@ -128,6 +128,21 @@ public class Widget extends AppWidgetProvider {
         cv.drawPath(line, ln);
         Paint dot = new Paint(Paint.ANTI_ALIAS_FLAG); dot.setColor(col);
         cv.drawCircle(xs[n - 1], ys[n - 1], dp(c, 3.5f), dot);
+        if (deps != null) {   // the top-ups / withdrawals: blue dots on the line with their sum
+            Paint dp_ = new Paint(Paint.ANTI_ALIAS_FLAG); dp_.setColor(0xFF60A5FA);
+            Paint dt = new Paint(Paint.ANTI_ALIAS_FLAG); dt.setColor(0xFF93C5FD); dt.setTextSize(dp(c, 9)); dt.setTextAlign(Paint.Align.CENTER);
+            for (int k = 0; k < deps.length(); k++) {
+                JSONArray q = deps.optJSONArray(k);
+                float dx = (float) q.optDouble(0), X = left + (dx - x0) / (x1 - x0) * (right - left);
+                int i = 0;
+                while (i < n - 1 && xs[i + 1] <= X) i++;   // the line's point at that time (after the transfer)
+                float Y = ys[Math.min(i, n - 1)];
+                cv.drawCircle(X, Y, dp(c, 3.5f), dp_);
+                long amt = Math.round(q.optDouble(1));
+                float ty = Y - dp(c, 6) < dp(c, 10) ? Y + dp(c, 14) : Y - dp(c, 6);
+                cv.drawText((amt >= 0 ? "+" : "") + amt, Math.max(dp(c, 12), Math.min(right - dp(c, 12), X)), ty, dt);
+            }
+        }
         float days = x1 - x0;
         cv.drawText(days >= 1 ? Math.round(days) + " дн назад" : "сегодня", left, h - dp(c, 2), tx);
         tx.setTextAlign(Paint.Align.RIGHT);
@@ -165,8 +180,14 @@ public class Widget extends AppWidgetProvider {
                 int wdp = o.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 300), hdp = o.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, 180);
                 if (wdp <= 0) wdp = 300;
                 if (hdp <= 0) hdp = 180;
-                int cw = dp(c, wdp - 32), ch = Math.max(dp(c, 36), dp(c, hdp - 150));
-                v.setImageViewBitmap(R.id.chart, chart(c, j.optJSONArray("curve"), cw, ch));
+                int cw = dp(c, wdp - 32), ch = Math.max(dp(c, 36), dp(c, hdp - 168));
+                v.setTextViewText(R.id.real, j.optString("real_line", ""));
+                JSONArray rc = j.optJSONArray("rcurve");
+                boolean realc = rc != null && rc.length() >= 2;
+                JSONObject sm = j.optJSONObject("real");
+                Boolean good = realc && sm != null ? Boolean.valueOf(sm.optDouble("real", 0) >= 0) : null;
+                v.setImageViewBitmap(R.id.chart, realc ? chart(c, rc, j.optJSONArray("rdeps"), good, cw, ch)
+                        : chart(c, j.optJSONArray("curve"), null, null, cw, ch));
             } catch (Exception e) {
                 v.setTextViewText(R.id.line, err != null ? err : "ответ бота не читается");
                 v.setTextViewText(R.id.upd, now);
