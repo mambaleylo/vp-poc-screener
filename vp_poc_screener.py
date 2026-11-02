@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.763"
+APP_VERSION = "0.99.764"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -42679,17 +42679,17 @@ INDEX_HTML = """<!doctype html>
   <div id="healthBanner"></div>
 </header>
 <div class="tabs">
-  <div class="tab active" data-tab="prv" style="color:var(--prv);">Peak Reversal</div>
+  <div class="tab active" data-tab="dlm" style="color:#ffd54f;">⚡ Лимитки</div>
+  <div class="tab" data-tab="prv" style="color:var(--prv);">Peak Reversal</div>
+  <div class="tab" data-tab="smc" style="color:#a1887f;">🧱 SMC</div>
   <div class="tab" data-tab="emw" style="color:#7fd1ff;">📐 EMA</div>
+  <div class="tab" data-tab="htf" style="color:#9ccc65;">📏 HTF</div>
   <div class="tab" data-tab="zones" style="color:#4caf50;">🎯 Зоны</div>
   <div class="tab" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
   <div class="tab" data-tab="rbx" style="color:#ffb74d;">📈 Пробой</div>
   <div class="tab" data-tab="cas" style="color:#4dd0e1;">🌊 Каскад</div>
-  <div class="tab" data-tab="smc" style="color:#a1887f;">🧱 SMC</div>
-  <div class="tab" data-tab="htf" style="color:#9ccc65;">📏 HTF</div>
   <div class="tab" data-tab="cfl" style="color:#ffb74d;">🔄 Классика</div>
   <div class="tab" data-tab="rbs" style="color:#ff8a65;">🚀 Пробой 4ч</div>
-  <div class="tab" data-tab="dlm" style="color:#ffd54f;">⚡ Лимитки</div>
   <div class="tab" data-tab="hdg" style="color:#b39ddb;">🪞 Хедж</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
@@ -42716,10 +42716,10 @@ INDEX_HTML = """<!doctype html>
   <div id="htfPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="cflPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="rbsPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
-  <div id="dlmPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="dlmPanel" style="display:block;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="hdgPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="snrPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
-  <div id="prvPanel" style="display:block;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="prvPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="emwPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="zonesPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="nqPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
@@ -42784,6 +42784,126 @@ INDEX_HTML = """<!doctype html>
     <div id="settingsSearchWrap">
       <input type="text" id="settingsSearch" placeholder="Поиск по настройкам…">
     </div>
+    <details class="settingsGroup" style="--mod-color:#ffd54f;"><summary class="settingsGroupTitle">⚡ Лимитки 4ч+2ч</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (4ч + 2ч — 210 монет)</div>
+          <div class="sub">на закрытии каждой 4ч и 2ч свечи: у каждого вида своя модель, лучший ~1% моментов — лимитка (4ч: на 1 ATR за тенью свечи, 2ч: на 2 ATR от закрытия), живёт 4 свечи; исполнилась — тейк 1.2 ATR, стоп: свеча графика (4ч / 2ч) закрылась за 1.75 ATR (фитили не выбивают; аварийный стоп 3 ATR на бирже), выход через 32 свечи. Винрейт ~80%, ~3 сделки в день; без реальных сделок — виртуальный учёт</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setDlm"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ ⚡ Лимитки в Telegram</div>
+          <div class="sub">новые лимитки раз в 4 часа и исполнение реальной (итоги сделок — общим переключателем «Итоги сделок»); по умолчанию выключено</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgDlm"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ ⚡ Торговать на Binance</div>
+          <div class="sub">реальные лимитки, стоп и тейк — на Binance USDⓈ-M (модель училась на его свечах), сигналы и виртуальные сделки — тоже по свечам Binance; выключено — на Gate. Ключи и баланс — во вкладке ⚡</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setDlmBinance"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ 🔄 P/R, 🧱 SMC, 📐 EMA — тоже на Binance</div>
+          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, маржа — по настройке ниже; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто: P/R 3%, SMC 2.5%, EMA 2%. На истории (честный отбор сделок) ⚡ 4.5% вместе с ними — медиана за год примерно вдвое больше, чем один ⚡, при той же просадке; без ⚡ эти три слабые. Включается вместе с автоторговлей самих модулей</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setBnOthers"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ 💱 Кросс-маржа, плечо — максимум монеты на Binance, общий риск до 100%</div>
+          <div class="sub hintx">новые позиции на Binance — в кросс-марже с наибольшим плечом, которое Binance даёт монете при этом размере позиции (не больше лимита аккаунта; потеря на стопе от плеча не зависит — размер позиции считается от риска, а маржи на позицию нужно меньше), а предел — сам риск: сумма потерь всех открытых позиций и выставленных лимиток ⚡, если все сработают по стопам на бирже, не больше 90% счёта (новая сделка урезается, чтобы в него уложиться). В изолированной марже пределом была маржа: на истории она урезала 31% сделок и отменяла ещё 20% — долгие позиции SMC / P/R / EMA держали её, когда приходили лучшие пачки ⚡. За год со $100: плохой год $1 631 → $2 393, медиана $17 743 → $24 773, последние 12 мес $37 206 → $72 757, просадка та же ~61%. Выключено — как раньше: изолированная, плечо по стопу. Монета, где Binance не даёт сменить режим (на ней позиция или ордер), торгуется по-старому</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setBnCross"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ ⚡ Ещё 83 монеты Binance (210 всего)</div>
+          <div class="sub">монеты с оборотом от 150 млн $ в месяц сверх 127 исследованных: модель их не видела — на них WR 77%, +0.15R на сделку, каждый год в плюсе; сделок почти вдвое больше. На Gate — только те, что там торгуются</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setDlmMoreCoins"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+
+    <details class="settingsGroup" style="--mod-color:#ffa726;"><summary class="settingsGroupTitle">Peak Reversal (Keltner Channel)</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (каждый час — 120 монет)</div>
+          <div class="sub">канал Кельтнера (EMA20) на 1ч и 4ч: модель, обученная на 6 годах истории 127 монет, берёт лучший ~1% выходов за полосу; стоп 1.5 ATR, тейк 3R, до 48 свечей</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setPrv"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow" style="display:none;">
+        <div>
+          <div class="label">↳ Сколько монет держать в топе</div>
+          <div class="sub">вселенная — топ 30 по ликвидности; здесь сколько лучших по TEST avg P&L остаются активными (торгуются)</div>
+        </div>
+        <input type="number" id="setPrvTopN" min="1" max="30" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
+      </div>
+      <div class="settingRow subRow" style="display:none;">
+        <div>
+          <div class="label">↳ Сколько монет отображать</div>
+          <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, остальные показываются серым как справочные</div>
+        </div>
+        <input type="number" id="setPrvDisplayN" min="1" max="30" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
+      </div>
+      <div class="settingRow" style="display:none;">
+        <div>
+          <div class="label">↳ Автоторговля: только лучшая карточка</div>
+          <div class="sub">торговать только ОДНУ монету — первую карточку (лучший средний R на проверочной части после комиссий). Остальные активные монеты продолжают давать сигналы и уведомления, но автоторговля по ним не открывает сделки</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setPrvSingleBest"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+
+    <details class="settingsGroup" style="--mod-color:#a1887f;"><summary class="settingsGroupTitle">🧱 SMC</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (1ч — 127 монет)</div>
+          <div class="sub">в начале часа: незакрытые FVG 4ч / дня / недели, свинги дня / недели, ордерблоки 4ч / дня — модель оценивает первое касание, лучшие ~1% становятся лимитками этого часа; стоп 1 дневной ATR, тейк 3R, выход через 72 ч; не больше 12 сделок в одну сторону</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setSmc"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ 🧱 SMC в Telegram</div>
+          <div class="sub">новая сделка и её итог</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgSmc"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+
+    <details class="settingsGroup" style="--mod-color:#7fd1ff;"><summary class="settingsGroupTitle">📐 EMA — касания</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (уровни каждый час + цена каждые 30 сек)</div>
+          <div class="sub">касания EMA 20–200 на 4ч / дне / неделе / месяце у 127 монет исследования; лучшие ~3% по модели, обученной на 6 годах истории — сигнал при касании: вход на EMA, стоп 0.75 дневного хода, тейк 4 риска, до 3 дней</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setEmw"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+
+    <details class="settingsGroup" style="--mod-color:#9ccc65;"><summary class="settingsGroupTitle">📏 HTF-уровни</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (1ч — 127 монет, только лонги)</div>
+          <div class="sub">в начале часа: уровни старших графиков под ценой — минимум и середина вчерашнего дня, SMA 20/50/100/200 и линии Боллинджера дня, уровни прошлой недели и месяца, открытия периодов. Две модели оценивают первое касание, берётся то, что выбрала любая из них (~0.5% лучших); вход — когда цена прошла уровень на 0.1%. Стоп по закрытию 4ч-свечи за 1 дневным ATR, аварийный 3 ATR, тейк 3R, выход через 96 ч; не больше 12 сделок сразу</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setHtf"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ 📏 HTF в Telegram</div>
+          <div class="sub">новая сделка и её итог</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgHtf"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+
     <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">🎨 Оформление</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -42800,7 +42920,6 @@ INDEX_HTML = """<!doctype html>
         <label class="switch"><input type="checkbox" id="setAutoSs" onchange="setAutoScreensaver(this.checked)"><span class="switchSlider"></span></label>
       </div>
     </div></details>
-
 
     <details class="settingsGroup" style="--mod-color:var(--neuro);"><summary class="settingsGroupTitle">⚙️ Производительность и фильтр Neuro</summary><div class="settingsGroupBody">
       <div class="settingRow">
@@ -42825,10 +42944,6 @@ INDEX_HTML = """<!doctype html>
         <input type="number" id="setCalcWorkersBoost" min="0" max="8" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
     </div></details>
-
-
-
-
 
     <details class="settingsGroup" style="--mod-color:#f06292;"><summary class="settingsGroupTitle">🧠 Neuro</summary><div class="settingsGroupBody">
       
@@ -42879,15 +42994,7 @@ INDEX_HTML = """<!doctype html>
         <label class="switch"><input type="checkbox" id="setSnrSingleBest"><span class="switchSlider"></span></label>
       </div>
     </div></details>
-    <details class="settingsGroup" style="--mod-color:#7fd1ff;"><summary class="settingsGroupTitle">📐 EMA — касания</summary><div class="settingsGroupBody">
-      <div class="settingRow">
-        <div>
-          <div class="label">Работа (уровни каждый час + цена каждые 30 сек)</div>
-          <div class="sub">касания EMA 20–200 на 4ч / дне / неделе / месяце у 127 монет исследования; лучшие ~3% по модели, обученной на 6 годах истории — сигнал при касании: вход на EMA, стоп 0.75 дневного хода, тейк 4 риска, до 3 дней</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setEmw"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
+
     <details class="settingsGroup" style="--mod-color:#ffb74d;"><summary class="settingsGroupTitle">📈 Пробой диапазона</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -42909,85 +43016,6 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">на +1R закрыть четверть позиции и перенести стоп в безубыток, остаток — по тренду. Винрейт 54% вместо 33%, стопов подряд до 14 вместо 26, рост депозита при той же просадке — как без неё. Действует на новые сделки</div>
         </div>
         <label class="switch"><input type="checkbox" id="setRbxPart"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
-
-    <details class="settingsGroup" style="--mod-color:#ffd54f;"><summary class="settingsGroupTitle">⚡ Лимитки 4ч+2ч</summary><div class="settingsGroupBody">
-      <div class="settingRow">
-        <div>
-          <div class="label">Работа (4ч + 2ч — 210 монет)</div>
-          <div class="sub">на закрытии каждой 4ч и 2ч свечи: у каждого вида своя модель, лучший ~1% моментов — лимитка (4ч: на 1 ATR за тенью свечи, 2ч: на 2 ATR от закрытия), живёт 4 свечи; исполнилась — тейк 1.2 ATR, стоп: свеча графика (4ч / 2ч) закрылась за 1.75 ATR (фитили не выбивают; аварийный стоп 3 ATR на бирже), выход через 32 свечи. Винрейт ~80%, ~3 сделки в день; без реальных сделок — виртуальный учёт</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setDlm"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ ⚡ Лимитки в Telegram</div>
-          <div class="sub">новые лимитки раз в 4 часа и исполнение реальной (итоги сделок — общим переключателем «Итоги сделок»); по умолчанию выключено</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTgDlm"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ ⚡ Торговать на Binance</div>
-          <div class="sub">реальные лимитки, стоп и тейк — на Binance USDⓈ-M (модель училась на его свечах), сигналы и виртуальные сделки — тоже по свечам Binance; выключено — на Gate. Ключи и баланс — во вкладке ⚡</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setDlmBinance"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ 🔄 P/R, 🧱 SMC, 📐 EMA — тоже на Binance</div>
-          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, маржа — по настройке ниже; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто: P/R 3%, SMC 2.5%, EMA 2%. На истории (честный отбор сделок) ⚡ 4.5% вместе с ними — медиана за год примерно вдвое больше, чем один ⚡, при той же просадке; без ⚡ эти три слабые. Включается вместе с автоторговлей самих модулей</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setBnOthers"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ 💱 Кросс-маржа, плечо — максимум монеты на Binance, общий риск до 100%</div>
-          <div class="sub hintx">новые позиции на Binance — в кросс-марже с наибольшим плечом, которое Binance даёт монете при этом размере позиции (не больше лимита аккаунта; потеря на стопе от плеча не зависит — размер позиции считается от риска, а маржи на позицию нужно меньше), а предел — сам риск: сумма потерь всех открытых позиций и выставленных лимиток ⚡, если все сработают по стопам на бирже, не больше 90% счёта (новая сделка урезается, чтобы в него уложиться). В изолированной марже пределом была маржа: на истории она урезала 31% сделок и отменяла ещё 20% — долгие позиции SMC / P/R / EMA держали её, когда приходили лучшие пачки ⚡. За год со $100: плохой год $1 631 → $2 393, медиана $17 743 → $24 773, последние 12 мес $37 206 → $72 757, просадка та же ~61%. Выключено — как раньше: изолированная, плечо по стопу. Монета, где Binance не даёт сменить режим (на ней позиция или ордер), торгуется по-старому</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setBnCross"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ ⚡ Ещё 83 монеты Binance (210 всего)</div>
-          <div class="sub">монеты с оборотом от 150 млн $ в месяц сверх 127 исследованных: модель их не видела — на них WR 77%, +0.15R на сделку, каждый год в плюсе; сделок почти вдвое больше. На Gate — только те, что там торгуются</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setDlmMoreCoins"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
-
-    <details class="settingsGroup" style="--mod-color:#a1887f;"><summary class="settingsGroupTitle">🧱 SMC</summary><div class="settingsGroupBody">
-      <div class="settingRow">
-        <div>
-          <div class="label">Работа (1ч — 127 монет)</div>
-          <div class="sub">в начале часа: незакрытые FVG 4ч / дня / недели, свинги дня / недели, ордерблоки 4ч / дня — модель оценивает первое касание, лучшие ~1% становятся лимитками этого часа; стоп 1 дневной ATR, тейк 3R, выход через 72 ч; не больше 12 сделок в одну сторону</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setSmc"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ 🧱 SMC в Telegram</div>
-          <div class="sub">новая сделка и её итог</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTgSmc"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
-
-    <details class="settingsGroup" style="--mod-color:#9ccc65;"><summary class="settingsGroupTitle">📏 HTF-уровни</summary><div class="settingsGroupBody">
-      <div class="settingRow">
-        <div>
-          <div class="label">Работа (1ч — 127 монет, только лонги)</div>
-          <div class="sub">в начале часа: уровни старших графиков под ценой — минимум и середина вчерашнего дня, SMA 20/50/100/200 и линии Боллинджера дня, уровни прошлой недели и месяца, открытия периодов. Две модели оценивают первое касание, берётся то, что выбрала любая из них (~0.5% лучших); вход — когда цена прошла уровень на 0.1%. Стоп по закрытию 4ч-свечи за 1 дневным ATR, аварийный 3 ATR, тейк 3R, выход через 96 ч; не больше 12 сделок сразу</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setHtf"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ 📏 HTF в Telegram</div>
-          <div class="sub">новая сделка и её итог</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTgHtf"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -43041,38 +43069,6 @@ INDEX_HTML = """<!doctype html>
         <label class="switch"><input type="checkbox" id="setTgCas"><span class="switchSlider"></span></label>
       </div>
     </div></details>
-
-    <details class="settingsGroup" style="--mod-color:#ffa726;"><summary class="settingsGroupTitle">Peak Reversal (Keltner Channel)</summary><div class="settingsGroupBody">
-      <div class="settingRow">
-        <div>
-          <div class="label">Работа (каждый час — 120 монет)</div>
-          <div class="sub">канал Кельтнера (EMA20) на 1ч и 4ч: модель, обученная на 6 годах истории 127 монет, берёт лучший ~1% выходов за полосу; стоп 1.5 ATR, тейк 3R, до 48 свечей</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setPrv"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow" style="display:none;">
-        <div>
-          <div class="label">↳ Сколько монет держать в топе</div>
-          <div class="sub">вселенная — топ 30 по ликвидности; здесь сколько лучших по TEST avg P&L остаются активными (торгуются)</div>
-        </div>
-        <input type="number" id="setPrvTopN" min="1" max="30" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
-      </div>
-      <div class="settingRow subRow" style="display:none;">
-        <div>
-          <div class="label">↳ Сколько монет отображать</div>
-          <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, остальные показываются серым как справочные</div>
-        </div>
-        <input type="number" id="setPrvDisplayN" min="1" max="30" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
-      </div>
-      <div class="settingRow" style="display:none;">
-        <div>
-          <div class="label">↳ Автоторговля: только лучшая карточка</div>
-          <div class="sub">торговать только ОДНУ монету — первую карточку (лучший средний R на проверочной части после комиссий). Остальные активные монеты продолжают давать сигналы и уведомления, но автоторговля по ним не открывает сделки</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setPrvSingleBest"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
-
 
     <details class="settingsGroup" style="--mod-color:#4caf50;"><summary class="settingsGroupTitle">🎯 Зоны</summary><div class="settingsGroupBody">
       <div class="settingRow">
@@ -43405,7 +43401,7 @@ const fmtTimeWithDate = (t) => {
   return d.toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'});
 };
 
-let activeTab = 'prv';   // v0.99.459 — tab order: P/R, Зоны, Neuro… (the first one opens); v0.99.470 — S/R removed
+let activeTab = 'dlm';   // v0.99.459 — tab order: P/R, Зоны, Neuro… (the first one opens); v0.99.470 — S/R removed; v0.99.764 — the bundle first: ⚡, P/R, SMC, EMA, HTF
 
 function toggleHints() {
   const hidden = document.body.classList.toggle('hints-hidden');

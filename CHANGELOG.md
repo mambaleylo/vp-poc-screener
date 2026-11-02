@@ -21305,3 +21305,10 @@ v0.99.763 — the widget: the money put in vs the real PnL
 - The widget app 1.2: the line under the balance; the chart = the real balance (green / red by the real PnL), the
   top-ups as blue dots with their sum; the forecast's curve when there is no Binance history.
 - t_widget: the income split, the BNB commission, the 5-min pause, the restart from the kept file's last row.
+
+v0.99.764 — the bundle first in the tab row and the settings
+- The user: "в листаемом горизонтальном списке индикаторов другой порядок, первыми идут из связки начиная с лимиток", "в
+  настройках тоже так же": the tabs ⚡ Лимитки, Peak Reversal, SMC, EMA, HTF, then the rest as before (Зоны, Neuro, Пробой,
+  Каскад, Классика, Пробой 4ч, Хедж, Volume, Автоторговля, Симулятор); ⚡ opens first (the first tab opens, as before with
+  P/R). The settings' groups: ⚡, P/R, SMC, EMA, HTF, then the rest in their old order (Оформление, Производительность …).
+- t_tab_order: the tab row, ⚡ open first with its panel, the switch to P/R, the settings' order, no page errors.
