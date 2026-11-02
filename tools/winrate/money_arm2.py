@@ -166,6 +166,13 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     curve = [] if kw.get("curve") == "1" else None   # "curve=1": (hour, equity, open ⚡ longs, shorts, others) every 6 h, the last value
     path = [] if kw.get("path") == "1" else None   # "path=1": the balance at every 30 days (before that day's top-up) + the end, a 5th value
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
+    # the reserve (the user: "резерв для восстановления после просадки"): "res=F/t/P" — F of the capital kept off the trading account,
+    # every P days the two brought back to (1-F) / F (the reserve refills the account after a fall, takes the profit after a rise);
+    # "res=F/b/P" — only when the account strays more than P (a fraction) from its share. Only the account's free cash moves out.
+    # The money and the drawdown are the whole capital's (the account + the reserve)
+    RS = (float(kw["res"].split("/")[0]), kw["res"].split("/")[1], float(kw["res"].split("/")[2])) if "res" in kw else None
+    RES = 0.0
+    if RS: RES = eq0 * RS[0]; cash = eq0 - RES
     OR = [o for o in OR if A - 64 * 3600 <= o["t"] < B]; io = 0; act = []
     OT = sorted(OT, key=lambda v: v["t0"]); jo = bisect.bisect_left([v["t0"] for v in OT], A)
     def rd_of(v, eq):
@@ -232,11 +239,21 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
                         tgt -= sd * HG[1] * sum(o["notional"] for o in side_pos)
                 cash -= abs(tgt - HDG["n"]) * 0.0005; HDG["n"] = tgt
         eq = cash + upnl
-        if eq <= 0: return (0.0, 1.0, n_fill, n_skip) + ((path + [0.0] * (13 - len(path)),) if path is not None else ())
-        if path is not None and h >= A + (len(path) + 1) * 30 * 86400: path.append(eq)
+        if eq <= 0 and not RES: return (0.0, 1.0, n_fill, n_skip) + ((path + [0.0] * (13 - len(path)),) if path is not None else ())
+        if eq <= 0:   # the account wiped: the reserve refills it
+            cash += RES - eq; RES = 0.0; pos = []; armed = {}; eq = cash
+        if RS:
+            tot = eq + RES; tgt = (1 - RS[0]) * tot
+            due = ((h - A) % int(RS[2] * 86400) == 0 and h > A) if RS[1] == "t" else (eq < tgt * (1 - RS[2]) or eq > tgt * (1 + RS[2]))
+            if due:
+                d_ = tgt - eq
+                if d_ > 0: tr = min(d_, RES)
+                else: tr = -min(-d_, max(0.0, cash - sum(o["mg"] for o in pos) - sum(a["mg"] for a in armed.values())))
+                cash += tr; RES -= tr; eq += tr
+        if path is not None and h >= A + (len(path) + 1) * 30 * 86400: path.append(eq + RES)
         if dep and ndep < dep[2] and h >= A + (ndep + 1) * dep[1] * 86400:
             units += dep[0] / (eq / units); cash += dep[0]; eq += dep[0]; ndep += 1
-        nav = eq / units; peak = max(peak, nav); mdd = max(mdd, 1 - nav / peak)
+        nav = (eq + RES) / units; peak = max(peak, nav); mdd = max(mdd, 1 - nav / peak)
         if curve is not None and h % 21600 == 0:
             curve.append((h, round(nav, 4), sum(1 for o in pos if o["mod"] == "dlm" and o["side"] > 0), sum(1 for o in pos if o["mod"] == "dlm" and o["side"] < 0),
                           sum(1 for o in pos if o["mod"] != "dlm")))
@@ -244,9 +261,9 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             if not cut_on and nav < peak * (1 - ddc[0]): cut_on = True
             elif cut_on and nav >= peak * (1 - ddc[2]): cut_on = False
         if pz:
-            eqh.append((h, eq))
+            eqh.append((h, eq + RES))
             while eqh and eqh[0][0] < h - pz[0] * 86400: eqh.popleft()
-            if eq < eqh[0][1] * (1 - pz[1]): pause_to = h + int(pz[0] * 86400)
+            if eq + RES < eqh[0][1] * (1 - pz[1]): pause_to = h + int(pz[0] * 86400)
         paused = h < pause_to
         while jo < len(OT) and OT[jo]["t0"] <= h:   # the other modules at the market
             v = OT[jo]; jo += 1
@@ -321,7 +338,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     for o in pos:
         p = M.px_at(o["sym"], B)
         if p: upnl += o["side"] * (p - o["e"]) / o["e"] * o["notional"]
-    return (cash + upnl, mdd, n_fill, n_skip) + ((path + [cash + upnl],) if path is not None else ()) + ((curve,) if curve is not None else ())
+    return (cash + upnl + RES, mdd, n_fill, n_skip) + ((path + [cash + upnl + RES],) if path is not None else ()) + ((curve,) if curve is not None else ())
 _D = {}
 def _init(D): _D.update(D)
 def job(a):
