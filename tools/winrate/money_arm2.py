@@ -132,6 +132,10 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     # the liquidity: "liq=1:0.5/2:0.25/4:0" the cut of a position by its share of the coin's hourly turnover (liq_g); "slip=Y" the
     # square-root impact of every market fill: Y x the daily volatility x sqrt(the position / the daily turnover), off the trade's R
     LS = liq_steps(kw.get("liq", "")); SLIP = float(kw.get("slip", 0)); n_cut = 0
+    # "add=wick4h_o2" (the user: "для 4ч со сдвигом сделать исключение и добирать позицию"): that stream's limit may fill on a
+    # coin already held by ⚡ on the same side (a separate leg with its own exits); "addon=wick4h" — only onto that stream's
+    # position; another module's position or the other side still blocks it
+    ADD = set(kw["add"].split("+")) if "add" in kw else set(); ADDON = set(kw["addon"].split("+")) if "addon" in kw else None
     path = [] if kw.get("path") == "1" else None   # "path=1": the balance at every 30 days (before that day's top-up) + the end, a 5th value
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
     OR = [o for o in OR if A - 64 * 3600 <= o["t"] < B]; io = 0; act = []
@@ -232,7 +236,11 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         for o, touch, d_o, cl in ([] if paused else order):
             k_ = id(o)
             if k_ in done or k_ in armed: continue
-            busy = any(p_["sym"] == o["sym"] for p_ in pos)
+            held = [p_ for p_ in pos if p_["sym"] == o["sym"]]
+            busy = bool(held)
+            if busy and o["stream"] in ADD and all(p_["mod"] == "dlm" and p_["side"] == o["side"] and p_.get("stream") != o["stream"]
+                                                   and (ADDON is None or p_.get("stream") in ADDON) for p_ in held):
+                busy = False   # a leg on top of the same side's ⚡ position
             if not busy:   # the bot: one limit a coin on the exchange — the nearer one (DLM_SWAP_ATR 0.25): a farther armed one comes off
                 for k2, a in [(k2, a) for k2, a in armed.items() if a["o"]["sym"] == o["sym"]]:
                     ao = a["o"]
