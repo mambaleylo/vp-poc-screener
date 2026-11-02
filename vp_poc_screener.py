@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.761"
+APP_VERSION = "0.99.762"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -38465,13 +38465,38 @@ def _fmt_usd(x):
     return ("$" + f"{x:,.0f}".replace(",", " ")) if abs(x) >= 100 else f"${x:.2f}"
 
 
+def _fmt_k(x):
+    """$232 / $101.9k / $1.23M (the widget's short money)"""
+    if x is None:
+        return "—"
+    a = abs(x)
+    return f"${x / 1e6:.2f}M" if a >= 1e6 else (f"${x / 1e3:.1f}k" if a >= 1e4 else _fmt_usd(x))
+
+
+def _widget_mods():
+    """v0.99.762 — the bundle's modules for the widget: (key, label, closed trades, the module's current risk %): ⚡ (the 4h /
+    2h model's trades), P/R, SMC, EMA (the selected coins'), HTF — every closed one of the field, real or virtual"""
+    out = []
+    for k, lab, st, lk, risk, keep in (
+            ("dlm", "⚡", _DLM, _dlm_lock, lambda: dlm_risk(), lambda t: t.get("rv") == DLM_MODEL_VER),
+            ("prv", "P/R", _PRX, _prx_lock, lambda: MODULE_RISK_PCT.get("prv") or (BN_OTHERS_RISK["prv"] if bn_routed("prv") else PRX_RISK_DEFAULT), None),
+            ("smc", "SMC", _SMC, _smc_lock, lambda: MODULE_RISK_PCT.get("smc") or (BN_OTHERS_RISK["smc"] if bn_routed("smc") else SMC_RISK_DEFAULT), None),
+            ("emw", "EMA", _EMX, _emx_lock, lambda: MODULE_RISK_PCT.get("emw") or (BN_OTHERS_RISK["emw"] if bn_routed("emw") else EMX_RISK_DEFAULT), lambda t: t.get("sel", True)),
+            ("htf", "HTF", _HTF, _htf_lock, lambda: MODULE_RISK_PCT.get("htf") or (BN_OTHERS_RISK["htf"] if bn_routed("htf") else HTF_RISK_DEFAULT), None)):
+        with lk:
+            tr = [dict(t) for t in st["trades"] if t.get("status") == "CLOSED" and t.get("r") is not None and (keep is None or keep(t))]
+        out.append((k, lab, tr, float(risk())))
+    return out
+
+
 def widget_data():
-    """v0.99.761 — the Android widget (KWGT reads /api/widget; the user: "виджет с текущим балансом и динамически меняющимся
-    прогнозом на заработок за год, начиная с первых сделок по лимитам… если год будет таким же как последние n дней
-    торговли"). The balance: the exchange's equity. The forecast: the real ⚡ trades since the first one (n days): each closed
-    trade grew the account by its risk (% of the balance at its entry) x its real R (r_real, else the planned r), so the n
-    days' growth G = the product of (1 + risk x R); a year like them = G ^ (365 / n) — the balance x that. Only ⚡'s trades
-    (the other modules' not counted); a short n swings the forecast hard — the trades / days / R / risk shown with it"""
+    """The Android widget (tools/android_widget reads /api/widget). v0.99.761 — the user: "виджет с текущим балансом и
+    динамически меняющимся прогнозом на заработок за год… если год будет таким же как последние n дней торговли".
+    v0.99.762 — the user: "сделки не все, нужны все из поля закрытые, хоть и виртуально и из всех индикаторов связки": every
+    closed trade of ⚡, P/R, SMC, EMA, HTF, real or virtual. Each grew the account by its risk (the real trade's own, else the
+    module's current %) x its R (a real ⚡ fill's r_real, else r); n days = since the earliest of them; the n days' growth G =
+    the product of (1 + risk x R) in the order they closed; a year like them = the balance x G ^ (365 / n). The curve: the
+    balance back along the trades (scaled to today's). A short n swings the forecast hard — the trades / days / R shown with it"""
     now = time.time()
     if _WIDGET["d"] and now - _WIDGET["t"] < 60:
         return _WIDGET["d"]
@@ -38483,33 +38508,41 @@ def widget_data():
             bal, d["ex"] = float(get_futures_total_equity() or 0), "Gate"
     except Exception as e:
         bal = None; d["ok"] = False; d["err"] = f"баланс: {str(e)[:80]}"
-    with _dlm_lock:
-        trades = [dict(t) for t in _DLM["trades"] if t.get("real")]
-    t0 = min((t["t_in"] for t in trades if t.get("t_in")), default=None)
-    closed = [t for t in trades if t.get("status") == "CLOSED" and t.get("r") is not None]
-    rs, lg = [], 0.0
-    for t in sorted(closed, key=lambda t: t.get("t_out") or 0):
-        rl = t["real"] if isinstance(t["real"], dict) else {}
-        r = rl.get("r_real") if rl.get("r_real") is not None else t["r"]
-        risk = rl.get("risk") or dlm_risk()
-        rs.append((float(r), float(risk)))
-        lg += math.log(max(1e-9, 1 + risk / 100 * float(r)))
+    rows, mods = [], []
+    for k, lab, tr, risk in _widget_mods():
+        rr = []
+        for t in tr:
+            rl = t.get("real") if isinstance(t.get("real"), dict) else {}
+            r = float(rl["r_real"] if rl.get("r_real") is not None else t["r"])
+            rows.append((int(t.get("t_out") or now), int(t.get("t_in") or t.get("hour") or t.get("t_out") or now), r, float(rl.get("risk") or risk), k))
+            rr.append(r)
+        mods.append({"k": k, "lab": lab, "n": len(rr), "avg": round(sum(rr) / len(rr), 3) if rr else None, "risk": round(risk, 2),
+                     "wr": round(100 * sum(1 for x in rr if x > 0) / len(rr)) if rr else None})
+    rows.sort()
+    t0 = min((x[1] for x in rows), default=None)
     days = max(1.0, (now - t0) / 86400) if t0 else None
+    lg, cum = 0.0, []
+    for t_out, _, r, risk, _ in rows:
+        lg += math.log(max(1e-9, 1 + risk / 100 * r)); cum.append((t_out, lg))
+    rs = [x[2] for x in rows]
     d.update({"bal": round(bal, 2) if bal is not None else None, "bal_s": _fmt_usd(bal), "days": round(days, 1) if days else None,
-              "n": len(rs), "open": sum(1 for t in trades if t.get("status") == "OPEN"),
-              "avg_r": round(sum(r for r, _ in rs) / len(rs), 3) if rs else None,
-              "risk": round(sum(k for _, k in rs) / len(rs), 2) if rs else None,
-              "per_day": round(len(rs) / days, 2) if days else None,
-              "growth_n": round(math.exp(lg), 4) if rs else None})
+              "n": len(rs), "avg_r": round(sum(rs) / len(rs), 3) if rs else None, "wr": round(100 * sum(1 for x in rs if x > 0) / len(rs)) if rs else None,
+              "risk": round(sum(x[3] for x in rows) / len(rows), 2) if rows else None, "per_day": round(len(rs) / days, 2) if days else None,
+              "growth_n": round(math.exp(lg), 4) if rs else None, "mods": mods,
+              "mods_s": " · ".join(f"{m['lab']} {m['n']} {m['avg']:+.2f}R" for m in mods if m["n"])})
     if rs and days and bal:
         e = min(700.0, lg * 365.0 / days); mult = math.exp(e)
-        d.update({"mult": mult, "mult_s": (f"×{mult:,.1f}".replace(",", " ") if mult < 1000 else f"×{mult:.1e}"),
-                  "year": round(bal * mult, 2), "year_s": _fmt_usd(bal * mult), "profit_s": _fmt_usd(bal * (mult - 1)),
+        d.update({"mult": mult, "mult_s": (f"×{mult:,.1f}".replace(",", " ") if mult < 100 else (f"×{mult:,.0f}".replace(",", " ") if mult < 1e6 else f"×{mult:.1e}")),
+                  "year": round(bal * mult, 2), "year_s": _fmt_usd(bal * mult), "year_k": _fmt_k(bal * mult),
+                  "profit_s": _fmt_usd(bal * (mult - 1)), "profit_k": _fmt_k(bal * (mult - 1)),
                   "pct_s": f"{(mult - 1) * 100:+,.0f}%".replace(",", " ") if mult < 1e4 else ""})
+        step = max(1, len(cum) // 80)   # the curve: at most ~80 points, the balance in $ scaled to today's
+        pts = [(t0, 0.0)] + cum[::step] + ([cum[-1]] if (len(cum) - 1) % step else [])
+        d["curve"] = [[round((t - t0) / 86400, 2), round(bal * math.exp(v - lg), 2)] for t, v in pts]
     else:
-        d.update({"mult": None, "mult_s": "—", "year": None, "year_s": "—", "profit_s": "—", "pct_s": ""})
-    d["line"] = (f"{d['days']:g} дн · сделок ⚡: {d['n']} · {d['avg_r']:+.2f}R · риск {d['risk']:g}%" if rs else
-                 "нет закрытых реальных сделок ⚡ — прогноза пока нет")
+        d.update({"mult": None, "mult_s": "—", "year": None, "year_s": "—", "year_k": "—", "profit_s": "—", "profit_k": "—", "pct_s": "", "curve": []})
+    d["line"] = (f"{d['days']:g} дн · сделок {d['n']} · WR {d['wr']}% · {d['avg_r']:+.2f}R" if rs else
+                 "нет закрытых сделок связки — прогноза пока нет")
     d["warn"] = "мало сделок — прогноз прыгает" if len(rs) < 30 else ""
     _WIDGET.update({"t": now, "d": d})
     return d

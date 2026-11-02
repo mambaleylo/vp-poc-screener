@@ -21284,3 +21284,13 @@ v0.99.761 — the Android widget: the balance and the year if it goes like the l
   product of (1 + risk x R), a year like them = the balance x growth ^ (365 / n) (bal_s, year_s, profit_s, mult_s, pct_s,
   line, warn "мало сделок" under 30 trades). Only ⚡'s trades; no change to the trading.
 - t_widget: the numbers on made-up trades (a virtual trade not counted, r_real before r, no trades -> "—").
+
+v0.99.762 — the widget: every closed trade of the bundle, a new look
+- The user: "сделки не все, нужны все из поля закрытые, хоть и виртуально и из всех индикаторов связки": the forecast from
+  every closed trade of ⚡ (the current model's), P/R, SMC, EMA (the selected coins'), HTF, real or virtual; the risk = a real
+  trade's own, else the module's current %; R = a real ⚡ fill's r_real, else r; n days since the earliest of them.
+- /api/widget also: mods (each module's trades / R / WR / risk), mods_s, wr, year_k / profit_k ($101.9k), curve (the balance
+  back along the trades, at most ~80 points, scaled to today's).
+- The widget app 1.1 (tools/android_widget, "некрасивый виджет"): the balance and the year side by side, the balance curve
+  filling the widget's height (drawn on the phone), the modules' line, the days / trades / WR / R, "⚠ мало сделок".
+- t_widget: the bundle's trades (the old 15m ⚡, the unselected EMA coins, the unfilled not counted; the risks; the curve).
