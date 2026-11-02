@@ -7,8 +7,8 @@ ARGV, sys.argv = sys.argv[1:], sys.argv[:1]
 import money_arm2 as MA2, money_multi as M, money_expect as X
 from multiprocessing import Pool
 F = "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0|cap=125"; SEEDS = (1, 2); W = f"{M.ST}/wf"
-SRC = {("wick4h", "l"): "allorders_wick4h.npz", ("wick4h", "r"): "allorders_wick4h_rsY.npz", ("close2h", "l"): "allorders_close2h.npz", ("close2h", "r"): "allorders_close2h_rsY.npz"}
-VARS = {"4ч лаб + 2ч лаб": "ll", "4ч как бот + 2ч как бот": "rr", "4ч лаб + 2ч как бот": "lr", "4ч как бот + 2ч лаб": "rl"}
+SRC = {("wick4h", "l"): "allorders_wick4h.npz", ("wick4h", "r"): "allorders_wick4h_rsY.npz", ("close2h", "l"): "allorders_close2h.npz", ("close2h", "r"): "allorders_close2h_rsY.npz", ("wick4h", "d"): "allorders_wick4h_dep.npz", ("close2h", "d"): "allorders_close2h_dep.npz"}
+VARS = {"бот как есть (деревья из vp_dlm_model)": "dd", "4ч бот + 2ч лаб": "dl", "4ч лаб + 2ч бот": "ld", "4ч лаб + 2ч лаб": "ll", "4ч как бот + 2ч как бот": "rr", "4ч лаб + 2ч как бот": "lr", "4ч как бот + 2ч лаб": "rl"}
 for c in VARS.values():
     for st, k in (("wick4h", c[0]), ("close2h", c[1])):
         dst = f"{W}/allorders_{st}_c{c}.npz"
@@ -31,8 +31,8 @@ if __name__ == "__main__":
         res = Pl.map(job, jobs, chunksize=8)
     R = {}
     for v, sd, A, x in res: R.setdefault(v, {}).setdefault(A, []).append(x)
-    b = np.array([np.mean([x[0] for x in R["4ч как бот + 2ч как бот"][A]]) for A in X.STARTS])
-    print("вариант | обычный год | плохой год (1 из 10) | просадка медиана | в плохом окне | лучше «как бот»", flush=True)
+    b = np.array([np.mean([x[0] for x in R["бот как есть (деревья из vp_dlm_model)"][A]]) for A in X.STARTS])
+    print("вариант | обычный год | плохой год (1 из 10) | просадка медиана | в плохом окне | лучше «бот как есть»", flush=True)
     for v in VARS:
         E = np.array([np.mean([x[0] for x in R[v][A]]) for A in X.STARTS]); dd = np.array([np.mean([x[1] for x in R[v][A]]) for A in X.STARTS])
         print(f"{v} | ${np.median(E):,.0f} | ${np.percentile(E, 10):,.0f} | {np.median(dd) * 100:.0f}% | {np.percentile(dd, 90) * 100:.0f}% | {int((E > b * 1.001).sum())}/{len(b)}", flush=True)
