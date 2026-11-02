@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:id="@+id/root"
+    android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical"
+    android:background="@drawable/bg" android:padding="12dp">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal">
+        <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+            android:text="Баланс" android:textColor="#9AA4B2" android:textSize="12sp" />
+        <TextView android:id="@+id/upd" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="—" android:textColor="#9AA4B2" android:textSize="12sp" />
+    </LinearLayout>
+    <TextView android:id="@+id/bal" android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:text="—" android:textColor="#FFFFFF" android:textSize="28sp" android:textStyle="bold" />
+    <TextView android:id="@+id/year" android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:text="Через год: —" android:textColor="#4ADE80" android:textSize="15sp" />
+    <TextView android:id="@+id/line" android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:text="нажмите, чтобы обновить" android:textColor="#C9D1D9" android:textSize="11sp" android:maxLines="2" />
+    <TextView android:id="@+id/warn" android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:text="" android:textColor="#FBBF24" android:textSize="11sp" />
+</LinearLayout>
