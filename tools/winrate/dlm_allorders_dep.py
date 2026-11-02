@@ -32,25 +32,26 @@ def pack(models):
             Fa.append(F); Ta.append(T); NLa.append(NL); La.append(np.where(L >= 0, L + off, -1)); Ra.append(np.where(R >= 0, R + off, -1)); Va.append(V); off += len(F)
     c = np.concatenate
     return c(Fa).astype(np.int64), c(Ta), c(NLa), c(La).astype(np.int64), c(Ra).astype(np.int64), c(Va), np.array(roots, np.int64), len(models)
-for S in MJ["streams"]:
-    stream = S["name"]; P = pack(S["models"]); p = DE.STREAMS[stream]; bs = p["hh"] * 3600; B = DE.btc_ctx(stream); t0 = time.time()
-    out = {k: [] for k in ("coin", "t", "side", "lv", "atr", "score", "thr", "filled", "t1h", "fill", "R", "kind", "tout", "grp")}
-    for k, c in enumerate(C["base"]):
-        h1 = DE.load1h(c); ev = DE.features(c, stream, B, h1)
-        if ev is None: continue
-        tsc = ev["t"] + bs; ii = np.flatnonzero(tsc >= A0)
-        if not len(ii): continue
-        sc = walk(np.ascontiguousarray(ev["f"][ii].astype(np.float64)), *P[:7], P[7], 0)
-        ok = sc >= S["thr"]; ii, sc = ii[ok], sc[ok]
-        if not len(ii): continue
-        T1, O1, H1, L1, C1, V1 = h1
-        fl, t1h, fill, R, kind, tout = DE.fill_walk(T1, O1, H1, L1, C1, tsc[ii], ev["side"][ii].astype(np.int64), ev["lv"][ii], ev["atr"][ii], bs, p["ch"],
-                                                    DE.ALIVE, DE.HOLD, S["take_atr"], S["stop_atr"], S["hard_stop_atr"], DE.FEE_IN, DE.FEE_TAKE, DE.FEE_OUT, DE.FUND)
-        for key, v in (("coin", np.full(len(ii), c)), ("t", tsc[ii]), ("side", ev["side"][ii]), ("lv", ev["lv"][ii]), ("atr", ev["atr"][ii]), ("score", sc),
-                       ("thr", np.full(len(ii), S["thr"])), ("filled", fl), ("t1h", t1h), ("fill", fill), ("R", R), ("kind", kind), ("tout", tout), ("grp", np.full(len(ii), "base"))):
-            out[key].append(v)
-        if k % 30 == 0: print(stream, k, c, f"{time.time() - t0:.0f}s", flush=True)
-    O = {k: np.concatenate(v) for k, v in out.items()}; np.savez_compressed(f"{ST}/wf/allorders_{stream}_dep.npz", **O)
-    fr = O["filled"].astype(bool); yr = (O["t"] / 86400 / 365.2425 + 1970).astype(int)
-    print(f"{stream}: ордеров {len(fr)}, исполнено {fr.sum()}, R {np.nanmean(O['R'][fr]):+.3f}; " + " ".join(f"{Y}: {np.nanmean(O['R'][fr & (yr == Y)]):+.3f} ({(fr & (yr == Y)).sum()})" for Y in (2023, 2024, 2025, 2026)), flush=True)
-print("allorders dep done", flush=True)
+if __name__ == "__main__":
+    for S in MJ["streams"]:
+        stream = S["name"]; P = pack(S["models"]); p = DE.STREAMS[stream]; bs = p["hh"] * 3600; B = DE.btc_ctx(stream); t0 = time.time()
+        out = {k: [] for k in ("coin", "t", "side", "lv", "atr", "score", "thr", "filled", "t1h", "fill", "R", "kind", "tout", "grp")}
+        for k, c in enumerate(C["base"]):
+            h1 = DE.load1h(c); ev = DE.features(c, stream, B, h1)
+            if ev is None: continue
+            tsc = ev["t"] + bs; ii = np.flatnonzero(tsc >= A0)
+            if not len(ii): continue
+            sc = walk(np.ascontiguousarray(ev["f"][ii].astype(np.float64)), *P[:7], P[7], 0)
+            ok = sc >= S["thr"]; ii, sc = ii[ok], sc[ok]
+            if not len(ii): continue
+            T1, O1, H1, L1, C1, V1 = h1
+            fl, t1h, fill, R, kind, tout = DE.fill_walk(T1, O1, H1, L1, C1, tsc[ii], ev["side"][ii].astype(np.int64), ev["lv"][ii], ev["atr"][ii], bs, p["ch"],
+                                                        DE.ALIVE, DE.HOLD, S["take_atr"], S["stop_atr"], S["hard_stop_atr"], DE.FEE_IN, DE.FEE_TAKE, DE.FEE_OUT, DE.FUND)
+            for key, v in (("coin", np.full(len(ii), c)), ("t", tsc[ii]), ("side", ev["side"][ii]), ("lv", ev["lv"][ii]), ("atr", ev["atr"][ii]), ("score", sc),
+                           ("thr", np.full(len(ii), S["thr"])), ("filled", fl), ("t1h", t1h), ("fill", fill), ("R", R), ("kind", kind), ("tout", tout), ("grp", np.full(len(ii), "base"))):
+                out[key].append(v)
+            if k % 30 == 0: print(stream, k, c, f"{time.time() - t0:.0f}s", flush=True)
+        O = {k: np.concatenate(v) for k, v in out.items()}; np.savez_compressed(f"{ST}/wf/allorders_{stream}_dep.npz", **O)
+        fr = O["filled"].astype(bool); yr = (O["t"] / 86400 / 365.2425 + 1970).astype(int)
+        print(f"{stream}: ордеров {len(fr)}, исполнено {fr.sum()}, R {np.nanmean(O['R'][fr]):+.3f}; " + " ".join(f"{Y}: {np.nanmean(O['R'][fr & (yr == Y)]):+.3f} ({(fr & (yr == Y)).sum()})" for Y in (2023, 2024, 2025, 2026)), flush=True)
+    print("allorders dep done", flush=True)
