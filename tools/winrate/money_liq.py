@@ -13,6 +13,12 @@ RULE = "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0|cap=125"; K = int(ARGV[0]) if ARGV els
 VARS = {"как считали (без проскальзывания)": "", "без урезания, с проскальзыванием": "|slip=1",
         "шаги 1:0.5 / 2:0.25 / 4:0": "|slip=1|liq=1:0.5/2:0.25/4:0", "строже 0.5:0.5 / 1:0.25 / 2:0": "|slip=1|liq=0.5:0.5/1:0.25/2:0",
         "мягче 2:0.5 / 4:0.25 / 8:0": "|slip=1|liq=2:0.5/4:0.25/8:0", "потолок 2%": "|slip=1|liq=2:0", "потолок 5%": "|slip=1|liq=5:0"}
+if os.environ.get("ROUND2"):   # the second round: around the 5% cap, more noise runs, and twice the impact (the stops on thin coins)
+    VARS = {}
+    for sl_ in ("1", "2"):
+        VARS.update({f"[×{sl_}] без урезания": f"|slip={sl_}", f"[×{sl_}] потолок 3%": f"|slip={sl_}|liq=3:0", f"[×{sl_}] потолок 5%": f"|slip={sl_}|liq=5:0",
+                     f"[×{sl_}] потолок 8%": f"|slip={sl_}|liq=8:0", f"[×{sl_}] 3:0.5 / 6:0": f"|slip={sl_}|liq=3:0.5/6:0",
+                     f"[×{sl_}] 4:0.5 / 8:0.25 / 12:0": f"|slip={sl_}|liq=4:0.5/8:0.25/12:0"})
 _D = {}
 def _init(D): _D.update(D)
 def job(a):
@@ -36,5 +42,5 @@ if __name__ == "__main__":
             cells.append(f"×{np.median(x):,.1f} (×{np.percentile(x, 10):,.2f}) {np.median(dd) * 100:.0f}%")
             out.setdefault(v, {})[str(int(e0))] = {"p50": float(np.median(x)), "p10": float(np.percentile(x, 10)), "dd": float(np.median(dd))}
         print(f"{v} | " + " | ".join(cells), flush=True)
-    json.dump(out, open(f"{M.ST}/wf/money_liq.json", "w"), indent=1)
+    json.dump(out, open(f"{M.ST}/wf/money_liq{os.environ.get('ROUND2', '') and '2'}.json", "w"), indent=1)
     print("money liq done", flush=True)

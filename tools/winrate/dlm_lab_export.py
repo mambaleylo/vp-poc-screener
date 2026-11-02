@@ -19,6 +19,11 @@ def bn(gs):
 r127 = sorted({bn(c) for c in V.RESEARCH_COINS_127 if bn(c)}); check = set(r127[2::3]); train = sorted(set(r127) - check)
 pr = dict(n_estimators=300, learning_rate=0.05, num_leaves=63, min_child_samples=1000, subsample=0.7, subsample_freq=1, colsample_bytree=0.7, reg_lambda=5.0, verbose=-1, n_jobs=4)
 out = json.loads(json.dumps(MJ)); t0 = time.time(); tmax_all = 0
+for ns_ in [x for x in os.environ.get("NEWSTREAM", "").split(",") if x]:   # a new stream (dlm_engine.STREAMS): the wick4h stream's rule + its grid
+    if not any(x["name"] == ns_ for x in out["streams"]):
+        p_ = DE.STREAMS[ns_]; w_ = json.loads(json.dumps([x for x in out["streams"] if x["name"] == "wick4h"][0]))
+        w_.update({"name": ns_, "tf": f"{p_['hh']}h", "bar_sec": p_["hh"] * 3600, "off": p_.get("off", 0) * 3600, "close_h": p_["ch"]})
+        out["streams"].append(w_)
 LABEL = os.environ.get("LABEL", "now")   # "feat": the stored label (the walk-forward's: take 1.1 / close stop 2 / emergency 3) — what the money validated
 ONLY = os.environ.get("STREAMS", "wick4h,close2h").split(",")
 for S in out["streams"]:
@@ -27,10 +32,8 @@ for S in out["streams"]:
     for c in train:
         z = np.load(f"{ST}/feat/{st}/{c}.npz")
         if not len(z["t"]): continue
-        T1, O1, H1, L1, C1, V1 = DE.load1h(c)
-        fl, _, _, R, _, to = DE.fill_walk(T1, O1, H1, L1, C1, z["t"].astype(np.int64), z["side"].astype(np.int64), z["lv"], z["atr"], bs, p["ch"],
-                                          DE.ALIVE, DE.HOLD, S["take_atr"], S["stop_atr"], S["hard_stop_atr"], DE.FEE_IN, DE.FEE_TAKE, DE.FEE_OUT, DE.FUND)
         if LABEL == "feat": fl, R, to = np.ones(len(z["t"]), bool), z["R"], z["tout"]
+        else: fl, _, _, R, _, to = DE.walk(st, DE.load1h(c), z["t"].astype(np.int64), z["side"], z["lv"], z["atr"], S["take_atr"], S["stop_atr"], S["hard_stop_atr"])
         k = fl & np.isfinite(R)
         rows["t"].append(z["t"][k]); rows["F"].append(z["F"][k]); rows["R"].append(R[k]); rows["tout"].append(to[k])
     D = {k: np.concatenate(v) for k, v in rows.items()}; y = np.clip(D["R"], -1.5, 1.5); end = int(D["tout"].max()); tmax_all = max(tmax_all, end)
@@ -45,7 +48,7 @@ for S in out["streams"]:
     d = np.max(np.abs(TV.model_score(models, D["F"][smp].astype(float)) - np.mean([m.predict(D["F"][smp][:, :X_]) for X_, m in new], axis=0)))
     assert d < 1e-6, d
     S["models"] = models; S["thr"] = round(thr, 6)
-    print(f"{st}: обучено на {len(new and D['t'][D['tout'] < end - 3 * 86400])} сделках, R метки {D['R'].mean():+.3f}, порог {thr:.4f} (у бота {[s for s in MJ['streams'] if s['name'] == st][0]['thr']}), сверка деревьев {d:.1e}, {time.time() - t0:.0f}s", flush=True)
+    print(f"{st}: обучено на {len(new and D['t'][D['tout'] < end - 3 * 86400])} сделках, R метки {D['R'].mean():+.3f}, порог {thr:.4f} (у бота {next((s['thr'] for s in MJ['streams'] if s['name'] == st), '—')}), сверка деревьев {d:.1e}, {time.time() - t0:.0f}s", flush=True)
 out["trained_to"] = int(tmax_all - 3 * 86400); out["made"] = int(time.time())
 out["research"]["lab_export"] = {"recipe": "bot-feature orders, current exits, train coins, 10 seeds x 28/33", "why": "money_4h.py: lab models > the research-engine ones"}
 json.dump(out, open(f"{ST}/wf/vp_dlm_model_lab{os.environ.get('SUF', '')}.json", "w"), separators=(",", ":"))
