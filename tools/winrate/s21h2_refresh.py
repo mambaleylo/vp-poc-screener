@@ -88,7 +88,7 @@ for (cy, cm) in CUTS:
 if FINAL:
     models, _, ntr = train(END + 3 * 86400, np.arange(1))
     ref = TR & (T >= END - 365 * 86400); sc = TV.model_score(models, X2[ref].astype(float)); q = (dep_all[ref] < S["thr"]).mean()
-    json.dump({"models": models, "trained_to": str(np.datetime64(END - 3 * 86400, 'D')), "thr_q": float(q), "thr": float(np.quantile(sc, q))},
+    json.dump({"models": models, "trained_to": str(np.datetime64(END - 3 * 86400, 's'))[:10], "thr_q": float(q), "thr": float(np.quantile(sc, q))},
               open("s21h2_refresh_final.json", "w"))
-    print(f"итоговая модель до {np.datetime64(END, 'D')} ({ntr} событий) сохранена, порог {np.quantile(sc, q):.4f}", flush=True)
+    print(f"итоговая модель до {str(np.datetime64(END, 's'))[:10]} ({ntr} событий) сохранена, порог {np.quantile(sc, q):.4f}", flush=True)
 print("refresh done", flush=True)
