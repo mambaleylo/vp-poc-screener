@@ -15,7 +15,7 @@ from lv_wf import load_dir, ts
 import lv_engine as LE
 ST = os.environ.get("LABSTORE", "/home/user/vp-lab-store")
 BASE = dict(ev="lv2", q=0.993, reach=1.5, stop=1.0, hard=2.0, take=3.0, hold=96, kh=4, be=2.0, pf=0.0, cap=12, sides=(1, -1),
-            deep=0.0, fams=None, xs=None)
+            deep=0.0, fams=None, xs=None, coins="bot")
 VARS = {
     "base": {},
     "t0": dict(ev="lv2_t0"),                                                           # any touch (the bot's market entry fires on it)
@@ -29,6 +29,7 @@ VARS = {
     "longs": dict(sides=(1,)), "shorts": dict(sides=(-1,)), "cap20": dict(cap=20), "cap8": dict(cap=8),
     "no4h": dict(fams=("fvgd", "fvgw", "swd", "sww", "obd")), "nofvg4": dict(fams=("fvgd", "fvgw", "swd", "sww", "obd", "ob4")),
     "xsc": dict(xs=(1.3, 0.8)),                                                        # the risk by the score (top half of the picks x1.3)
+    "c210": dict(coins="all"),                                                         # + the 83 check coins ⚡ trades (never trained on)
 }
 DD = {}
 def events(dr):
@@ -71,7 +72,7 @@ def walk(O, H, L, C, Tb, j, s, fill, risk, hard, take, hold, kh, be, pf):
 def build(p):
     D = events(p["ev"]); T, SIDE, SYM, LV, J, DATR, fam, SC, yr = D["T"], D["SIDE"], D["SYM"], D["LV"], D["J"], D["DATR"], D["fam"], D["SC"], D["yr"]
     thr = np.array([np.quantile(D["THR"][Y], p["q"]) if Y in D["THR"] else np.inf for Y in range(1970, 2030)])
-    ok = (fam >= 33) & D["BOT"] & np.isfinite(SC) & (SC >= thr[np.clip(yr - 1970, 0, 59)]) & (T >= ts(2022)) & np.isin(SIDE, p["sides"])
+    ok = (fam >= 33) & (D["BOT"] if p["coins"] == "bot" else True) & np.isfinite(SC) & (SC >= thr[np.clip(yr - 1970, 0, 59)]) & (T >= ts(2022)) & np.isin(SIDE, p["sides"])
     if p["fams"]: ok &= np.isin(np.array([LE.FAMS[f].split("_")[0] for f in range(len(LE.FAMS))])[fam], p["fams"])
     idx = np.where(ok)[0]
     FILL = LV * (1 - SIDE * p["deep"] * DATR / 100)
