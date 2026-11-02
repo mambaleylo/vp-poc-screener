@@ -8,10 +8,10 @@ ARGV, sys.argv = sys.argv[1:], sys.argv[:1]
 import money_arm2 as MA2, money_multi as M, money_expect as X, money_wk as WK
 from multiprocessing import Pool
 BASE = "Bn|arm=0.6|oth=1|dis=1.0|cap=125|slip=1|liq=4:0.5/8:0.25/12:0|heat=1.0"; K = int(ARGV[0]) if ARGV else 4; STARTS = X.STARTS[::2]
-VARS = {"как в боте": ("", False), "хедж BTC: 1+ в сторону, 100% объёма": ("|hedge=1/1.0", False), "хедж BTC: 3+ в сторону, 100%": ("|hedge=3/1.0", False),
-        "хедж BTC: 3+ в сторону, 50%": ("|hedge=3/0.5", False), "хедж BTC: 5+ в сторону, 100%": ("|hedge=5/1.0", False),
-        "хедж BTC: 8+ в сторону, 100%": ("|hedge=8/1.0", False), "риск ×0.5 против недельного тренда BTC": ("", True),
-        "хедж 3+/100% и ×0.5 против тренда BTC": ("|hedge=3/1.0", True)}
+VARS = {"как в боте": ("", False), "хедж 8+/100%, обе стороны": ("|hedge=8/1.0", False), "хедж 8+/100%, только против лонгов": ("|hedge=8/1.0|hside=1", False),
+        "хедж 8+/100%, только против шортов": ("|hedge=8/1.0|hside=-1", False), "хедж 10+/100%": ("|hedge=10/1.0", False),
+        "хедж 12+/100%": ("|hedge=12/1.0", False), "хедж 8+/50%": ("|hedge=8/0.5", False), "хедж 8+/75%": ("|hedge=8/0.75", False)}
+if os.environ.get("ROUND") != "3": VARS = {"как в боте": ("", False), "хедж BTC: 1+ в сторону, 100% объёма": ("|hedge=1/1.0", False)}   # (round 2's rows: money_dd2.json)
 _D = {}
 def _init(D): _D.update(D)
 def job(a):
@@ -44,5 +44,5 @@ if __name__ == "__main__":
             a = np.array(S[v][q]); bb = np.array(b[q]); better = int((a < bb).sum() if q.startswith("dd") else (a > bb).sum())
             cell.append((f"{np.median(a) * 100:.0f}%" if q.startswith("dd") else f"${np.median(a):,.0f}") + f" [{better}]")
         print(f"{v} | " + " | ".join(cell), flush=True)
-    json.dump(S, open(f"{M.ST}/wf/money_dd2.json", "w"), indent=1)
+    json.dump(S, open(f"{M.ST}/wf/money_dd{os.environ.get('ROUND', '2')}.json", "w"), indent=1)
     print("money dd2 done", flush=True)
