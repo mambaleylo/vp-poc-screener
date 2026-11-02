@@ -12,12 +12,13 @@ from multiprocessing import Pool
 RULE = "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0|cap=125|slip=1|liq=4:0.5/8:0.25/12:0|path=1"
 K = int(ARGV[0]); STEP = int(ARGV[1]); NAMES = ARGV[2:]
 KEEP = {"dlm", "prv", "smc", "emx"}
+MOD = os.environ.get("MOD", "emx")   # the module whose list the variants replace: emx (ema_var.py) or smc (smc_var.py)
 def keep(v, k):   # the paired drop: the same trade -> the same fate in every variant
     return zlib.crc32(f"{k}|{v['mod']}|{v['sym']}|{v['side']}|{v['t0']}".encode()) % 100 >= 5
 def var_list(nm):
-    if nm == "bot": return [v for v in M.build("base") if v["mod"] == "emx"]
+    if nm == "bot": return [v for v in M.build("base") if v["mod"] == MOD]
     out = []
-    fn = f"ema211_var_{nm[4:]}" if nm.startswith("211_") else f"ema_var_{nm}"   # "211_<name>": the list on the 210 coins (/home/user/ema211)
+    fn = f"ema211_var_{nm[4:]}" if nm.startswith("211_") else (f"smc_var_{nm}" if MOD == "smc" else f"ema_var_{nm}")   # "211_<name>": the list on the 210 coins (/home/user/ema211)
     for x in json.load(open(f"{M.ST}/wf/{fn}.json")):
         sym = M.bn(x["sym"])
         if sym: out.append(dict(x, sym=sym, r=float(x["r"]) - 0.03))
@@ -30,13 +31,13 @@ def job(a):
 if __name__ == "__main__":
     base = MA2.orders(); o2 = [dict(o, xm=0.75) for o in MA2.stream_orders("wick4h_o2", "") if o["prio"] >= 1.05]
     OR = sorted(base + o2, key=lambda o: o["t"])
-    OTH = [v for v in M.build("base") if v["mod"] in KEEP - {"dlm", "emx"}]
+    OTH = [v for v in M.build("base") if v["mod"] in KEEP - {"dlm", MOD}]
     D = {}
     for k in range(K):
         rng = np.random.default_rng(300 + k); D[("or", k)] = [o for o in OR if rng.random() >= 0.05]
     for nm in NAMES:
         L = var_list(nm); r = np.array([v["r"] for v in L])
-        print(f"{nm}: {len(L)} сделок EMA, {r.mean() + 0.03:+.3f}R (без −0.03)", flush=True)
+        print(f"{nm}: {len(L)} сделок {MOD}, {r.mean() + 0.03:+.3f}R (без −0.03)", flush=True)
         for k in range(K):
             D[("ot", nm, k)] = sorted([v for v in OTH + L if keep(v, k)], key=lambda v: v["t0"])
     W = X.STARTS[::STEP]
@@ -52,5 +53,5 @@ if __name__ == "__main__":
         out[nm] = {"p50": int(np.median(p50)), "dd": int(round(np.median(dd) * 100)), "last12": int(np.median(l12)), "m6_below": int(round(np.median(m6b))),
                    "p50_runs": [int(x) for x in p50], "last12_runs": [int(x) for x in l12]}
         print(nm, out[nm], flush=True)
-    json.dump(out, open(f"{M.ST}/wf/money_ema.json", "w"), indent=1)
+    json.dump(out, open(f"{M.ST}/wf/money_{'ema' if MOD == 'emx' else MOD}.json", "w"), indent=1)
     print("money ema done", flush=True)

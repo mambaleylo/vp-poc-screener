@@ -28,6 +28,7 @@ FNAMES = ["fam", "scope", "side", "datr", "hour", "dow", "dist_prev", "travel", 
           "round", "prog", "atr_h", "wick_prev"]
 OUT = os.environ.get("LV_OUT", f"{D}/lv2")
 D1H = os.environ.get("LV_D1H", f"{D}/data/1h")   # the candles' folder (LV_D1H: e.g. dl.py's 2020- files)
+TOUCH = float(os.environ.get("LV_TOUCH", "0.001"))   # a touch = the hour 0.1% past the level (LV_TOUCH=0: any touch — the bot's market entry fires on it)
 
 
 def load_np(sym):
@@ -105,7 +106,7 @@ def to_hours(per_val, pidx, shift=1):
 
 
 @njit(cache=True)
-def detect(T, O, H, L, C, LV, P):
+def detect(T, O, H, L, C, LV, P, tq=0.001):
     """first touch per (family, period): returns (j, fam, side)"""
     nf, n = LV.shape
     out_j = []; out_f = []; out_s = []
@@ -124,12 +125,12 @@ def detect(T, O, H, L, C, LV, P):
             if pc > lv:
                 if O[j] <= lv:
                     done = True; continue
-                if L[j] <= lv * 0.999:
+                if L[j] <= lv * (1 - tq):
                     out_j.append(j); out_f.append(f); out_s.append(1); done = True
             elif pc < lv:
                 if O[j] >= lv:
                     done = True; continue
-                if H[j] >= lv * 1.001:
+                if H[j] >= lv * (1 + tq):
                     out_j.append(j); out_f.append(f); out_s.append(-1); done = True
     return np.array(out_j), np.array(out_f), np.array(out_s)
 
@@ -293,7 +294,7 @@ def run(sym):
     LV[FAMS.index("yopen")][T - yst < 24 * 3600] = np.nan
     # daily ATR of the last closed day for every hour
     dat_h = to_hours(datr_d, dpi)
-    J, Fm, S = detect(T, O, H, L, C, LV, P)
+    J, Fm, S = detect(T, O, H, L, C, LV, P, TOUCH)
     if len(J) == 0:
         return sym, 0
     ok = np.isfinite(dat_h[J]) & (dat_h[J] >= 0.1)
