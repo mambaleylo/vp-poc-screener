@@ -140,7 +140,13 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     # limits a side; "btcshock=X" no new ⚡ short after BTC rose > X (a fraction) in 24 h, no long after it fell > X; "burst=N" at
     # most N new ⚡ positions a side in 24 h
     SC = int(kw.get("sidecap", 0)); BSH = float(kw.get("btcshock", 0)); BUR = int(kw.get("burst", 0)); opens = collections.deque()
+    # "fuse=W/X": no new ⚡ on a side while its ⚡ trades closed in the last W hours sum to -X R or worse (the side's fuse)
+    FUSE = tuple(float(x) for x in kw["fuse"].split("/")) if "fuse" in kw else None; closed_dlm = collections.deque()
     def blocked(o, h):
+        if FUSE:
+            while closed_dlm and closed_dlm[0][0] < h - FUSE[0] * 3600: closed_dlm.popleft()
+            if sum(r_ for _, sd, r_ in closed_dlm if sd == o["side"]) <= -FUSE[1]:
+                return True
         if SC and sum(1 for p_ in pos if p_["mod"] == "dlm" and p_["side"] == o["side"]) + sum(1 for a in armed.values() if a["o"]["side"] == o["side"]) >= SC:
             return True
         if BSH:
@@ -201,6 +207,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         return {"rd": rd, "heat": rd * v["sth"] / v["st"], "mg": mg, "notional": notional, "imp": imp}, hn, room
     for h in range(A, B, 3600):
         for o in [o for o in pos if o["t1"] <= h]:
+            if FUSE and o["mod"] == "dlm": closed_dlm.append((o["t1"], o["side"], o["r"]))
             nm_ = o["mkt"] if "mkt" in o else 1 + (o["r"] < 0)   # the market fills: ⚡ its exit unless a take; the others the entry + a stop
             cash += o["rd"] * (o["r"] - nm_ * o.get("imp", 0.0) / o["st"]); pos.remove(o)
         upnl = 0.0
@@ -289,7 +296,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
                     if touch or ao["side"] * (cl - ao["lv"]) / ao["atr"] > d_o + 0.25: del armed[k2]
                     else: busy = True
             nd = sum(1 for p_ in pos if p_["mod"] == "dlm") + (len(armed) if cnt else 0)
-            blk = (SC or BSH or BUR) and not busy and blocked(o, h)
+            blk = (SC or BSH or BUR or FUSE) and not busy and blocked(o, h)
             busy = busy or bool(blk)
             s_, hn, room = (None, 0, 0) if busy or nd >= maxpos else fit(o, eq)
             if rule == "Ac" and s_ and s_["rd"] < rd_of(o, eq) * 0.999: s_ = None   # no scaled-down crumbs
