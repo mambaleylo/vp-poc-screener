@@ -21312,3 +21312,25 @@ v0.99.764 — the bundle first in the tab row and the settings
   Каскад, Классика, Пробой 4ч, Хедж, Volume, Автоторговля, Симулятор); ⚡ opens first (the first tab opens, as before with
   P/R). The settings' groups: ⚡, P/R, SMC, EMA, HTF, then the rest in their old order (Оформление, Производительность …).
 - t_tab_order: the tab row, ⚡ open first with its panel, the switch to P/R, the settings' order, no page errors.
+
+v0.99.765 — ⚡ a third stream: the 4h wick limits on the 4h grid shifted by 2 h
+- The user: "какие таймфремы для лимиток ещё можно попробовать", "сначала доппроверки… самое главное, чтобы потом не было так,
+  что ты напишешь что где-то просчитался", "попробуй улучши 4ч со сдвигом", then "да, внедрять".
+- The lab (tools/winrate: dlm_engine's shifted grids, run_tf.sh, money_tf / tf2 / tf3 / o2 / o2b / o2c, o2_screen, money_add):
+  3h / 6h / 8h and all three shifted grids at once lose in the bundle; the 4h rule on the grid 02-06, 06-10 … UTC adds
+  money; the money is very path-dependent, so every choice by paired noise runs (each dropping the same random 5% of the
+  trades). Final (money_o2c.py, 8 runs): the shifted stream with its score >= 1.05 x the threshold and the risk x0.75 —
+  the bundle's usual year $43.8k vs $29.5k, the bad one $8.5k vs $4.7k, the last 12 months $115k vs $68.5k, 2026 $129k vs
+  $84.6k, the drawdown 77% both; better in 8 of 8. Not taken: the far take 2.0 / stop 1.5 (R a trade up, the money down:
+  the slots), only the repeats of the standard order, q0.98, one model on both grids, adding to a held position.
+- The bot: a stream may have "off" (its grid's offset): the shifted 4h bars built from Binance's 2h ones (two each, like the
+  lab's from the 1h), the features on the shifted grid (the lab's hour of the day), the fill / the close stop at the shifted
+  4h closes / the time exit / the scan schedule (02, 06 … UTC) / the catch-up on the stream's grid; one position a coin as
+  before (the first limit of a coin & side to fill is the trade); DLM_STREAM_SIDE_RISK x0.75 for the shifted stream
+  (VP_DLM_O2_RISK). The model: the lab's recipe (dlm_lab_export.py NEWSTREAM=wick4h_o2: the bot's order features, 10 seeds
+  x 28/33, trained to 2026-09), thr = q0.99 of the last 12 months' out-of-sample scores x 1.05 = 0.5242.
+- The ⚡ tab: the streams named (4ч / 2ч / 4ч со сдвигом), the live counts per stream; the history block re-counted on the
+  streams the bot trades now (dlm_research_card.py: was the research engines' of before v0.99.759) and the trades a month
+  from it (was a fixed "~65").
+- Tests: t_dlm_o2 (the bot's shifted bars, 100 limits with their 33 features and 26 trades = the lab; a scan by the model file
+  = the lab's scores), t_dlm_bot (3 streams), t_dlm_binance, t_dlm_ui, t_dlm_engine, t_widget, t_tab_order — OK.

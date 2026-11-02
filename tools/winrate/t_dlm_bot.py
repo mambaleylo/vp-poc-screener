@@ -41,7 +41,7 @@ print(f"(1) parity {tot} events, missed {miss}, max |diff| {worst.max():.2e}")
 ok &= miss == 0 and worst.max() < 1e-3   # the research stores the features as float32
 # (2) the model
 m = V.dlm_model(); ok &= (bool(m) and m["feats"] == V.DLM_FNAMES4 and m["ver"] == 3 and m["side_cap"] == 20
-                          and [(x["name"], x["tf"], x["bar_sec"]) for x in m["streams"]] == [("wick4h", "4h", 14400), ("close2h", "2h", 7200)]
+                          and [(x["name"], x["tf"], x["bar_sec"], x.get("off", 0)) for x in m["streams"]] == [("wick4h", "4h", 14400, 0), ("close2h", "2h", 7200, 0), ("wick4h_o2", "4h", 14400, 7200)]   # v0.99.765 — the shifted 4h (t_dlm_o2.py)
                           and all(len(x["models"]) == 20 for x in m["streams"]))
 print("(2) model", bool(m), m and [(x["name"], x["anchor"], x["depth_atr"], x["thr"]) for x in m["streams"]])
 # (3) the virtual path on backtest trades (mocked candles from Binance 4h)

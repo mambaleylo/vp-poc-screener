@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.764"
+APP_VERSION = "0.99.765"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -47249,14 +47249,14 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
     top += `<div class="dim hintx" style="font-size:var(--fs-xs);">ансамбль из ${rs.models_n || 20} моделей (их среднее) обучен до ${new Date(m.trained_to * 1000).toLocaleDateString('ru-RU')} на ${rs.train_coins || 85} монетах</div>
       <div class="zsub">Проверка на монетах, которых модель не видела (${(rs.check_coins || 42) + (rs.new_coins || 83)}), каждый год — моделью, обученной только на прошлых годах:</div>
       ${zBars(rows, v => sgR(+(+v).toFixed(3)))}
-      <div class="zstrip"><span>WR <b>~${un.wr || 70}%</b></span><span>в среднем <b>${sgR(un.avg || 0.235)}</b></span><span>последние 12 мес <b>${sgR(un.last12_avg || 0.24)}</b></span><span><b>~65</b> сделок в месяц</span></div>
+      <div class="zstrip"><span>WR <b>~${un.wr || 70}%</b></span><span>в среднем <b>${sgR(un.avg || 0.235)}</b></span><span>последние 12 мес <b>${sgR(un.last12_avg || 0.24)}</b></span><span><b>~${rs.trades_pm || 65}</b> сделок в месяц${rs.trades_pm ? ' (последние 12 мес, виртуально по правилам бота)' : ''}</span></div>
       ${d.streams && (d.streams.wick4h.n || d.streams.close2h.n || (d.streams.wick4h_o2 || {}).n) ? `<div class="dim" style="font-size:var(--fs-xs);">живые: ${[['wick4h', '4ч'], ['close2h', '2ч'], ['wick4h_o2', '4ч со сдвигом']].filter(([k]) => d.streams[k]).map(([k, nm]) => `${nm} ${d.streams[k].n} (${d.streams[k].n ? sgR(d.streams[k].avg) + ', WR ' + d.streams[k].wr + '%' : '—'})`).join(' · ')}</div>` : ''}
       <div class="zsub hintx">Сделки посчитаны по часовым свечам Binance: стоп — только если свеча своего графика (4ч у 4ч-сделок, 2ч у 2ч) закрылась за ним; фитили и часовые закрытия за стопом не выбивают, от обвала — аварийный стоп 3 ATR на бирже. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%${(m && m.load_risk) ? ` (риск по загрузке: пока открыто меньше ${m.load_risk.n} сделок ⚡ — ×${m.load_risk.lo}, дальше ×${m.load_risk.hi}: сделки общего прострела рынка на истории вдвое лучше одиночных)` : ''}${(m && m.osc_risk) ? ` и по дневному WaveTrend (осциллятор LazyBear с TradingView): монета на дневке сильно растянута против сделки — ×${m.osc_risk.up}${m.osc_risk.dn != null && m.osc_risk.dn != 1 ? `, растянута в её сторону — ×${m.osc_risk.dn}` : ''}` : ''} с плечом, как у бота (ликвидация в ${mo.liq_buf || 1.25}× дальше аварийного стопа — маржа ограничивает число сделок), без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 7189)}</b>, худшие 10% ~${usd(mo.year_p10 || 2783)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 4926)}), последние 12 месяцев ~${usd(mo.last12 || 11387)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
       <div class="zbanner warn hintx">Просадка: при обвале рынка счёт может временно упасть на 60–70% от пика — 24–25 мая 2025 за два дня стопы закрыли 19 сделок 4ч (−19R, при 4% на сделку это около −50%), с 2ч сделками просадки ещё глубже. Потом счёт восстанавливался, но к такому надо быть готовым и не повышать риск после серии стопов.</div>
       ${d.risk_set && d.risk_set > 6 ? `<div class="zbanner warn">Риск ${d.risk}% на сделку при до ${d.max_pos || 20} сделок сразу — это до ${Math.round(d.risk * (d.max_pos || 20))}% счёта под стопами одновременно. Лучше всего по деньгам — 3–4%: выше денег даже меньше (маржи хватает на меньшее число сделок), а просадки глубже.</div>` : ''}
       ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} (бот держит их у себя и выставляет на бирже, когда цена подошла на 1 ATR — так места и маржа не заняты далёкими лимитками) — переключатель «↳ ⚡ Лимитки 4ч+2ч» в автоторговле; риск — поле «⚡» (пусто = 4.5%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
   }
-  let h = card(`⚡ Лимитки 4ч+2ч ${pill}`, top);
+  let h = card(`⚡ Лимитки ${sts.length ? sts.map(x => x.tf === '2h' ? '2ч' : (x.off ? '4ч±' : '4ч')).join('+') : '4ч+2ч'} ${pill}`, top);
   {   // v0.99.684 — the exchange: Gate or Binance (the keys, the balance)
     const c = d.bn_check;
     const on = s_ => `margin-top:0;${s_ ? 'background:#f0b90b;color:#000;font-weight:600;' : ''}`;

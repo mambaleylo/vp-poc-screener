@@ -91,4 +91,29 @@ for bsym in ("SOLUSDT", "DOGEUSDT", "ARBUSDT", "LINKUSDT"):
 print(f"бары совпали; заявок сверено {n_ev}, худшая разница признаков {worst:.2e}, лишних заявок у бота {extra}; сделок сверено {n_tr}, расхождений {len(bad_tr)}")
 for x in bad_tr[:8]: print(" ", x)
 ok = ok and worst < 1e-3 and extra == 0 and not bad_tr
-print("t_dlm_o2 OK" if ok else "t_dlm_o2 FAIL"); sys.exit(0 if ok else 1)
+print("t_dlm_o2 parity OK" if ok else "t_dlm_o2 FAIL")
+if not ok: sys.exit(1)
+# 5) the real model file: the stream loaded, a scan on the shifted bars makes the orders above its threshold (score / thr
+#    = the lab's score), the ids, the offset, the risk x0.75
+V._DLM["model"] = None
+M = V.dlm_model(); st = V._dlm_stream("wick4h_o2")
+assert st and st["off"] == OFF and abs(st["thr"] - round(st["thr_base"] * 1.05, 6)) < 1e-9 and len(st["models"]) == 20, st and {k: st[k] for k in ("off", "thr")}
+assert V.dlm_stream_mult({"st": "wick4h_o2", "side": 1}) == 0.75 and V.dlm_stream_mult({"st": "wick4h_o2", "side": -1}) == 0.75 and V.dlm_stream_mult({"st": "wick4h", "side": -1}) == 1.0
+V.dlm_coins = lambda: ["SOL_USDT", "DOGE_USDT", "ARB_USDT", "LINK_USDT"]; V.dlm_save = lambda: None
+import treevec as TV
+tot = 0; coins_ = cands_ = 0; best_ = 0
+V.dlm_coins = lambda: [c.replace("USDT", "_USDT") for c in ("SOLUSDT", "DOGEUSDT", "ARBUSDT", "LINKUSDT", "AVAXUSDT", "WIFUSDT", "1000PEPEUSDT", "SUIUSDT")
+                       if not c.startswith("1000")]
+for t_close in (1785715200 + 7200 + 14400 * k for k in range(0, 300)):   # 02:00 UTC closes, Sep-Oct 2026
+    with V._dlm_lock: V._DLM["orders"] = []; V._DLM["trades"] = []
+    V.dlm_scan(t_close, st)
+    by = (V._DLM.get("scan") or {}).get("by", {}).get("wick4h_o2") or {}
+    coins_ += by.get("coins", 0); cands_ += by.get("cands", 0); best_ = max([best_] + [x["pct"] for x in by.get("near") or []])
+    for o in V._DLM["orders"]:
+        tot += 1
+        assert o["off"] == OFF and o["id"].endswith("_wick4h_o2") and o["t0"] == t_close and o["score"] >= st["thr"], o
+        ev = DE.features(GS(o["symbol"]), "wick4h_o2", DE.btc_ctx("wick4h_o2")); i = np.flatnonzero((ev["t"] + BS == t_close) & (ev["side"] == o["side"]))
+        assert len(i) == 1 and abs(TV.model_score(st["models"], ev["f"][i].astype(float))[0] - o["score"]) < 1e-3, (o, i)
+print(f"сканов монет {coins_}, кандидатов {cands_}, лучшая оценка {best_}% порога; сканирование по файлу модели: заявок {tot} (у всех сдвиг, id, порог, оценка = лаборатории)")
+assert tot > 0
+print("t_dlm_o2 model OK")
