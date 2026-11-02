@@ -17,6 +17,7 @@ ARGS = sys.argv[1:]
 import numpy as np
 from numba import njit
 from common import D
+D1H = os.environ.get("D1H", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ema_model", "data", "1h"))   # dl.py's 2020- files (not data/1h: lv_engine's bar indices are on the lab-store's)
 TFH = int(os.environ.get("TFH", "4"))
 
 FAMS = ["w05", "w075", "w1", "w125", "w15"]
@@ -29,7 +30,7 @@ OUT = f"{D}/s23_{TFH}h" + os.environ.get("SUF", "")
 
 def load15(sym):
     """4h bars from the 1h file (UTC 4h blocks, complete ones only)"""
-    a = np.loadtxt(f"{D}/data/1h/{sym}.csv", delimiter=",", ndmin=2)
+    a = np.loadtxt(f"{D1H}/{sym}.csv", delimiter=",", ndmin=2)
     t = a[:, 0].astype(np.int64)
     k = np.concatenate([[True], np.diff(t) > 0])
     a = a[k]; t = a[:, 0].astype(np.int64)

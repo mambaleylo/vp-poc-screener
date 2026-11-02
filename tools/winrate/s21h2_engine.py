@@ -20,6 +20,7 @@ ARGS = sys.argv[1:]
 import numpy as np
 from numba import njit
 from common import D
+D1H = os.environ.get("D1H", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ema_model", "data", "1h"))   # dl.py's 2020- files (not data/1h: lv_engine's bar indices are on the lab-store's)
 TFH = int(os.environ.get("TFH", "2"))
 
 FAMS = ["d2", "d15", "wick1", "d2a28"]
@@ -31,7 +32,7 @@ OUT = f"{D}/s21h2" + os.environ.get("SUF", "")
 
 def load15(sym):
     """4h bars from the 1h file (UTC 4h blocks, complete ones only)"""
-    a = np.loadtxt(f"{D}/data/1h/{sym}.csv", delimiter=",", ndmin=2)
+    a = np.loadtxt(f"{D1H}/{sym}.csv", delimiter=",", ndmin=2)
     t = a[:, 0].astype(np.int64)
     k = np.concatenate([[True], np.diff(t) > 0])
     a = a[k]; t = a[:, 0].astype(np.int64)
@@ -260,7 +261,7 @@ def run(sym):
 if __name__ == "__main__":
     import json, multiprocessing as mp
     os.makedirs(OUT, exist_ok=True)
-    syms = ARGS or sorted(f[:-4] for f in os.listdir(f"{D}/data/1h") if f.endswith(".csv"))
+    syms = ARGS or sorted(f[:-4] for f in os.listdir(D1H) if f.endswith(".csv"))
     t0 = time.time()
     if len(syms) == 1:
         print(run(syms[0]), round(time.time() - t0, 1))
