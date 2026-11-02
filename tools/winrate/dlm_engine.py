@@ -16,6 +16,8 @@ STREAMS = {"wick4h": dict(hh=4, nb=3000, wick=True, depth=1.0, fam=2.0, ch=4),
            # the other charts tried as a third stream (the user: "какие таймфремы для лимиток ещё можно попробовать"): the 4h wick
            # rule on the 4h grid shifted by 2 h (02-06, 06-10 … UTC: "off" hours), on 3h / 6h / 8h bars; ~500 days of the bot's window
            "wick4h_o2": dict(hh=4, off=2, nb=3000, wick=True, depth=1.0, fam=2.0, ch=4),
+           "wick4h_o1": dict(hh=4, off=1, nb=3000, wick=True, depth=1.0, fam=2.0, ch=4),
+           "wick4h_o3": dict(hh=4, off=3, nb=3000, wick=True, depth=1.0, fam=2.0, ch=4),
            "wick3h": dict(hh=3, nb=4000, wick=True, depth=1.0, fam=2.0, ch=3),
            "wick6h": dict(hh=6, nb=2000, wick=True, depth=1.0, fam=2.0, ch=6),
            "wick8h": dict(hh=8, nb=1500, wick=True, depth=1.0, fam=2.0, ch=8, minb=1500)}

@@ -26,12 +26,14 @@ M = json.load(open("/home/user/vp-poc-screener/vp_dlm_model.json")); S = {s["nam
 YEARS = range(2023, 2027)
 for stream in os.environ.get("STREAMS", "wick4h,close2h").split(","):   # + the new charts (dlm_engine.STREAMS: the wick4h exits)
     rows = {k: [] for k in ("coin", "t", "F", "R", "tout")}
+    TRS = os.environ.get("TRAIN_STREAMS", stream).split(",")   # TRAIN_STREAMS=wick4h,wick4h_o2: one model on both 4h grids' orders
     for c, g in GROUP.items():
         if g != "train": continue
-        z = np.load(f"{ST}/{FEAT}/{stream}/{c}.npz")
-        if not len(z["t"]): continue
-        rows["coin"].append(np.full(len(z["t"]), c))
-        for k in ("t", "F", "R", "tout"): rows[k].append(z[k])
+        for ts_ in TRS:
+            z = np.load(f"{ST}/{FEAT}/{ts_}/{c}.npz")
+            if not len(z["t"]): continue
+            rows["coin"].append(np.full(len(z["t"]), c))
+            for k in ("t", "F", "R", "tout"): rows[k].append(z[k])
     D = {k: np.concatenate(v) for k, v in rows.items()}; y = np.clip(D["R"], -1.5, 1.5); t0 = time.time()
     MODELS, THR = {}, {}
     prev = None
