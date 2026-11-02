@@ -9,7 +9,7 @@ from lv_wf import load_dir, ts
 import lv_engine as LE, treevec as TV
 M = json.load(open(os.path.join(HERE, "..", "..", "vp_smc_model.json")))
 print("deployed:", {k: M.get(k) for k in ("ver", "thr", "q")}, "feats same:", M.get("feats") == LE.FNAMES, flush=True)
-Dd = load_dir("lv2", LE.FNAMES)
+Dd = load_dir(os.environ.get("LVDIR", "lv2"), LE.FNAMES)
 F = Dd["F"]; fam = F[:, 0].astype(int); T = Dd["T"]
 y = np.nan_to_num(Dd["R"][2], nan=0.0).clip(-1.2, 6.0)
 tr = (fam >= 33) & Dd["BOT"] & (T < ts(2026) - 14 * 86400)

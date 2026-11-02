@@ -26,11 +26,12 @@ EXITS = ((0.75, 4.0, 72, 1.0, 1 / 3), (0.5, 3.0, 48, 0.0, 0.0), (1.0, 3.0, 72, 0
 FNAMES = ["fam", "scope", "side", "datr", "hour", "dow", "dist_prev", "travel", "r24", "r72", "r7d", "b24", "b7d", "b_e50",
           "rsi_d", "rsi_h", "d_e50", "d_e200", "pos30", "pos90", "pos365", "vol24", "conf", "ema_near", "ema_conf",
           "round", "prog", "atr_h", "wick_prev"]
-OUT = f"{D}/lv2"
+OUT = os.environ.get("LV_OUT", f"{D}/lv2")
+D1H = os.environ.get("LV_D1H", f"{D}/data/1h")   # the candles' folder (LV_D1H: e.g. dl.py's 2020- files)
 
 
 def load_np(sym):
-    fn = f"{D}/data/1h/{sym}.csv"
+    fn = f"{D1H}/{sym}.csv"
     if not os.path.exists(fn):   # the restored lab keeps the candles in the lab-store branch (LAB_README.md)
         fn = os.path.join(os.environ.get("LABSTORE", "/home/user/vp-lab-store"), "data", "1h", f"{sym}.csv.gz")
     a = np.loadtxt(fn, delimiter=",", ndmin=2)
