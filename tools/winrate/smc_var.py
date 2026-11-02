@@ -22,7 +22,7 @@ VARS = {
     "q99": dict(q=0.99), "q985": dict(q=0.985), "q995": dict(q=0.995),                 # the threshold: more / fewer trades
     "reach1": dict(reach=1.0), "reach25": dict(reach=2.5), "noreach": dict(reach=99.0),
     "stop075": dict(stop=0.75), "stop15": dict(stop=1.5), "hard15": dict(hard=1.5), "hard3": dict(hard=3.0),
-    "take2": dict(take=2.0), "take4": dict(take=4.0), "take6": dict(take=6.0),
+    "take2": dict(take=2.0), "take4": dict(take=4.0), "take5": dict(take=5.0), "take6": dict(take=6.0),
     "hold72": dict(hold=72), "hold144": dict(hold=144), "kh1": dict(kh=1), "kh24": dict(kh=24),
     "be0": dict(be=0.0), "be1": dict(be=1.0), "be3": dict(be=3.0), "part1": dict(be=1.0, pf=0.33),   # EMA's 1/3 at +1R
     "deep02": dict(deep=0.2), "deep04": dict(deep=0.4),                                # the limit past the level (EMA's / ⚡'s lesson)
