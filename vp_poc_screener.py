@@ -36353,6 +36353,48 @@ def _dlm_closed(sym, tf, sec, n, now):
 DLM_TF = {900: "15m", 7200: "2h", 14400: "4h"}
 
 
+def _dlm_off(x):
+    """v0.99.765 — a stream's / order's / trade's grid offset in seconds (0 = the UTC grid; the shifted 4h stream: 7200, its bars
+    02-06, 06-10 … UTC — the user: "внедрять" after tools/winrate money_o2c.py)"""
+    return int((x or {}).get("off") or 0)
+
+
+def _dlm_grid(t, bs, off=0):
+    """the start of the chart's bar holding t on the stream's grid"""
+    return int((int(t) - off) // bs * bs + off)
+
+
+def _dlm_chart(sym, st, n, now):
+    """the stream's last n closed bars: Binance's own for the UTC grid; a shifted grid's bars built from the 2h ones (a shifted
+    4h bar = 02-04 + 04-06 …; the 1h ones when the offset is not a whole 2h): open / high / low / close / quote volume, only
+    the complete bars (the lab's dlm_engine.chart on the shifted grid)"""
+    bs, off = int(st["bar_sec"]), _dlm_off(st)
+    if not off:
+        return _dlm_closed(sym, st["tf"], bs, n, now)
+    sub, tf = (7200, "2h") if off % 7200 == 0 and bs % 7200 == 0 else (3600, "1h")
+    k = bs // sub
+    src = _dlm_closed(sym, tf, sub, n * k + 2 * k, now) or []
+    out, grp, key = [], [], None
+    for c in src:
+        g = (int(c["time"]) - off) // bs
+        if g != key:
+            if len(grp) == k:
+                out.append(grp)
+            grp, key = [], g
+        grp.append(c)
+    if len(grp) == k and grp[-1]["time"] + sub <= now:
+        out.append(grp)
+    bars = [{"time": (int(g[0]["time"]) - off) // bs * bs + off, "open": g[0]["open"], "high": max(x["high"] for x in g), "low": min(x["low"] for x in g),
+             "close": g[-1]["close"], "volume": sum(float(x.get("volume") or 0) for x in g), **({"bn": 1} if g[-1].get("bn") else {})} for g in out]
+    return bars[-n:]
+
+
+def _dlm_shift(bars, off):
+    """the bars with their times moved back by the offset: the features see the shifted grid as the lab's engine does (its
+    hour of the day; the days unchanged for the 02, 06 … starts)"""
+    return bars if not off else [dict(b, time=int(b["time"]) - off) for b in bars]
+
+
 def _dlm_bars(sym, start, now, bs=900):
     """v0.99.684 — the closed bars from `start` for the virtual fills / exits: Binance's when trading there. bs = the
     chart's bar (v0.99.689: 4h / 2h for the streams' orders, 15m for the 15m module's last ones); 2h from Binance
@@ -36385,7 +36427,7 @@ def _dlm_hit(o, now):
     s_, lv = o["side"], o["lv"]
     for c in b:
         if (c["low"] <= lv) if s_ > 0 else (c["high"] >= lv):
-            fb = c["time"] // bs * bs
+            fb = _dlm_grid(c["time"], bs, _dlm_off(o))
             fo = next((x["open"] for x in b if x["time"] == fb), c["open"])
             return c["time"], s_ * (c["open"] - lv) / (o["atr"] or 1e-12), fb, (min(lv, fo) if s_ > 0 else max(lv, fo))
     return False
@@ -36443,7 +36485,10 @@ def dlm_risk(equity=None):
 # v0.99.746 — the ⚡ risk by the stream & side: the 2h stream's shorts x0.5 (tools/winrate money_multi.py, the walk-forward
 # pool 2023-2025: their trades the weakest — a year from $200 at 20x the median $75.8k -> $89.9k, the worst $3.7k -> $5.4k;
 # with 14x see BN_CROSS_LEV). VP_DLM_C2H_SHORT_RISK overrides it
-DLM_STREAM_SIDE_RISK = {("close2h", -1): float(os.environ.get("VP_DLM_C2H_SHORT_RISK", "0.5"))}
+DLM_STREAM_SIDE_RISK = {("close2h", -1): float(os.environ.get("VP_DLM_C2H_SHORT_RISK", "0.5")),
+                        # v0.99.765 — the shifted 4h stream x0.75 both sides (tools/winrate money_o2c.py: with its score >= 1.05 x the
+                        # threshold the bundle's usual year $43.8k vs $29.5k, the drawdown the same 77%, better in 8 of 8 noise runs)
+                        ("wick4h_o2", 1): float(os.environ.get("VP_DLM_O2_RISK", "0.75")), ("wick4h_o2", -1): float(os.environ.get("VP_DLM_O2_RISK", "0.75"))}
 
 
 def dlm_stream_mult(o):
@@ -36539,20 +36584,20 @@ def dlm_scan(t_bar, st, cu=False):
     if not m:
         return
     rule = m.get("rule") or {}
-    bs, tf = int(st["bar_sec"]), st["tf"]
+    bs, tf, off = int(st["bar_sec"]), st["tf"], _dlm_off(st)
     nb = 3000 if bs >= 14400 else 4500   # ≥ ~375 days: the daily EMA50 settled (the research's from the coin's whole history)
-    bb = _dlm_closed("BTC_USDT", tf, bs, nb, t_bar)
+    bb = _dlm_shift(_dlm_chart("BTC_USDT", st, nb, t_bar), off)
     thr = float(st["thr"])
     src = {"binance": 0, "gate": 0}
     new, coins, cands, best = [], 0, 0, []
     for sym in dlm_coins():
         heartbeat("dlm_loop")
         try:
-            bars = _dlm_closed(sym, tf, bs, nb, t_bar)
+            bars = _dlm_chart(sym, st, nb, t_bar)
             if not bars or bars[-1]["time"] != t_bar - bs:
                 continue   # the bar just closed is missing
             src["binance" if bars[-1].get("bn") else "gate"] += 1
-            cs = dlm_candidates4(bars, bb, streams=[st], dmin=float(rule.get("depth_min", 0.3)), dmax=float(rule.get("depth_max", 6.0)),
+            cs = dlm_candidates4(_dlm_shift(bars, off), bb, streams=[st], dmin=float(rule.get("depth_min", 0.3)), dmax=float(rule.get("depth_max", 6.0)),
                                  min_bars=int(rule.get("min_bars", 2000)))
             coins += 1
             for c in cs:
@@ -36566,12 +36611,12 @@ def dlm_scan(t_bar, st, cu=False):
                     continue
                 new.append({"id": f"dlm_{sym}_{s}_{t_bar}" + ("" if st["name"] == "wick4h" else "_" + st["name"]), "symbol": sym, "side": s, "lv": lv,
                             "atr": a, "score": round(sc, 4), "bs": bs, "st": st["name"], "t0": t_bar, "until": t_bar + int(st.get("alive_bars", 4)) * bs,
-                            "px": bars[-1]["close"], "status": "OPEN", "real": None, **({"cu": True, "from_cu": True} if cu else {})})
+                            "px": bars[-1]["close"], "status": "OPEN", "real": None, **({"cu": True, "from_cu": True} if cu else {}), **({"off": off} if off else {})})
         except Exception as e:
             log_error(f"dlm scan {sym} {tf}: {e}")
     new.sort(key=lambda o: -o["score"])
     best.sort(key=lambda x: -x[0])
-    near = [{"symbol": s_, "side": sd, "pct": round(100 * x), "tf": tf} for x, s_, sd in best[:8]]
+    near = [{"symbol": s_, "side": sd, "pct": round(100 * x), "tf": tf, **({"off": off} if off else {})} for x, s_, sd in best[:8]]
     with _dlm_lock:
         have = {o["id"] for o in _DLM["orders"]} | {t["id"] for t in _DLM["trades"]}   # v0.99.710 — a catch-up scan makes no copy
         new = [o for o in new if o["id"] not in have]
@@ -36629,7 +36674,8 @@ def _dlm_open_trade(o, t_fill_bar, fill, real=None, t1h=None):
     tr = {"id": o["id"], "symbol": o["symbol"], "side": s, "direction": "LONG" if s > 0 else "SHORT", "entry": fill, "lv": o["lv"], "atr": a,
           "sl": fill - s * risk, "tp": fill + s * float(far) * a if far else tp1, "score": o["score"], "t0": o["t0"],
           "fbar": t_fill_bar, "t_in": int(time.time()), "until": t_fill_bar + hold * bs, "bs": bs, "hold": hold, "st": o.get("st") or ("wick4h" if bs != 900 else None),
-          "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": real, "rv": DLM_MODEL_VER if bs != 900 else 1}
+          "status": "OPEN", "result": None, "r": None, "exit": None, "t_out": None, "real": real, "rv": DLM_MODEL_VER if bs != 900 else 1,
+          **({"off": _dlm_off(o)} if _dlm_off(o) else {})}
     if far:
         tr.update({"tp1": tp1, "tp2": tr["tp"], "pull": float(st.get("pull_atr", 0.4)), "take": "far", "mae": 0.0})
     if st.get("stop_mode") == "close1h" and bs != 900:   # v0.99.692
@@ -36657,8 +36703,9 @@ def _dlm_1h(sym, start, now):
 
 
 def _dlm_ch_close(t, c):
-    """v0.99.694 — the 1h candle c ends a candle of the trade's close-stop length (UTC-aligned: 4h = 00, 04, ... UTC)"""
-    return (c["time"] + 3600) % (int(t.get("ch") or 1) * 3600) == 0
+    """v0.99.694 — the 1h candle c ends a candle of the trade's close-stop length (UTC-aligned: 4h = 00, 04, ... UTC; v0.99.765:
+    on the trade's own grid — the shifted 4h stream's 02, 06 …)"""
+    return (c["time"] + 3600 - _dlm_off(t)) % (int(t.get("ch") or 1) * 3600) == 0
 
 
 def _dlm_walk_1h(t, now):
@@ -36722,8 +36769,9 @@ def dlm_settle(now):
         try:
             if int(o.get("bs") or 900) > 3600:
                 h = _dlm_hit(o, now)   # v0.99.691 — on the 1h candles
-                if h is not None:   # None: no 1h candles — the chart's bars below
-                    hits.append((h[0], h[1], -o.get("score", 0), o, {"time": h[2], "fill": h[3], "t1h": h[0]}) if h else (float("inf"), 0.0, -o.get("score", 0), o, None))
+                if h is not None or _dlm_off(o):   # None: no 1h candles — the chart's bars below (a shifted grid: wait for the 1h ones)
+                    if h is not None:
+                        hits.append((h[0], h[1], -o.get("score", 0), o, {"time": h[2], "fill": h[3], "t1h": h[0]}) if h else (float("inf"), 0.0, -o.get("score", 0), o, None))
                     continue
             cs = [c for c in _dlm_bars(o["symbol"], o["t0"], now, int(o.get("bs") or 900)) if c["time"] < o["until"]]
             hit = next((c for c in cs if ((c["low"] <= o["lv"]) if o["side"] > 0 else (c["high"] >= o["lv"]))), None)
@@ -36802,7 +36850,7 @@ def dlm_settle(now):
     dlm_save()
 
 
-DLM_STREAM_RU = {"wick4h": "4ч, лимитка на фитиль", "close2h": "2ч, лимитка за 2 ATR"}
+DLM_STREAM_RU = {"wick4h": "4ч, лимитка на фитиль", "close2h": "2ч, лимитка за 2 ATR", "wick4h_o2": "4ч со сдвигом (02, 06 … UTC), лимитка на фитиль"}
 
 
 def _dlm_fill_msg(t, o, fill, where):
@@ -37796,7 +37844,7 @@ def dlm_bn_tick(orders, trades):
         changed = True
         if filled > 0:
             fill = (float(x.get("avgPrice") or 0) / r["scl"]) or r["price"]
-            t = _dlm_open_trade(o, int(now // int(o.get("bs") or 900) * int(o.get("bs") or 900)), fill, real=dict({k: r.get(k) for k in ("ex", "bsym", "scl", "tick", "step", "dual", "risk", "lev")},
+            t = _dlm_open_trade(o, _dlm_grid(now, int(o.get("bs") or 900), _dlm_off(o)), fill, real=dict({k: r.get(k) for k in ("ex", "bsym", "scl", "tick", "step", "dual", "risk", "lev")},
                                                                                         filled=filled, order=r["id"]))
             if t:
                 try:
@@ -38203,7 +38251,7 @@ def dlm_real_tick():
             changed = True
             if filled > 0:
                 fill = float(x.get("fill_price") or r["price"])
-                t = _dlm_open_trade(o, int(now // int(o.get("bs") or 900) * int(o.get("bs") or 900)), fill, real={"filled": filled, "tick": r.get("tick"), "order": r["id"], "risk": r.get("risk")})
+                t = _dlm_open_trade(o, _dlm_grid(now, int(o.get("bs") or 900), _dlm_off(o)), fill, real={"filled": filled, "tick": r.get("tick"), "order": r["id"], "risk": r.get("risk")})
                 if t:
                     try:
                         _dlm_place_exits(t)
@@ -38312,7 +38360,7 @@ def dlm_catch_up(now=None):
     first; the same closed bars -> the same orders as the old run; ids already there are skipped); a waiting order the
     price went far through meanwhile is skipped by _dlm_arm as before"""
     now = now or time.time()
-    jobs = [(st, int(now // int(st["bar_sec"]) * int(st["bar_sec"])) - (k - 1) * int(st["bar_sec"]))
+    jobs = [(st, _dlm_grid(now, int(st["bar_sec"]), _dlm_off(st)) - (k - 1) * int(st["bar_sec"]))
             for st in _dlm_streams(dlm_model()) for k in range(int(st.get("alive_bars", 4)), 0, -1)]
     _DLM["catchup"] = {"run": True, "done": 0, "of": len(jobs), "t": int(now)}
     for st, t_close in jobs:
@@ -38378,7 +38426,7 @@ def dlm_loop():
                 if _DLM.get("bar_done") != t_bar and now - t_bar >= 15:   # every 15 min: settle; a stream's bar closed: its scan
                     dlm_settle(now)
                     for st in _dlm_streams(dlm_model()):   # v0.99.689 — 4h and 2h
-                        if t_bar % int(st["bar_sec"]) == 0 and now - t_bar < 600:   # a scan later than 10 min into the bar is stale
+                        if (t_bar - _dlm_off(st)) % int(st["bar_sec"]) == 0 and now - t_bar < 600:   # a scan later than 10 min into the bar is stale
                             # (v0.99.691: from this pass's start — a slow 4h scan, e.g. the first candles after a restart, no longer drops the 2h one)
                             dlm_scan(t_bar, st)
                     with _dlm_lock:
@@ -38414,9 +38462,9 @@ def dlm_stats():
             "catchup": _DLM.get("catchup"),   # v0.99.711 — the start's scans of the missed bars
             "more_coins": DLM_MORE_COINS, "coins_n": 210 if DLM_MORE_COINS else 127,   # v0.99.686
             "risk": dlm_risk(), "risk_set": MODULE_RISK_PCT.get("dlm"), "max_pos": DLM_MAX_POS,   # v0.99.687
-            "heat_max": BN_HEAT_MAX, "lev_cap": BN_CROSS_LEV, "c2h_short": DLM_STREAM_SIDE_RISK.get(("close2h", -1), 1.0),   # v0.99.755 — the list's money
+            "heat_max": BN_HEAT_MAX, "lev_cap": BN_CROSS_LEV, "c2h_short": DLM_STREAM_SIDE_RISK.get(("close2h", -1), 1.0), "o2_risk": DLM_STREAM_SIDE_RISK.get(("wick4h_o2", 1), 1.0),   # v0.99.755 — the list's money
             "model": dict({k: m.get(k) for k in ("ver", "q", "trained_to", "rule", "research", "side_cap", "liq_buf", "load_risk", "osc_risk")},
-                          streams=[{k: x.get(k) for k in ("name", "tf", "anchor", "depth_atr", "thr", "alive_bars", "take_atr", "stop_atr", "hold_bars", "far_take_atr", "pull_atr", "hard_stop_atr", "stop_mode", "close_h")} for x in m.get("streams") or []]) if m else None,
+                          streams=[{k: x.get(k) for k in ("name", "tf", "off", "anchor", "depth_atr", "thr", "alive_bars", "take_atr", "stop_atr", "hold_bars", "far_take_atr", "pull_atr", "hard_stop_atr", "stop_mode", "close_h")} for x in m.get("streams") or []]) if m else None,
             "err": err, "scan": scan, "orders": orders[:40], "orders_n": len(orders),
             "open": [dict(t, why=t.get("why") or (_dlm_why_virtual(_ord.get(t["id"]) or {}, t) if not t.get("real") else None))
                      for t in trades if t["status"] == "OPEN"][-40:],   # v0.99.702 — the reason also for a trade opened before v0.99.701
@@ -38429,7 +38477,7 @@ def dlm_stats():
             "live_check": live_vs_bt("dlm", rs),
             "streams": {n: {"n": len(x), "avg": round(sum(t["r"] for t in x) / len(x), 3) if x else None,
                             "wr": round(100 * sum(1 for t in x if t["result"] == "WIN") / len(x), 1) if x else None}
-                        for n in ("wick4h", "close2h") for x in [[t for t in fin if (t.get("st") or "wick4h") == n]]},   # v0.99.689
+                        for n in ("wick4h", "close2h", "wick4h_o2") for x in [[t for t in fin if (t.get("st") or "wick4h") == n]]},   # v0.99.689; v0.99.765 — the shifted 4h
             "last": [{k: t.get(k) for k in ("symbol", "side", "t0", "fbar", "t_in", "r", "result", "real", "entry", "lv", "sl", "tp", "exit", "t_out", "bs", "st", "tp1", "tp2", "take")}
                      | {"why": None if t.get("real") else (t.get("why") or _dlm_why_virtual(_ord.get(t["id"]) or {}, t))}   # v0.99.714
                      for t in sorted(fin, key=lambda t: -t["t_in"])[:40]]}
@@ -46647,7 +46695,7 @@ function dlmMoney50(list, cfg, n = 50) {   // v0.99.696 — the user: "на по
     settle(t.f);
     if (open.length >= cfg.max_pos || eq <= 0) { skipped++; t._skip = 'нет места'; continue; }
     const st = Math.max(0.002, Math.abs(t.e - t.sl) / t.e), sth = t.sl2 ? Math.abs(t.e - t.sl2) / t.e : st * 1.5;
-    const k = (open.length < (ld.n || 5) ? (ld.lo || 1) : (ld.hi || 1)) * (t.st === 'close2h' && t.d < 0 ? (cfg.c2h != null ? cfg.c2h : 0.5) : 1);
+    const k = (open.length < (ld.n || 5) ? (ld.lo || 1) : (ld.hi || 1)) * (t.st === 'close2h' && t.d < 0 ? (cfg.c2h != null ? cfg.c2h : 0.5) : 1) * (t.st === 'wick4h_o2' ? (cfg.o2 != null ? cfg.o2 : 0.75) : 1);
     const full = eq * cfg.risk / 100 * k; let ru = full;
     const room = cap * eq - open.reduce((a, p) => a + p.heat, 0), need = ru * sth / st;
     if (need > room) {
@@ -47184,10 +47232,10 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
   const pill = d.on === false ? '<span class="pill neg">выключено</span>' : (d.auto ? `<span class="pill pos">${d.dry ? 'торгует (dry-run)' : 'торгует'}</span>` : '<span class="pill">виртуально</span>');
   const sts = (m && m.streams) || [];
   window._dlmCfg = {risk: d.risk || 4, max_pos: d.max_pos || 20, buf: (m && m.liq_buf) || 1.5,   // v0.99.696 — the backtest list's money
-                    heat: d.heat_max || 1.0, lev: d.lev_cap || 14, c2h: d.c2h_short != null ? d.c2h_short : 0.5, load: (m && m.load_risk) || null};   // v0.99.755 — the bot's rules
+                    heat: d.heat_max || 1.0, lev: d.lev_cap || 14, c2h: d.c2h_short != null ? d.c2h_short : 0.5, o2: d.o2_risk != null ? d.o2_risk : 0.75, load: (m && m.load_risk) || null};   // v0.99.755 — the bot's rules
   const dur = (bars, h) => { const x = bars * h; return x >= 24 ? `${Math.floor(x / 24)} дн${x % 24 ? ' ' + x % 24 + ' ч' : ''}` : `${x} ч`; };
-  const stTxt = x => { const h = x.tf === '2h' ? 2 : 4; return `<b>${x.tf === '2h' ? '2ч' : '4ч'}</b> — лимитка на ${x.depth_atr} ATR ${x.anchor === 'wick' ? 'за тенью только что закрытой свечи (под минимумом для лонга, над максимумом для шорта)' : 'от цены закрытия свечи'}, живёт ${x.alive_bars || 4} свечи (${dur(x.alive_bars || 4, h)}); ${x.far_take_atr ? `тейк ${x.far_take_atr} ATR, но если цена сначала уйдёт против на ${x.pull_atr} ATR (раньше, чем дойдёт до +${x.take_atr || 1} ATR) — тейк ${x.take_atr || 1} ATR` : `тейк ${x.take_atr || 1} ATR`}, ${x.stop_mode === 'close1h' ? `стоп — если ${(x.close_h || 1) > 1 ? x.close_h + '-часовая свеча графика' : 'часовая свеча'} закрылась за ${x.stop_atr || 2} ATR (аварийный стоп на бирже — ${x.hard_stop_atr || 3} ATR)` : `стоп ${x.stop_atr || 2} ATR`}, выход через ${dur(x.hold_bars || 32, h)}`; };
-  let top = `<div class="dim hintx">Модель смотрит все ${d.coins_n || 210} монет на закрытии каждой свечи и в лучшем ~${m && m.q ? +((1 - m.q) * 100).toFixed(0) : 1}% моментов ставит лимитку — ловит продолжение прострела. Два вида, у каждого своя модель:<br>${sts.length ? sts.map(stTxt).join(';<br>') : stTxt({tf: '4h', anchor: 'wick', depth_atr: 1})}.<br>Если по монете стоят обе — сделкой становится та, что исполнилась первой, вторая снимается. Сделок до ${d.max_pos || 20} сразу, каждая на ${d.risk}% счёта.</div>`;
+  const stTxt = x => { const h = x.tf === '2h' ? 2 : 4; return `<b>${x.tf === '2h' ? '2ч' : (x.off ? '4ч со сдвигом' : '4ч')}</b>${x.off ? ` (свечи ${String(x.off / 3600).padStart(2, '0')}–${String(x.off / 3600 + 4).padStart(2, '0')}, ${String(x.off / 3600 + 4).padStart(2, '0')}–${String(x.off / 3600 + 8).padStart(2, '0')} … UTC; риск ×${d.o2_risk != null ? d.o2_risk : 0.75})` : ''} — лимитка на ${x.depth_atr} ATR ${x.anchor === 'wick' ? 'за тенью только что закрытой свечи (под минимумом для лонга, над максимумом для шорта)' : 'от цены закрытия свечи'}, живёт ${x.alive_bars || 4} свечи (${dur(x.alive_bars || 4, h)}); ${x.far_take_atr ? `тейк ${x.far_take_atr} ATR, но если цена сначала уйдёт против на ${x.pull_atr} ATR (раньше, чем дойдёт до +${x.take_atr || 1} ATR) — тейк ${x.take_atr || 1} ATR` : `тейк ${x.take_atr || 1} ATR`}, ${x.stop_mode === 'close1h' ? `стоп — если ${(x.close_h || 1) > 1 ? x.close_h + '-часовая свеча графика' : 'часовая свеча'} закрылась за ${x.stop_atr || 2} ATR (аварийный стоп на бирже — ${x.hard_stop_atr || 3} ATR)` : `стоп ${x.stop_atr || 2} ATR`}, выход через ${dur(x.hold_bars || 32, h)}`; };
+  let top = `<div class="dim hintx">Модель смотрит все ${d.coins_n || 210} монет на закрытии каждой свечи и в лучшем ~${m && m.q ? +((1 - m.q) * 100).toFixed(0) : 1}% моментов ставит лимитку — ловит продолжение прострела. ${['', 'Один вид', 'Два вида', 'Три вида'][sts.length] || sts.length + ' видов'}, у каждого своя модель:<br>${sts.length ? sts.map(stTxt).join(';<br>') : stTxt({tf: '4h', anchor: 'wick', depth_atr: 1})}.<br>Если по монете стоят несколько — сделкой становится та, что исполнилась первой, остальные снимаются. Сделок до ${d.max_pos || 20} сразу, каждая на ${d.risk}% счёта.</div>`;
   if (!m) top += `<div class="zbanner ${d.err ? 'neg' : 'warn'}">${d.err ? 'Модель не загрузилась: ' + d.err : 'Модель загружается…'}</div>`;
   else {
     const y = rs.years || {}, uy = y.unseen || {}, tr = y.train || {};
@@ -47202,7 +47250,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
       <div class="zsub">Проверка на монетах, которых модель не видела (${(rs.check_coins || 42) + (rs.new_coins || 83)}), каждый год — моделью, обученной только на прошлых годах:</div>
       ${zBars(rows, v => sgR(+(+v).toFixed(3)))}
       <div class="zstrip"><span>WR <b>~${un.wr || 70}%</b></span><span>в среднем <b>${sgR(un.avg || 0.235)}</b></span><span>последние 12 мес <b>${sgR(un.last12_avg || 0.24)}</b></span><span><b>~65</b> сделок в месяц</span></div>
-      ${d.streams && (d.streams.wick4h.n || d.streams.close2h.n) ? `<div class="dim" style="font-size:var(--fs-xs);">живые: 4ч ${d.streams.wick4h.n} (${d.streams.wick4h.n ? sgR(d.streams.wick4h.avg) + ', WR ' + d.streams.wick4h.wr + '%' : '—'}) · 2ч ${d.streams.close2h.n} (${d.streams.close2h.n ? sgR(d.streams.close2h.avg) + ', WR ' + d.streams.close2h.wr + '%' : '—'})</div>` : ''}
+      ${d.streams && (d.streams.wick4h.n || d.streams.close2h.n || (d.streams.wick4h_o2 || {}).n) ? `<div class="dim" style="font-size:var(--fs-xs);">живые: ${[['wick4h', '4ч'], ['close2h', '2ч'], ['wick4h_o2', '4ч со сдвигом']].filter(([k]) => d.streams[k]).map(([k, nm]) => `${nm} ${d.streams[k].n} (${d.streams[k].n ? sgR(d.streams[k].avg) + ', WR ' + d.streams[k].wr + '%' : '—'})`).join(' · ')}</div>` : ''}
       <div class="zsub hintx">Сделки посчитаны по часовым свечам Binance: стоп — только если свеча своего графика (4ч у 4ч-сделок, 2ч у 2ч) закрылась за ним; фитили и часовые закрытия за стопом не выбивают, от обвала — аварийный стоп 3 ATR на бирже. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%${(m && m.load_risk) ? ` (риск по загрузке: пока открыто меньше ${m.load_risk.n} сделок ⚡ — ×${m.load_risk.lo}, дальше ×${m.load_risk.hi}: сделки общего прострела рынка на истории вдвое лучше одиночных)` : ''}${(m && m.osc_risk) ? ` и по дневному WaveTrend (осциллятор LazyBear с TradingView): монета на дневке сильно растянута против сделки — ×${m.osc_risk.up}${m.osc_risk.dn != null && m.osc_risk.dn != 1 ? `, растянута в её сторону — ×${m.osc_risk.dn}` : ''}` : ''} с плечом, как у бота (ликвидация в ${mo.liq_buf || 1.25}× дальше аварийного стопа — маржа ограничивает число сделок), без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 7189)}</b>, худшие 10% ~${usd(mo.year_p10 || 2783)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 4926)}), последние 12 месяцев ~${usd(mo.last12 || 11387)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
       <div class="zbanner warn hintx">Просадка: при обвале рынка счёт может временно упасть на 60–70% от пика — 24–25 мая 2025 за два дня стопы закрыли 19 сделок 4ч (−19R, при 4% на сделку это около −50%), с 2ч сделками просадки ещё глубже. Потом счёт восстанавливался, но к такому надо быть готовым и не повышать риск после серии стопов.</div>
       ${d.risk_set && d.risk_set > 6 ? `<div class="zbanner warn">Риск ${d.risk}% на сделку при до ${d.max_pos || 20} сделок сразу — это до ${Math.round(d.risk * (d.max_pos || 20))}% счёта под стопами одновременно. Лучше всего по деньгам — 3–4%: выше денег даже меньше (маржи хватает на меньшее число сделок), а просадки глубже.</div>` : ''}
@@ -47248,7 +47296,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
   }
   const sc = d.scan, ords = d.orders || [];
   const chip = a => `<span style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;margin:0 6px 6px 0;border-radius:999px;background:var(--card);border:1px solid var(--line-2);font-size:var(--fs-sm);white-space:nowrap;">
-      <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span>${a.tf || a.bs ? `<span class="dim">${a.tf === '2h' || a.bs === 7200 ? '2ч' : '4ч'}</span>` : ''} <span class="dim">${a.lv != null ? fmtNum(a.lv) + (a.px ? ' · ' + ((a.lv - a.px) / a.px * 100).toFixed(1) + '%' : '') : (a.pct != null ? a.pct + '%' : '')}${(a.real || {}).id ? ' · 💰' : ''}</span></span>`;
+      <b>${coin(a.symbol)}</b> <span class="${a.side > 0 ? 'win' : 'loss'}">${a.side > 0 ? '↑' : '↓'}</span>${a.tf || a.bs ? `<span class="dim">${a.tf === '2h' || a.bs === 7200 ? '2ч' : (a.off || a.st === 'wick4h_o2' ? '4ч±' : '4ч')}</span>` : ''} <span class="dim">${a.lv != null ? fmtNum(a.lv) + (a.px ? ' · ' + ((a.lv - a.px) / a.px * 100).toFixed(1) + '%' : '') : (a.pct != null ? a.pct + '%' : '')}${(a.real || {}).id ? ' · 💰' : ''}</span></span>`;
   const srcTxt = sc && sc.src ? (sc.src.gate ? `свечи Binance ${sc.src.binance} · Gate ${sc.src.gate}` : 'по свечам Binance') : 'монет · последняя свеча';
   h += card('🔎 Сейчас', sc ? `<div class="ztiles z3">${tile('проверено', sc.coins, srcTxt)}${tile('лимиток', d.orders_n || 0, 'ждут прострела')}${tile('сделок', (d.open || []).length, 'открыто')}</div>
     ${ords.length ? `<div class="zsub" style="margin-top:8px;">лимитки (цена · расстояние):</div><div>${ords.map(chip).join('')}</div>`
