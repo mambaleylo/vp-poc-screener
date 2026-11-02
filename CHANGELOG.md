@@ -21275,3 +21275,12 @@ v0.99.759 — ⚡ 4h on a new model; the honest header
 v0.99.760 — the header shows the last 12 months too
 - The user didn't see where 2026's money went: the header shows the bad / usual / good year (the median of 144 windows
   2023-02..2025-10) — now also "последние 12 мес ~$105k" (Oct 2025 – Oct 2026, from the same money run).
+
+v0.99.761 — the Android widget: the balance and the year if it goes like the last n days
+- The user: "виджет с текущим балансом и динамически меняющимся прогнозом на заработок за год, начиная с первых сделок по
+  лимитам… если год будет таким же как последние n дней торговли"; the widget by KWGT (the user's choice).
+- /api/widget (JSON for KWGT, kept 60 s): the balance (Binance equity, else Gate), n days since the first real ⚡ trade, the
+  closed real ⚡ trades (the real R from the fills, else the planned), their average R and risk; the n days' growth = the
+  product of (1 + risk x R), a year like them = the balance x growth ^ (365 / n) (bal_s, year_s, profit_s, mult_s, pct_s,
+  line, warn "мало сделок" under 30 trades). Only ⚡'s trades; no change to the trading.
+- t_widget: the numbers on made-up trades (a virtual trade not counted, r_real before r, no trades -> "—").

@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.760"
+APP_VERSION = "0.99.761"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -38451,6 +38451,78 @@ def api_dlm_adopt():
     except Exception as e:
         log_error(f"dlm adopt now: {e}")
         return jsonify({"ok": False, "err": str(e)[:200]})
+
+
+_WIDGET = {"t": 0.0, "d": None}
+
+
+def _fmt_usd(x):
+    """$1 234 / $12.34 (a space between the thousands, cents under $100)"""
+    if x is None:
+        return "—"
+    if abs(x) >= 1e9:
+        return f"${x:.2e}"
+    return ("$" + f"{x:,.0f}".replace(",", " ")) if abs(x) >= 100 else f"${x:.2f}"
+
+
+def widget_data():
+    """v0.99.761 — the Android widget (KWGT reads /api/widget; the user: "виджет с текущим балансом и динамически меняющимся
+    прогнозом на заработок за год, начиная с первых сделок по лимитам… если год будет таким же как последние n дней
+    торговли"). The balance: the exchange's equity. The forecast: the real ⚡ trades since the first one (n days): each closed
+    trade grew the account by its risk (% of the balance at its entry) x its real R (r_real, else the planned r), so the n
+    days' growth G = the product of (1 + risk x R); a year like them = G ^ (365 / n) — the balance x that. Only ⚡'s trades
+    (the other modules' not counted); a short n swings the forecast hard — the trades / days / R / risk shown with it"""
+    now = time.time()
+    if _WIDGET["d"] and now - _WIDGET["t"] < 60:
+        return _WIDGET["d"]
+    d = {"ok": True, "err": None, "t": int(now), "upd": time.strftime("%H:%M", time.localtime(now))}
+    try:
+        if BINANCE_API_KEY and BINANCE_API_SECRET:
+            a = bnf_account(); bal, d["ex"] = a["equity"], "Binance"
+        else:
+            bal, d["ex"] = float(get_futures_total_equity() or 0), "Gate"
+    except Exception as e:
+        bal = None; d["ok"] = False; d["err"] = f"баланс: {str(e)[:80]}"
+    with _dlm_lock:
+        trades = [dict(t) for t in _DLM["trades"] if t.get("real")]
+    t0 = min((t["t_in"] for t in trades if t.get("t_in")), default=None)
+    closed = [t for t in trades if t.get("status") == "CLOSED" and t.get("r") is not None]
+    rs, lg = [], 0.0
+    for t in sorted(closed, key=lambda t: t.get("t_out") or 0):
+        rl = t["real"] if isinstance(t["real"], dict) else {}
+        r = rl.get("r_real") if rl.get("r_real") is not None else t["r"]
+        risk = rl.get("risk") or dlm_risk()
+        rs.append((float(r), float(risk)))
+        lg += math.log(max(1e-9, 1 + risk / 100 * float(r)))
+    days = max(1.0, (now - t0) / 86400) if t0 else None
+    d.update({"bal": round(bal, 2) if bal is not None else None, "bal_s": _fmt_usd(bal), "days": round(days, 1) if days else None,
+              "n": len(rs), "open": sum(1 for t in trades if t.get("status") == "OPEN"),
+              "avg_r": round(sum(r for r, _ in rs) / len(rs), 3) if rs else None,
+              "risk": round(sum(k for _, k in rs) / len(rs), 2) if rs else None,
+              "per_day": round(len(rs) / days, 2) if days else None,
+              "growth_n": round(math.exp(lg), 4) if rs else None})
+    if rs and days and bal:
+        e = min(700.0, lg * 365.0 / days); mult = math.exp(e)
+        d.update({"mult": mult, "mult_s": (f"×{mult:,.1f}".replace(",", " ") if mult < 1000 else f"×{mult:.1e}"),
+                  "year": round(bal * mult, 2), "year_s": _fmt_usd(bal * mult), "profit_s": _fmt_usd(bal * (mult - 1)),
+                  "pct_s": f"{(mult - 1) * 100:+,.0f}%".replace(",", " ") if mult < 1e4 else ""})
+    else:
+        d.update({"mult": None, "mult_s": "—", "year": None, "year_s": "—", "profit_s": "—", "pct_s": ""})
+    d["line"] = (f"{d['days']:g} дн · сделок ⚡: {d['n']} · {d['avg_r']:+.2f}R · риск {d['risk']:g}%" if rs else
+                 "нет закрытых реальных сделок ⚡ — прогноза пока нет")
+    d["warn"] = "мало сделок — прогноз прыгает" if len(rs) < 30 else ""
+    _WIDGET.update({"t": now, "d": d})
+    return d
+
+
+@app.route("/api/widget")
+def api_widget():
+    """v0.99.761 — the balance and the year's forecast for KWGT ($wg("http://127.0.0.1:8080/api/widget", json, .bal_s)$)"""
+    try:
+        return jsonify(widget_data())
+    except Exception as e:
+        log_error(f"widget: {e}")
+        return jsonify({"ok": False, "err": str(e)[:120], "bal_s": "—", "year_s": "—", "line": f"ошибка: {str(e)[:60]}"})
 
 
 @app.route("/api/dlm/status")
