@@ -21374,3 +21374,20 @@ v0.99.768 — the models' age in Telegram; the ⚡ backtest list with the shifte
   exits and pool: 3083 trades 2023-2026, +0.258R, WR 79% (4h 1225, 2h 1096, the shifted 4h 762); its own chip "4ч со сдвигом";
   the list's money replica x0.75 for it.
 - Tests: t_model_age, t_dlm_ui (the exit bar of a mid-bar emergency stop), t_dlm_bot, t_liq — OK.
+
+v0.99.769 — 📐 EMA: the crowd filter off, the backtest at every touch the bot trades; 2025 and 2026 apart in the cards
+- The user: "нужно улучшить индикатор ема из связки … идеи можно брать из лимиток", "учти и проверь сразу те же ошибки, что
+  были в лимитках". The checks: (1) Binance's monthly kline archives are cut short (2022-02 / 03 on ~30 coins, ICPUSDT 2022-09)
+  while the daily ones exist — tools/zones_model fill_gaps.py restores those days (dl.py uses it), the EMA lab re-made from
+  scratch; (2) the bot's real EMA trade is a market order on the touch: on Binance's 1-min candles of 284 backtest trades it
+  costs ~0.01R (the money's -0.03R covers it); (3) the lab had counted a touch only 0.1% past the limit while the bot trades
+  every touch (live and at the hour's settle) — the backtest was a subset of the bot's trades.
+- 25 rule variants (tools/ema_model ema_var.py) in the bundle's strictest money with paired noise runs (tools/winrate
+  money_ema.py): only "any touch" + "no crowd filter" better in 6 of 6 runs on both the usual year (+35%) and the last 12
+  months (+45%) at the same drawdown; the threshold, 4h touches, shorts, the depth, stop, take, hold, the emergency stop, no
+  partial, the cap and the risk by the score — worse or noise.
+- vp_ema_model.json: ls_min_d24 removed (the trees and thr unchanged), research.years 2022..2026 apart, q 0.96 (0.97 was stale);
+  vp_bt_trades.json "emx": 442 trades +0.66R WR 77% (ema_export13.py).
+- The cards: a 2025 row is "2025–26" only when the model has no 2026 row; P/R's 2025 and 2026 re-counted from its backtest
+  list (tools/winrate split_years.py); every year from 2025 highlighted.
+- Tests: t_emx_v13 (no crowd block, an exact touch fires, the bot's settle = the new list 200/200), t_emx_rule, t_emx_lv — OK.
