@@ -22,7 +22,8 @@ def stream_orders(st, suf=""):
         lv, a = float(z["lv"][k]), float(z["atr"][k]); f = bool(z["filled"][k]); e = float(z["fill"][k]) if f else lv
         out.append({"coin": str(z["coin"][k]), "sym": M.bn(str(z["coin"][k])), "t": int(z["t"][k]), "until": int(z["t"][k]) + 4 * bs, "side": int(z["side"][k]),
                     "lv": lv, "atr": a, "prio": float(z["score"][k]) / float(z["thr"][k]), "filled": f, "t1h": int(z["t1h"][k]), "e": e,
-                    "r": float(z["R"][k]), "t1": int(z["tout"][k]), "st": sa * a / e, "sth": ha * a / e, "stream": st, "mod": "dlm"})
+                    "r": float(z["R"][k]), "t1": int(z["tout"][k]), "st": sa * a / e, "sth": ha * a / e, "stream": st, "mod": "dlm",
+                    "mkt": 0 if int(z["kind"][k]) == 1 else 1})   # "mkt": the market fills of the trade (a take is a limit: 0)
     return out
 def orders(suf=None):
     out = []
@@ -46,6 +47,43 @@ def orders_exits(OR, take, soft, hard=3.0):
             f = bool(fl[k]); e = float(fill[k]) if f else x["lv"]
             out.append(dict(x, filled=f, t1h=int(t1h[k]), e=e, r=float(R[k]), t1=int(tout[k]), st=soft * x["atr"] / e, sth=hard * x["atr"] / e))
     out.sort(key=lambda o: o["t"]); return out
+# the liquidity (the user: "гибкую систему, с разным шагом урезания… универсальным модулем"): the coin's hourly turnover ($, the
+# median of the 24 h before) and its daily volatility (the std of the daily log returns of the 30 days before), from the
+# lab-store's 1h candles
+LQ = {}
+def liq_data(sym):
+    if sym not in LQ:
+        fn = os.path.join(M.ST, "data", "1h", f"{sym}.csv.gz")
+        if not os.path.exists(fn):
+            LQ[sym] = None; return None
+        a = np.loadtxt(fn, delimiter=",", ndmin=2, usecols=(0, 4, 5)); T = a[:, 0].astype(np.int64); C = a[:, 1]; Q = a[:, 2]
+        from numpy.lib.stride_tricks import sliding_window_view
+        med = np.full(len(Q), np.nan)
+        if len(Q) > 24: med[24:] = np.median(sliding_window_view(Q, 24), axis=1)[:-1]
+        d = T // 86400; st_ = np.flatnonzero(np.r_[True, d[1:] != d[:-1]]); dc = C[np.r_[st_[1:] - 1, len(C) - 1]]
+        lr = np.diff(np.log(np.maximum(dc, 1e-12))); sig = np.full(len(dc), np.nan)
+        if len(lr) > 30: sig[31:] = np.std(sliding_window_view(lr, 30), axis=1)[:-1] if len(lr) > 30 else np.nan
+        LQ[sym] = (T, med, d[st_], sig)
+    return LQ[sym]
+def liq_at(sym, t):
+    """(the hourly turnover $, the daily volatility) at t, or (None, None)"""
+    L = liq_data(sym)
+    if L is None: return None, None
+    T, med, D, sig = L; i = bisect.bisect_right(T, t) - 1; j = bisect.bisect_right(D, t // 86400) - 1
+    v = float(med[i]) if i >= 0 and np.isfinite(med[i]) and med[i] > 0 else None
+    s = float(sig[j]) if j >= 0 and np.isfinite(sig[j]) else None
+    return v, s
+def liq_steps(spec):
+    """"1:0.5/2:0.25/4:0" -> [(0.01, 0.5), (0.02, 0.25), (0.04, 0.0)]: above each share of the hourly turnover the position grows
+    at that rate (0 = no more)"""
+    return [(float(a) / 100, float(b)) for a, b in (x.split(":") for x in spec.split("/"))] if spec else []
+def liq_g(p, steps):
+    """the position's share of the hourly turnover after the cut (continuous, monotone): slope 1 up to the first step"""
+    out, prev, slope = 0.0, 0.0, 1.0
+    for th, sl in steps:
+        if p <= th: return out + (p - prev) * slope
+        out += (th - prev) * slope; prev, slope = th, sl
+    return out + (p - prev) * slope
 VOPEN = None
 def virt_open():
     """the bot's virtual ⚡ trades open at each hour (dlm_load_mult counts them): the pool's trades (dlm_pool's rules)"""
@@ -91,6 +129,9 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     # top-ups: "dep=AMT/DAYS/N" — AMT added every DAYS days, N times (the first one DAYS after the start); the drawdown is
     # measured on the account's unit value (a top-up after a fall does not hide it)
     dep = tuple(float(x) for x in kw["dep"].split("/")) if "dep" in kw else None; ndep = 0; units = 1.0
+    # the liquidity: "liq=1:0.5/2:0.25/4:0" the cut of a position by its share of the coin's hourly turnover (liq_g); "slip=Y" the
+    # square-root impact of every market fill: Y x the daily volatility x sqrt(the position / the daily turnover), off the trade's R
+    LS = liq_steps(kw.get("liq", "")); SLIP = float(kw.get("slip", 0)); n_cut = 0
     path = [] if kw.get("path") == "1" else None   # "path=1": the balance at every 30 days (before that day's top-up) + the end, a 5th value
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
     OR = [o for o in OR if A - 64 * 3600 <= o["t"] < B]; io = 0; act = []
@@ -115,6 +156,15 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             if room < hn * 0.1: return None, hn, room
             rd *= room / hn
         notional = rd / v["st"]
+        if LS or SLIP:
+            V_, s_ = liq_at(v["sym"], v.get("t0") or v["t"])
+            if V_ and LS:
+                p_ = notional / V_; q_ = liq_g(p_, LS)
+                if q_ < p_ * 0.999:
+                    k_ = q_ / p_; rd *= k_; notional *= k_
+            imp = (SLIP * s_ * (notional / (24 * V_)) ** 0.5) if (SLIP and V_ and s_) else 0.0
+        else:
+            imp = 0.0
         if notional < minn: return None, hn, room   # under Binance's minimum order: not opened
         mg = notional / M.lev_real(v["sym"], notional, cap); free = eq - sum(o["mg"] for o in pos) - sum(o["mg"] for o in armed.values())
         if nomg: mg = 0.0   # "nomg=1": the margin never short (what the free margin costs)
@@ -122,10 +172,11 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             if free <= 1: return None, hn, room
             q = 0.9 * free / mg; rd *= q; notional *= q; mg *= q
             if notional < minn: return None, hn, room
-        return {"rd": rd, "heat": rd * v["sth"] / v["st"], "mg": mg, "notional": notional}, hn, room
+        return {"rd": rd, "heat": rd * v["sth"] / v["st"], "mg": mg, "notional": notional, "imp": imp}, hn, room
     for h in range(A, B, 3600):
         for o in [o for o in pos if o["t1"] <= h]:
-            cash += o["rd"] * o["r"]; pos.remove(o)
+            nm_ = o["mkt"] if "mkt" in o else 1 + (o["r"] < 0)   # the market fills: ⚡ its exit unless a take; the others the entry + a stop
+            cash += o["rd"] * (o["r"] - nm_ * o.get("imp", 0.0) / o["st"]); pos.remove(o)
         upnl = 0.0
         for o in pos:
             p = M.px_at(o["sym"], h)
@@ -172,7 +223,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             if k_ in armed:
                 if touch:   # filled: the trade
                     a = armed.pop(k_); done.add(k_)
-                    if o["filled"] and o["t1h"] == h: pos.append(dict(o, **{x: a[x] for x in ("rd", "heat", "mg", "notional")})); n_fill += 1
+                    if o["filled"] and o["t1h"] == h: pos.append(dict(o, **{x: a[x] for x in ("rd", "heat", "mg", "notional", "imp")})); n_fill += 1
                 elif far: del armed[k_]
             elif near:
                 want.append((o, touch, s * (cl - o["lv"]) / o["atr"], cl))
