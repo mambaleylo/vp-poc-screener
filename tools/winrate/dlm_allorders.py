@@ -24,7 +24,7 @@ pr = dict(n_estimators=300, learning_rate=0.05, num_leaves=63, min_child_samples
           colsample_bytree=0.7, reg_lambda=5.0, verbose=-1, n_jobs=4)
 M = json.load(open("/home/user/vp-poc-screener/vp_dlm_model.json")); S = {s["name"]: s for s in M["streams"]}
 YEARS = range(2023, 2027)
-for stream in ("wick4h", "close2h"):
+for stream in os.environ.get("STREAMS", "wick4h,close2h").split(","):   # + the new charts (dlm_engine.STREAMS: the wick4h exits)
     rows = {k: [] for k in ("coin", "t", "F", "R", "tout")}
     for c, g in GROUP.items():
         if g != "train": continue
@@ -44,7 +44,7 @@ for stream in ("wick4h", "close2h"):
         sc_ref = np.mean([m.predict(D["F"][ref][:, :X_]) for X_, m in (MODELS.get(Y - 1) or ms)], axis=0)   # the previous year by its own model
         THR[Y] = float(np.quantile(sc_ref, 0.99)); THR[(Y, "keep")] = float(np.quantile(sc_ref, QK))
         print(stream, Y, "train", len(tr), "thr", round(THR[Y], 4), f"{time.time() - t0:.0f}s", flush=True)
-    st = S[stream]; p = DE.STREAMS[stream]; bs = p["hh"] * 3600; B = DE.btc_ctx(stream)
+    st = S.get(stream, S["wick4h"]); p = DE.STREAMS[stream]; bs = p["hh"] * 3600; B = DE.btc_ctx(stream)
     out = {k: [] for k in ("coin", "t", "side", "lv", "atr", "score", "thr", "filled", "t1h", "fill", "R", "kind", "tout", "grp")}
     for k, c in enumerate(C[os.environ.get("COINS", "base")]):   # COINS=new: the 226 new coins
         h1 = DE.load1h(c); ev = DE.features(c, stream, B, h1)
@@ -59,9 +59,7 @@ for stream in ("wick4h", "close2h"):
         keep = np.isfinite(sc) & (sc >= tk)
         ii = np.flatnonzero(keep)
         if not len(ii): continue
-        T1, O1, H1, L1, C1, V1 = h1
-        fl, t1h, fill, R, kind, tout = DE.fill_walk(T1, O1, H1, L1, C1, tsc[ii], ev["side"][ii].astype(np.int64), ev["lv"][ii], ev["atr"][ii], bs, p["ch"],
-                                                    DE.ALIVE, DE.HOLD, st["take_atr"], st["stop_atr"], st["hard_stop_atr"], DE.FEE_IN, DE.FEE_TAKE, DE.FEE_OUT, DE.FUND)
+        fl, t1h, fill, R, kind, tout = DE.walk(stream, h1, tsc[ii], ev["side"][ii], ev["lv"][ii], ev["atr"][ii], st["take_atr"], st["stop_atr"], st["hard_stop_atr"])
         for key, v in (("coin", np.full(len(ii), c)), ("t", tsc[ii]), ("side", ev["side"][ii]), ("lv", ev["lv"][ii]), ("atr", ev["atr"][ii]), ("score", sc[ii]),
                        ("thr", th[ii]), ("filled", fl), ("t1h", t1h), ("fill", fill), ("R", R), ("kind", kind), ("tout", tout), ("grp", np.full(len(ii), GROUP.get(c, "new")))):
             out[key].append(v)

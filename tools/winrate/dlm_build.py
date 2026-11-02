@@ -16,8 +16,8 @@ U = json.load(open(os.path.join(ST, "universe.json")))
 new = sorted({r[0] for r in U if not r[1] and r[2] <= 1759276800 and r[3] >= 1790812800 - 3 * 86400 and r[4] >= 50e6})
 coins = base + [c for c in new if c not in base]
 json.dump({"base": base, "new": [c for c in new if c not in base]}, open(os.path.join(ST, "feat_coins.json"), "w"))
-mine = coins[W::NW]
-for st in ("wick4h", "close2h"):
+mine = (base if os.environ.get("BASE_ONLY") else coins)[W::NW]   # BASE_ONLY=1: the bot's 210 only (the new charts' check)
+for st in os.environ.get("STREAMS", "wick4h,close2h").split(","):
     os.makedirs(f"{ST}/feat/{st}", exist_ok=True)
     B = E.btc_ctx(st)
     t0 = time.time()

@@ -12,11 +12,31 @@ from numba import njit
 
 DATA = os.environ.get("LABDATA", "/home/user/vp-lab-store/data/1h")
 STREAMS = {"wick4h": dict(hh=4, nb=3000, wick=True, depth=1.0, fam=2.0, ch=4),
-           "close2h": dict(hh=2, nb=4500, wick=False, depth=2.0, fam=0.0, ch=2)}
+           "close2h": dict(hh=2, nb=4500, wick=False, depth=2.0, fam=0.0, ch=2),
+           # the other charts tried as a third stream (the user: "какие таймфремы для лимиток ещё можно попробовать"): the 4h wick
+           # rule on the 4h grid shifted by 2 h (02-06, 06-10 … UTC: "off" hours), on 3h / 6h / 8h bars; ~500 days of the bot's window
+           "wick4h_o2": dict(hh=4, off=2, nb=3000, wick=True, depth=1.0, fam=2.0, ch=4),
+           "wick3h": dict(hh=3, nb=4000, wick=True, depth=1.0, fam=2.0, ch=3),
+           "wick6h": dict(hh=6, nb=2000, wick=True, depth=1.0, fam=2.0, ch=6),
+           "wick8h": dict(hh=8, nb=1500, wick=True, depth=1.0, fam=2.0, ch=8, minb=1500)}
 ALIVE, HOLD, TAKE, SOFT, HARD = 4, 32, 1.1, 2.0, 3.0
 DMIN, DMAX, MIN_BARS, MIN_SL_FRAC = 0.3, 6.0, 2000, 0.001
 FEE_IN, FEE_TAKE, FEE_OUT, FUND = 0.0002, 0.0002, 0.0005, 0.0003
 NF = 33
+
+
+def shift(h1, off):
+    """the 1h arrays with the times moved back by `off` hours (a shifted chart grid: its bars start at off, off + hh …)"""
+    return h1 if not off else (h1[0] - off * 3600,) + tuple(h1[1:])
+
+
+def walk(stream, h1, t0s, sides, lvs, atrs, take=None, soft=None, hard=None):
+    """fill_walk on the stream's own grid (a shifted one too) -> its outputs in real times"""
+    p = STREAMS[stream]; off = p.get("off", 0) * 3600; T1, O1, H1, L1, C1, V1 = h1
+    fl, t1h, fill, R, kind, tout = fill_walk(T1 - off, O1, H1, L1, C1, np.asarray(t0s) - off, np.asarray(sides, np.int64), lvs, atrs, p["hh"] * 3600,
+                                             p["ch"], ALIVE, HOLD, TAKE if take is None else take, SOFT if soft is None else soft,
+                                             HARD if hard is None else hard, FEE_IN, FEE_TAKE, FEE_OUT, FUND)
+    return fl, np.where(fl, t1h + off, 0), fill, R, kind, np.where(fl, tout + off, 0)
 
 
 def load1h(bsym):
@@ -127,7 +147,7 @@ def daily(T, H, L, C):
 def btc_ctx(stream):
     """BTC's chart bars and its daily context for the stream (the same for every coin)"""
     p = STREAMS[stream]
-    T1, O1, H1, L1, C1, V1 = load1h("BTCUSDT")
+    T1, O1, H1, L1, C1, V1 = shift(load1h("BTCUSDT"), p.get("off", 0))
     bT, bO, bH, bL, bC, bV = chart(T1, O1, H1, L1, C1, V1, p["hh"])
     batr = wilder(bH, bL, bC)
     dd, dH, dL, dC = daily(bT, bH, bL, bC)
@@ -137,11 +157,11 @@ def btc_ctx(stream):
 def features(bsym, stream, B=None, h1=None):
     """the coin's ⚡ limits of the stream that pass the bot's filters: arrays of the bar (its open time), side, the level,
     the ATR, the 33 features"""
-    p = STREAMS[stream]; hh, nb = p["hh"], p["nb"]; bs = hh * 3600
-    T1, O1, H1, L1, C1, V1 = h1 if h1 is not None else load1h(bsym)
+    p = STREAMS[stream]; hh, nb = p["hh"], p["nb"]; bs = hh * 3600; off = p.get("off", 0); minb = p.get("minb", MIN_BARS)
+    T1, O1, H1, L1, C1, V1 = shift(h1 if h1 is not None else load1h(bsym), off)   # a shifted grid: everything on it, "t" back at the end
     T, O, H, L, C, V = chart(T1, O1, H1, L1, C1, V1, hh)
     n = len(C)
-    if n < MIN_BARS + 1:
+    if n < minb + 1:
         return None
     B = B or btc_ctx(stream)
     atr = wilder(H, L, C)
@@ -184,7 +204,7 @@ def features(bsym, stream, B=None, h1=None):
     ups = H - np.maximum(O, C); dns = np.minimum(O, C) - L
     out = {k: [] for k in ("i", "t", "side", "lv", "atr", "f")}
     idx = np.arange(n)
-    ok = (idx >= MIN_BARS - 1) & (atr > 0) & (ndays >= 15) & (kd >= 0) & (bj >= 96) & (bkd >= 0) & np.isfinite(vs) & (idx >= 96)
+    ok = (idx >= minb - 1) & (atr > 0) & (ndays >= 15) & (kd >= 0) & (bj >= 96) & (bkd >= 0) & np.isfinite(vs) & (idx >= 96)
     sinces = {s: since_all(H, L, C, atr, s, p["depth"], p["wick"], nb) for s in (1, -1)}
     for s in (1, -1):
         sf = float(s)
@@ -221,7 +241,7 @@ def features(bsym, stream, B=None, h1=None):
     if not out["i"]:
         return None
     r = {k: np.concatenate(v) for k, v in out.items()}
-    o = np.argsort(r["t"], kind="stable")
+    o = np.argsort(r["t"], kind="stable"); r["t"] = r["t"] + off * 3600
     return {k: v[o] for k, v in r.items()} | {"bs": bs, "stream": stream}
 
 
@@ -281,9 +301,7 @@ def coin(bsym, stream, B=None):
     if ev is None:
         return None
     p = STREAMS[stream]; bs = ev["bs"]
-    T1, O1, H1, L1, C1, V1 = h1
-    fl, t1h, fill, R, kind, tout = fill_walk(T1, O1, H1, L1, C1, ev["t"] + bs, ev["side"].astype(np.int64), ev["lv"], ev["atr"],
-                                             bs, p["ch"], ALIVE, HOLD, TAKE, SOFT, HARD, FEE_IN, FEE_TAKE, FEE_OUT, FUND)
+    fl, t1h, fill, R, kind, tout = walk(stream, h1, ev["t"] + bs, ev["side"], ev["lv"], ev["atr"])
     keep = fl
     return {"t": ev["t"][keep] + bs, "side": ev["side"][keep].astype(np.int8), "lv": ev["lv"][keep], "atr": ev["atr"][keep],
             "F": ev["f"][keep].astype(np.float32), "t1h": t1h[keep], "fill": fill[keep], "R": R[keep].astype(np.float32),
