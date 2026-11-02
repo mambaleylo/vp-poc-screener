@@ -15,7 +15,7 @@ from lv_wf import load_dir, ts
 import lv_engine as LE
 ST = os.environ.get("LABSTORE", "/home/user/vp-lab-store")
 BASE = dict(ev="lv2", q=0.993, reach=1.5, stop=1.0, hard=2.0, take=3.0, hold=96, kh=4, be=2.0, pf=0.0, cap=12, sides=(1, -1),
-            deep=0.0, fams=None, xs=None, coins="bot")
+            deep=0.0, fams=None, xs=None, coins="bot", d26=False)
 VARS = {
     "base": {},
     "t0": dict(ev="lv2_t0"),                                                           # any touch (the bot's market entry fires on it)
@@ -30,6 +30,7 @@ VARS = {
     "no4h": dict(fams=("fvgd", "fvgw", "swd", "sww", "obd")), "nofvg4": dict(fams=("fvgd", "fvgw", "swd", "sww", "obd", "ob4")),
     "xsc": dict(xs=(1.3, 0.8)),                                                        # the risk by the score (top half of the picks x1.3)
     "c210": dict(coins="all"),                                                         # + the 83 check coins ⚡ trades (never trained on)
+    "d26": dict(d26=True),                                                             # 2026 by the bot's own model and thr (what it trades)
 }
 DD = {}
 def events(dr):
@@ -72,7 +73,16 @@ def walk(O, H, L, C, Tb, j, s, fill, risk, hard, take, hold, kh, be, pf):
 def build(p):
     D = events(p["ev"]); T, SIDE, SYM, LV, J, DATR, fam, SC, yr = D["T"], D["SIDE"], D["SYM"], D["LV"], D["J"], D["DATR"], D["fam"], D["SC"], D["yr"]
     thr = np.array([np.quantile(D["THR"][Y], p["q"]) if Y in D["THR"] else np.inf for Y in range(1970, 2030)])
-    ok = (fam >= 33) & (D["BOT"] if p["coins"] == "bot" else True) & np.isfinite(SC) & (SC >= thr[np.clip(yr - 1970, 0, 59)]) & (T >= ts(2022)) & np.isin(SIDE, p["sides"])
+    PASS = np.isfinite(SC) & (SC >= thr[np.clip(yr - 1970, 0, 59)])
+    if p["d26"]:   # 2026: the deployed model's scores against its own thr (the bot trades exactly that model)
+        if "SC26" not in D:
+            import treevec as TV
+            Mm = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "vp_smc_model.json")))
+            mods = Mm["models"] if isinstance(Mm["models"], list) else list(Mm["models"].values())
+            w = np.flatnonzero((fam >= 33) & (T >= ts(2026))); s26 = np.full(len(T), np.nan)
+            s26[w] = TV.model_score(mods, D["F"][w].astype(float)); D["SC26"] = s26; D["THR26"] = float(Mm["thr"])
+        y26 = T >= ts(2026); PASS = np.where(y26, np.nan_to_num(D["SC26"], nan=-9) >= D["THR26"], PASS)
+    ok = (fam >= 33) & (D["BOT"] if p["coins"] == "bot" else True) & PASS & (T >= ts(2022)) & np.isin(SIDE, p["sides"])
     if p["fams"]: ok &= np.isin(np.array([LE.FAMS[f].split("_")[0] for f in range(len(LE.FAMS))])[fam], p["fams"])
     idx = np.where(ok)[0]
     FILL = LV * (1 - SIDE * p["deep"] * DATR / 100)
