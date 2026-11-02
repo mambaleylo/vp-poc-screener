@@ -21271,3 +21271,7 @@ v0.99.759 — ⚡ 4h on a new model; the honest header
 - The header re-counted on the bot's real ⚡ models (money_expect4.py, ALLSUF=_clr): the bundle + HTF a year from $100 —
   bad ~$3.5k · usual ~$35.8k · good ~$201k, drawdown ~68%, the last 12 months ~$105k (was shown $6.6k / $39.7k / $269k —
   the lab's models, never traded; the real old bot ~$2.6k / $24.1k).
+
+v0.99.760 — the header shows the last 12 months too
+- The user didn't see where 2026's money went: the header shows the bad / usual / good year (the median of 144 windows
+  2023-02..2025-10) — now also "последние 12 мес ~$105k" (Oct 2025 – Oct 2026, from the same money run).

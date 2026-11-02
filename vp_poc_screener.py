@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.759"
+APP_VERSION = "0.99.760"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -45586,7 +45586,7 @@ if ('serviceWorker' in navigator) { try { navigator.serviceWorker.register('/sw.
     const r = await (await fetch('/api/boot', {cache: 'no-store'})).json(), e = r.expect;
     if (!e) return;
     const k = v => v >= 1000 ? '$' + (v / 1000).toFixed(v >= 10000 ? 0 : 1).replace('.', ',') + 'k' : '$' + v;
-    document.getElementById('hdrExpect').innerHTML = `📈 ${e.kind === 'bundle_htf' ? '⚡ + P/R + SMC + EMA + HTF' : (e.kind === 'bundle' ? '⚡ + P/R + SMC + EMA' : '⚡')} за год со $100 по истории: плохой год ~${k(e.p10)} · обычный ~${k(e.p50)} · хороший ~${k(e.p90)} · просадки ~${e.dd}% · вживую ждите меньше`;
+    document.getElementById('hdrExpect').innerHTML = `📈 ${e.kind === 'bundle_htf' ? '⚡ + P/R + SMC + EMA + HTF' : (e.kind === 'bundle' ? '⚡ + P/R + SMC + EMA' : '⚡')} за год со $100 по истории: плохой год ~${k(e.p10)} · обычный ~${k(e.p50)} · хороший ~${k(e.p90)} · просадки ~${e.dd}%${e.last12 ? ` · последние 12 мес ~${k(e.last12)}` : ''} · вживую ждите меньше`;
   } catch (err) {}
 })();
 
