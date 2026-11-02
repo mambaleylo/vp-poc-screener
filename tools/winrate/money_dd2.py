@@ -8,10 +8,13 @@ ARGV, sys.argv = sys.argv[1:], sys.argv[:1]
 import money_arm2 as MA2, money_multi as M, money_expect as X, money_wk as WK
 from multiprocessing import Pool
 BASE = "Bn|arm=0.6|oth=1|dis=1.0|cap=125|slip=1|liq=4:0.5/8:0.25/12:0|heat=1.0"; K = int(ARGV[0]) if ARGV else 4; STARTS = X.STARTS[::2]
-VARS = {"как в боте": ("", False), "хедж 8+/100%, обе стороны": ("|hedge=8/1.0", False), "хедж 8+/100%, только против лонгов": ("|hedge=8/1.0|hside=1", False),
-        "хедж 8+/100%, только против шортов": ("|hedge=8/1.0|hside=-1", False), "хедж 10+/100%": ("|hedge=10/1.0", False),
-        "хедж 12+/100%": ("|hedge=12/1.0", False), "хедж 8+/50%": ("|hedge=8/0.5", False), "хедж 8+/75%": ("|hedge=8/0.75", False)}
-if os.environ.get("ROUND") != "3": VARS = {"как в боте": ("", False), "хедж BTC: 1+ в сторону, 100% объёма": ("|hedge=1/1.0", False)}   # (round 2's rows: money_dd2.json)
+VARS = {"как в боте": ("", False), "хедж 8+/100%, обе стороны": ("|hedge=8/1.0", False), "хедж 10+/100%": ("|hedge=10/1.0", False),
+        "хедж 8+/100%, лишь когда куча в минусе ≥0.3R": ("|hedge=8/1.0|hloss=0.3", False), "хедж 8+/100%, куча в минусе ≥0.5R": ("|hedge=8/1.0|hloss=0.5", False),
+        "хедж 5+/100%, куча в минусе ≥0.5R": ("|hedge=5/1.0|hloss=0.5", False), "хедж 5+/100%, куча в минусе ≥0.3R": ("|hedge=5/1.0|hloss=0.3", False),
+        "хедж 3+/100%, куча в минусе ≥0.5R": ("|hedge=3/1.0|hloss=0.5", False)}
+if os.environ.get("ROUND") == "4": pass
+elif os.environ.get("ROUND") == "3": VARS = {"как в боте": ("", False)}   # (round 3's rows: money_dd3.json)
+if os.environ.get("ROUND") not in ("3", "4"): VARS = {"как в боте": ("", False), "хедж BTC: 1+ в сторону, 100% объёма": ("|hedge=1/1.0", False)}   # (round 2's rows: money_dd2.json)
 _D = {}
 def _init(D): _D.update(D)
 def job(a):

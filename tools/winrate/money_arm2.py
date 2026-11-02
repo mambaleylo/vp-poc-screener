@@ -154,6 +154,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         return False
     # "hedge=N/F": while N+ ⚡ positions are open on one side, a BTC perpetual the other way at F x their notional (re-sized every
     # hour, 0.05% a side on the change, its margin at 20x counted)
+    HLOSS = float(kw.get("hloss", 0))   # "hloss=X": the hedge only while the side's open ⚡ are down X R a position on average (unrealized)
     HSIDE = int(kw.get("hside", 0))   # "hside=1": hedge only the crowd of ⚡ longs (BTC short), -1 only the shorts' (BTC long)
     HG = tuple(float(x) for x in kw["hedge"].split("/")) if "hedge" in kw else None; HDG = {"n": 0.0, "px": None}   # (a dict: fit() reads it)
     curve = [] if kw.get("curve") == "1" else None   # "curve=1": (hour, equity, open ⚡ longs, shorts, others) every 6 h, the last value
@@ -213,7 +214,15 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
                 HDG["px"] = bp; tgt = 0.0
                 for sd in ((HSIDE,) if HSIDE else (1, -1)):
                     side_pos = [o for o in pos if o["mod"] == "dlm" and o["side"] == sd]
-                    if len(side_pos) >= HG[0]: tgt -= sd * HG[1] * sum(o["notional"] for o in side_pos)
+                    if len(side_pos) >= HG[0]:
+                        if HLOSS:
+                            pl = 0.0
+                            for o in side_pos:
+                                p_ = M.px_at(o["sym"], h)
+                                if p_: pl += o["side"] * (p_ - o["e"]) / o["e"] * o["notional"]
+                            if pl > -HLOSS * sum(o["rd"] for o in side_pos):   # the side's average unrealized R above -X: no hedge
+                                continue
+                        tgt -= sd * HG[1] * sum(o["notional"] for o in side_pos)
                 cash -= abs(tgt - HDG["n"]) * 0.0005; HDG["n"] = tgt
         eq = cash + upnl
         if eq <= 0: return (0.0, 1.0, n_fill, n_skip) + ((path + [0.0] * (13 - len(path)),) if path is not None else ())
