@@ -21350,3 +21350,14 @@ v0.99.766 — the universal liquidity cut of the position size
   ликвидности": on / off, own steps as text (empty = the version's default, so a later default reaches every phone; a bad
   one refused), the last cut positions (/api/liq).
 - t_liq: the steps parsed / refused, the slope, a small / large / liquid position, off, no turnover, the settings, the page.
+
+v0.99.767 — the header and the ⚡ tab's money re-counted once, on the bot as it trades now
+- The user: "как закончим с 4ч со сдвигом и внедрили пересчитаем шапку". tools/winrate money_hdr2.py: ⚡ 4h + 2h + the shifted 4h
+  (score >= 1.05, risk x0.75), the liquidity cut 4:0.5/8:0.25/12:0, the square-root impact of every market fill (never in the
+  numbers before), the 2h orders rebuilt on the clean candles (the old ones on candles with lost months: overstated), the
+  median of 4 runs each dropping 5% of the trades (one path swings the usual year x2).
+- The header (the bundle + HTF, a year from $100): bad ~$9.7k · usual ~$38.6k · good ~$179k · drawdowns ~81% · the last 12
+  months ~$114k (was $3.5k / $35.8k / $201k / 68% / $105k); the bundle without HTF $8.7k / $35.1k / $144k / 81% / $92k; ⚡ alone
+  $1.0k / $4.2k / $25.7k / 82% / $24.1k. The ⚡ tab: the median $4.2k (cautious $2.7k), the worst 10% $1.0k, the last 12 months
+  $24.1k, below $100 at 6 months in 3% of the windows (was $7.2k / $4.9k / $2.8k / $11.4k / 0%).
+- t_hdr_htf reads the numbers from the bot.

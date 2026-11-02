@@ -7,7 +7,7 @@ with V.app.test_client() as c:
         V.BN_OTHERS, V.AUTOTRADE_ENABLED_HTF = bn, htf
         e = c.get("/api/boot").get_json()["expect"]; out[(bn, htf)] = (e["kind"], e["p50"])
 print(out)
-ok = (out[(False, False)][0] == out[(False, True)][0] == "dlm" and out[(True, False)] == ("bundle", 34654) and out[(True, True)] == ("bundle_htf", 35767))
+ok = (out[(False, False)][0] == out[(False, True)][0] == "dlm" and out[(True, False)] == ("bundle", V.EXPECT_YEAR["bundle"]["p50"]) and out[(True, True)] == ("bundle_htf", V.EXPECT_YEAR["bundle_htf"]["p50"]))   # v0.99.767 — the numbers from the bot itself
 src = open("/home/user/vp-poc-screener/vp_poc_screener.py").read()
 ok &= "e.kind === 'bundle_htf' ? '⚡ + P/R + SMC + EMA + HTF'" in src
 print("ALL OK" if ok else "FAILED"); sys.exit(0 if ok else 1)

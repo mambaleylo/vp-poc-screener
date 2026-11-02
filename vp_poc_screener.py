@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.766"
+APP_VERSION = "0.99.767"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28650,9 +28650,12 @@ _PROC_START = time.time()
 # v0.99.759 — the HONEST header: until now the money ran ⚡ with the lab's models while the bot traded the research-engine ones
 # (money_4h.py: those make ~$24k, not ~$40k); now ⚡ 4h = the lab's model (deployed in this version), 2h = the deployed one
 # (its research-engine rebuild, corr 0.99): money_expect4.py with ALLSUF=_clr
-EXPECT_YEAR = {"dlm": {"p10": 252, "p50": 2766, "p90": 30595, "dd": 72, "last12": 16346},
-               "bundle": {"p10": 3867, "p50": 34654, "p90": 175047, "dd": 70, "last12": 82657},
-               "bundle_htf": {"p10": 3544, "p50": 35767, "p90": 201378, "dd": 68, "last12": 105463}}
+# v0.99.767 — re-counted once on the bot as it trades from v0.99.766 (tools/winrate money_hdr2.py: ⚡ 4h + 2h + the shifted 4h, the
+# liquidity cut, the square-root impact of every market fill — never in the numbers before; the median of 4 runs dropping 5% of
+# the trades: one path swings the usual year x2). Was the old 2h orders built on candles with lost months (overstated).
+EXPECT_YEAR = {"dlm": {"p10": 963, "p50": 4213, "p90": 25659, "dd": 82, "last12": 24107},
+               "bundle": {"p10": 8733, "p50": 35064, "p90": 144278, "dd": 81, "last12": 92071},
+               "bundle_htf": {"p10": 9711, "p50": 38614, "p90": 178832, "dd": 81, "last12": 113523}}
 
 
 @app.route("/api/boot")
@@ -47378,7 +47381,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
       ${zBars(rows, v => sgR(+(+v).toFixed(3)))}
       <div class="zstrip"><span>WR <b>~${un.wr || 70}%</b></span><span>в среднем <b>${sgR(un.avg || 0.235)}</b></span><span>последние 12 мес <b>${sgR(un.last12_avg || 0.24)}</b></span><span><b>~${rs.trades_pm || 65}</b> сделок в месяц${rs.trades_pm ? ' (последние 12 мес, виртуально по правилам бота)' : ''}</span></div>
       ${d.streams && (d.streams.wick4h.n || d.streams.close2h.n || (d.streams.wick4h_o2 || {}).n) ? `<div class="dim" style="font-size:var(--fs-xs);">живые: ${[['wick4h', '4ч'], ['close2h', '2ч'], ['wick4h_o2', '4ч со сдвигом']].filter(([k]) => d.streams[k]).map(([k, nm]) => `${nm} ${d.streams[k].n} (${d.streams[k].n ? sgR(d.streams[k].avg) + ', WR ' + d.streams[k].wr + '%' : '—'})`).join(' · ')}</div>` : ''}
-      <div class="zsub hintx">Сделки посчитаны по часовым свечам Binance: стоп — только если свеча своего графика (4ч у 4ч-сделок, 2ч у 2ч) закрылась за ним; фитили и часовые закрытия за стопом не выбивают, от обвала — аварийный стоп 3 ATR на бирже. Деньги, оба вида вместе, до ${mo.pos || 20} сделок по ${mo.risk || 4}%${(m && m.load_risk) ? ` (риск по загрузке: пока открыто меньше ${m.load_risk.n} сделок ⚡ — ×${m.load_risk.lo}, дальше ×${m.load_risk.hi}: сделки общего прострела рынка на истории вдвое лучше одиночных)` : ''}${(m && m.osc_risk) ? ` и по дневному WaveTrend (осциллятор LazyBear с TradingView): монета на дневке сильно растянута против сделки — ×${m.osc_risk.up}${m.osc_risk.dn != null && m.osc_risk.dn != 1 ? `, растянута в её сторону — ×${m.osc_risk.dn}` : ''}` : ''} с плечом, как у бота (ликвидация в ${mo.liq_buf || 1.25}× дальше аварийного стопа — маржа ограничивает число сделок), без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 7189)}</b>, худшие 10% ~${usd(mo.year_p10 || 2783)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 4926)}), последние 12 месяцев ~${usd(mo.last12 || 11387)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
+      <div class="zsub hintx">Сделки посчитаны по часовым свечам Binance: стоп — только если свеча своего графика (4ч у 4ч-сделок, 2ч у 2ч) закрылась за ним; фитили и часовые закрытия за стопом не выбивают, от обвала — аварийный стоп 3 ATR на бирже. Деньги, все виды вместе (4ч со сдвигом — с риском ×${d.o2_risk != null ? d.o2_risk : 0.75}), с проскальзыванием рыночных стопов и урезанием по ликвидности, до ${mo.pos || 20} сделок по ${mo.risk || 4}%${(m && m.load_risk) ? ` (риск по загрузке: пока открыто меньше ${m.load_risk.n} сделок ⚡ — ×${m.load_risk.lo}, дальше ×${m.load_risk.hi}: сделки общего прострела рынка на истории вдвое лучше одиночных)` : ''}${(m && m.osc_risk) ? ` и по дневному WaveTrend (осциллятор LazyBear с TradingView): монета на дневке сильно растянута против сделки — ×${m.osc_risk.up}${m.osc_risk.dn != null && m.osc_risk.dn != 1 ? `, растянута в её сторону — ×${m.osc_risk.dn}` : ''}` : ''} с плечом, как у бота (ликвидация в ${mo.liq_buf || 1.25}× дальше аварийного стопа — маржа ограничивает число сделок), без выводов, осторожно (каждая сделка на 0.025R хуже бэктеста): за год со $100 медиана <b>~${usd(mo.year_median || 7189)}</b>, худшие 10% ~${usd(mo.year_p10 || 2783)} (если сделки ещё хуже — медиана ~${usd(mo.harsh_median || 4926)}), последние 12 месяцев ~${usd(mo.last12 || 11387)}; через 6 месяцев ниже $100 — ${mo.m6_below != null ? mo.m6_below : 0}% стартов 2024–26. Стопы идут пачками (монеты падают вместе) — поэтому много мелких сделок, а не одна крупная.</div>
       <div class="zbanner warn hintx">Просадка: при обвале рынка счёт может временно упасть на 60–70% от пика — 24–25 мая 2025 за два дня стопы закрыли 19 сделок 4ч (−19R, при 4% на сделку это около −50%), с 2ч сделками просадки ещё глубже. Потом счёт восстанавливался, но к такому надо быть готовым и не повышать риск после серии стопов.</div>
       ${d.risk_set && d.risk_set > 6 ? `<div class="zbanner warn">Риск ${d.risk}% на сделку при до ${d.max_pos || 20} сделок сразу — это до ${Math.round(d.risk * (d.max_pos || 20))}% счёта под стопами одновременно. Лучше всего по деньгам — 3–4%: выше денег даже меньше (маржи хватает на меньшее число сделок), а просадки глубже.</div>` : ''}
       ${d.auto ? '' : `<div class="zbanner warn">Сейчас только виртуально. Реальные лимитки на ${d.binance ? 'Binance' : 'Gate'} (бот держит их у себя и выставляет на бирже, когда цена подошла на 1 ATR — так места и маржа не заняты далёкими лимитками) — переключатель «↳ ⚡ Лимитки 4ч+2ч» в автоторговле; риск — поле «⚡» (пусто = 4.5%). Вход по рынку после касания съел бы плюс, поэтому только настоящие лимитки.</div>`}`;
