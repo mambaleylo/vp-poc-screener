@@ -98,7 +98,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
                 n_ = sum(1 for o in pos if o["mod"] == "dlm") + len(armed)
             r *= ld[0] if n_ < ld[2] else ld[1]
             v = dict(v, t0=v.get("t0") or v["t"] + 3600)
-        return eq * r * WF(v)
+        return eq * r * WF(v) * v.get("xm", 1.0)   # "xm": a per-trade risk multiplier (money_wk.py), 1 = as the bot
     def used(): return sum(o["heat"] for o in pos) + hf * sum(o["heat"] for o in armed.values())
     def sused(s): return sum(o["heat"] for o in pos if o["side"] == s) + hf * sum(a["heat"] for a in armed.values() if a["o"]["side"] == s)
     def fit(v, eq, extra=0.0):
