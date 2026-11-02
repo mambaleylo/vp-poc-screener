@@ -5,6 +5,7 @@ filters, the nearer touch first, the stop at a 4h close 0.75 dATR, the emergency
 st, sth, mod "emx", sym, side, e); tools/winrate money_ema.py judges them in the bundle's strictest money.
 usage: python3 ema_var.py [names…]   (from tools/ema_model; mfeat's metrics read from the lab-store)"""
 import os, sys, json, numpy as np, pandas as pd
+ARGV = sys.argv[1:]   # common.py (via ema_h) resets sys.argv
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "new_data"))
 import ema_h as E
 from mk import ts
@@ -92,9 +93,11 @@ def build(p):
         out.append(x)
     return out
 if __name__ == "__main__":
-    names = sys.argv[1:] or list(VARS)
+    names = ARGV or list(VARS)
     for nm in names:
-        p = dict(BASE, **VARS[nm]); L = build(p); r = np.array([x["r"] for x in L])
+        p = dict(BASE)
+        for part in nm.split("+"): p.update(VARS[part])   # "a+b": the variants combined
+        L = build(p); r = np.array([x["r"] for x in L])
         yrs = " ".join(f"{Y}: {int(((np.array([x['t0'] for x in L]) >= ts(Y)) & (np.array([x['t0'] for x in L]) < ts(Y + 1))).sum())}"
                        f" {r[(np.array([x['t0'] for x in L]) >= ts(Y)) & (np.array([x['t0'] for x in L]) < ts(Y + 1))].mean():+.2f}" for Y in (2022, 2023, 2024, 2025, 2026))
         print(f"{nm:8s}: {len(L)} сделок, {r.mean():+.3f}R, WR {(r > 0).mean() * 100:.0f}% | {yrs}", flush=True)
