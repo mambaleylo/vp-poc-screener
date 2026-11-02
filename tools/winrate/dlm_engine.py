@@ -32,11 +32,11 @@ def shift(h1, off):
     return h1 if not off else (h1[0] - off * 3600,) + tuple(h1[1:])
 
 
-def walk(stream, h1, t0s, sides, lvs, atrs, take=None, soft=None, hard=None):
+def walk(stream, h1, t0s, sides, lvs, atrs, take=None, soft=None, hard=None, hold=None):
     """fill_walk on the stream's own grid (a shifted one too) -> its outputs in real times"""
     p = STREAMS[stream]; off = p.get("off", 0) * 3600; T1, O1, H1, L1, C1, V1 = h1
     fl, t1h, fill, R, kind, tout = fill_walk(T1 - off, O1, H1, L1, C1, np.asarray(t0s) - off, np.asarray(sides, np.int64), lvs, atrs, p["hh"] * 3600,
-                                             p["ch"], ALIVE, HOLD, TAKE if take is None else take, SOFT if soft is None else soft,
+                                             p["ch"], ALIVE, HOLD if hold is None else hold, TAKE if take is None else take, SOFT if soft is None else soft,
                                              HARD if hard is None else hard, FEE_IN, FEE_TAKE, FEE_OUT, FUND)
     return fl, np.where(fl, t1h + off, 0), fill, R, kind, np.where(fl, tout + off, 0)
 
