@@ -82,6 +82,10 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     # minus the other's <= X (the alts fall with BTC together: the drawdown is the side's, not the total's)
     sh = float(kw.get("sh", 0)); net = float(kw.get("net", 0))
     nomg = kw.get("nomg") == "1"
+    # top-ups: "dep=AMT/DAYS/N" — AMT added every DAYS days, N times (the first one DAYS after the start); the drawdown is
+    # measured on the account's unit value (a top-up after a fall does not hide it)
+    dep = tuple(float(x) for x in kw["dep"].split("/")) if "dep" in kw else None; ndep = 0; units = 1.0
+    path = [] if kw.get("path") == "1" else None   # "path=1": the balance at every 30 days (before that day's top-up) + the end, a 5th value
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
     OR = [o for o in OR if A - 64 * 3600 <= o["t"] < B]; io = 0; act = []
     OT = sorted(OT, key=lambda v: v["t0"]); jo = bisect.bisect_left([v["t0"] for v in OT], A)
@@ -121,11 +125,14 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             p = M.px_at(o["sym"], h)
             if p: upnl += o["side"] * (p - o["e"]) / o["e"] * o["notional"]
         eq = cash + upnl
-        if eq <= 0: return 0.0, 1.0, n_fill, n_skip
-        peak = max(peak, eq); mdd = max(mdd, 1 - eq / peak)
+        if eq <= 0: return (0.0, 1.0, n_fill, n_skip) + ((path + [0.0] * (13 - len(path)),) if path is not None else ())
+        if path is not None and h >= A + (len(path) + 1) * 30 * 86400: path.append(eq)
+        if dep and ndep < dep[2] and h >= A + (ndep + 1) * dep[1] * 86400:
+            units += dep[0] / (eq / units); cash += dep[0]; eq += dep[0]; ndep += 1
+        nav = eq / units; peak = max(peak, nav); mdd = max(mdd, 1 - nav / peak)
         if ddc:
-            if not cut_on and eq < peak * (1 - ddc[0]): cut_on = True
-            elif cut_on and eq >= peak * (1 - ddc[2]): cut_on = False
+            if not cut_on and nav < peak * (1 - ddc[0]): cut_on = True
+            elif cut_on and nav >= peak * (1 - ddc[2]): cut_on = False
         if pz:
             eqh.append((h, eq))
             while eqh and eqh[0][0] < h - pz[0] * 86400: eqh.popleft()
@@ -198,7 +205,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     for o in pos:
         p = M.px_at(o["sym"], B)
         if p: upnl += o["side"] * (p - o["e"]) / o["e"] * o["notional"]
-    return cash + upnl, mdd, n_fill, n_skip
+    return (cash + upnl, mdd, n_fill, n_skip) + ((path + [cash + upnl],) if path is not None else ())
 _D = {}
 def _init(D): _D.update(D)
 def job(a):
