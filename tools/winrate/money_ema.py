@@ -17,7 +17,8 @@ def keep(v, k):   # the paired drop: the same trade -> the same fate in every va
 def var_list(nm):
     if nm == "bot": return [v for v in M.build("base") if v["mod"] == "emx"]
     out = []
-    for x in json.load(open(f"{M.ST}/wf/ema_var_{nm}.json")):
+    fn = f"ema211_var_{nm[4:]}" if nm.startswith("211_") else f"ema_var_{nm}"   # "211_<name>": the list on the 210 coins (/home/user/ema211)
+    for x in json.load(open(f"{M.ST}/wf/{fn}.json")):
         sym = M.bn(x["sym"])
         if sym: out.append(dict(x, sym=sym, r=float(x["r"]) - 0.03))
     return out
