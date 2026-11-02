@@ -1,4 +1,4 @@
-import os, sys, io, zipfile, urllib.request, concurrent.futures as cf, csv, json
+import os, sys, io, time, zipfile, urllib.request, urllib.error, concurrent.futures as cf, csv, json
 B = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision/data/futures/um/monthly/klines"
 COINS = """BTC ETH BNB SOL XRP DOGE ADA AVAX LINK DOT TRX LTC BCH ATOM NEAR UNI ETC FIL APT ARB OP INJ SUI SEI TIA AAVE MKR LDO CRV SNX
 COMP RUNE SAND MANA AXS GALA APE CHZ ENJ IMX FTM GRT ALGO XLM VET EOS XTZ THETA EGLD FLOW KAVA ZEC DASH NEO QTUM ICP STX HBAR WLD
@@ -19,18 +19,25 @@ def get(sym, mo):
         rows = [r for d in days if d for r in d] or None
     return rows
 def get1(url):
-    try:
-        with urllib.request.urlopen(url, timeout=60) as r:
-            z = zipfile.ZipFile(io.BytesIO(r.read()))
-        rows = []
-        for line in z.read(z.namelist()[0]).decode().splitlines():
-            p = line.split(",")
-            if not p[0].isdigit():
-                continue
-            rows.append((int(p[0]) // 1000, float(p[1]), float(p[2]), float(p[3]), float(p[4]), float(p[7])))
-        return rows
-    except Exception as e:
-        return None
+    for k in range(6):   # a network error -> retried (it used to drop a whole month silently); 404 = no such file
+        try:
+            with urllib.request.urlopen(url, timeout=60) as r:
+                return parse(r.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 404: return None
+        except Exception:
+            pass
+        time.sleep(2 ** k)
+    raise RuntimeError(f"не скачалось: {url}")
+def parse(raw):
+    z = zipfile.ZipFile(io.BytesIO(raw))
+    rows = []
+    for line in z.read(z.namelist()[0]).decode().splitlines():
+        p = line.split(",")
+        if not p[0].isdigit():
+            continue
+        rows.append((int(p[0]) // 1000, float(p[1]), float(p[2]), float(p[3]), float(p[4]), float(p[7])))
+    return rows
 def coin(c):
     sym = c + "USDT"
     fn = f"{OUT}/{sym}.csv"

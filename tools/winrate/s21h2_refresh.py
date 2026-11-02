@@ -28,7 +28,9 @@ F2 = np.concatenate(F2)
 T, SD, SYM, K, R = D["t"], D["side"], D["sym"], D["K"][EX], D["R"][EX]; TR = ~D["chk"]; y = np.clip(R, -1.5, 1.5)
 X1 = D["F"]; X2 = np.concatenate([D["F"], F2[:, [0, 1, 2, 5, 8]]], axis=1)
 # the label needs the exit inside the data: the events closed (K hours) before the last bar
-END = int(T.max()); OK = T + K.astype(np.int64) * 3600 <= END
+# (EVAL_END=2026-10-28: Binance has no daily archive of 2026-10-28 — the events up to that hole only)
+END = ts(*map(int, os.environ["EVAL_END"].split("-"))) if os.environ.get("EVAL_END") else int(T.max())
+OK = T + K.astype(np.int64) * 3600 <= END
 print(f"событий d2: {len(T)}, последнее {np.datetime64(END, 's')}, проверочных монет {len(set(SYM[~TR]))} из {len(D['names'])}", flush=True)
 pr = dict(n_estimators=300, learning_rate=0.05, num_leaves=63, min_child_samples=1000, subsample=0.7, subsample_freq=1,
           colsample_bytree=0.7, reg_lambda=5.0, verbose=-1, n_jobs=4)
