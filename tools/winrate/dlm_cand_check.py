@@ -12,8 +12,8 @@ def bn(gs):
         if c in C["base"] or c in C["new"]: return c
 r127 = sorted({bn(c) for c in V.RESEARCH_COINS_127 if bn(c)}); check = r127[2::3]
 A0 = 1767225600
-for nm, fn in (("бот", "/home/user/vp-poc-screener/vp_dlm_model.json"), ("кандидат", f"{ST}/wf/vp_dlm_model_lab_4h.json")):
-    S = [s for s in json.load(open(fn))["streams"] if s["name"] == "wick4h"][0]; P = pack(S["models"]); p = DE.STREAMS["wick4h"]; bs = 14400; B = DE.btc_ctx("wick4h")
+for nm, fn in [x for x in (("бот", "/home/user/vp-poc-screener/vp_dlm_model.json"), ("кандидат", f"{ST}/wf/vp_dlm_model_lab_4h.json")) if x[0] in os.environ.get("ONLY", "бот,кандидат")]:
+    S = [s for s in json.load(open(fn))["streams"] if s["name"] == "wick4h"][0]; S["thr"] = float(os.environ.get("THR", S["thr"])) if nm == "кандидат" else S["thr"]; P = pack(S["models"]); p = DE.STREAMS["wick4h"]; bs = 14400; B = DE.btc_ctx("wick4h")
     n = 0; Rs = []
     for c in check:
         h1 = DE.load1h(c); ev = DE.features(c, "wick4h", B, h1)
