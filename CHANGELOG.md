@@ -21257,3 +21257,17 @@ v0.99.756 — the cross leverage ceiling 17x (was 14x) (the user: "17", "Да")
   97 of 144 windows, the 2023-started windows worse ($12.7k -> $10.4k).
 - The lab: money_corr.py (the open risk a side / the long-short difference — far worse; the fees: BNB +5.7%, the takes as
   a limit +1% more — not done), money_lev2.py, money_arm2 sh= / net= / nomg=.
+
+v0.99.759 — ⚡ 4h on a new model; the honest header
+- The audit (the user: "бот торгует по обученной модели, которая можно сказать не актуальна?"): the money checks of ⚡ ran
+  with the lab's models (trained on the bot's own order features) while the bot traded the research-engine ones of v0.99.689
+  (dlm4_export7-9.py: s26_s23_4h_w1_0 / s26_s21h2_d2_1). Scored by the deployed trees themselves (dlm_allorders_dep.py), the
+  bot makes ~$24k a usual year from $100, not the header's ~$40k.
+- ⚡ 4h: the lab's model (dlm_lab_export.py LABEL=feat: the train coins' filled orders, the bot's features, 10 seeds x 28/33,
+  trained to 2026-09), threshold 0.4437 (the walk-forward's 2026). Walk-forward 2023-26: better in 113 of 144 windows;
+  2026 alone (out of sample for both): the bundle +39% ($82.6k vs $59.4k from $100, drawdown 61% vs 66%); the 42 check
+  coins in 2026: 530 fills +0.568R (+301R) vs 389 fills +0.443R (+172R). ⚡ 2h keeps its model (the lab's 2h lost in 2026:
+  +0.019R vs +0.208R a trade).
+- The header re-counted on the bot's real ⚡ models (money_expect4.py, ALLSUF=_clr): the bundle + HTF a year from $100 —
+  bad ~$3.5k · usual ~$35.8k · good ~$201k, drawdown ~68%, the last 12 months ~$105k (was shown $6.6k / $39.7k / $269k —
+  the lab's models, never traded; the real old bot ~$2.6k / $24.1k).

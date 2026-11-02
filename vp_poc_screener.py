@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.758"
+APP_VERSION = "0.99.759"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28545,9 +28545,12 @@ _PROC_START = time.time()
 # nearer-limit swap. v0.99.753 — with the ⚡ limits armed at 0.6 ATR, off at 1.0, the room by the score, the others
 # first, the open-risk cap 100%
 # v0.99.756 — at the 17x ceiling (money_expect4.py "...|cap=17"); v0.99.758 — no ceiling, each coin its own maximum ("...|cap=125")
-EXPECT_YEAR = {"dlm": {"p10": 422, "p50": 3488, "p90": 17075, "dd": 73, "last12": 7047},
-               "bundle": {"p10": 6206, "p50": 40477, "p90": 262263, "dd": 66, "last12": 35121},
-               "bundle_htf": {"p10": 6555, "p50": 39655, "p90": 268718, "dd": 69, "last12": 44608}}
+# v0.99.759 — the HONEST header: until now the money ran ⚡ with the lab's models while the bot traded the research-engine ones
+# (money_4h.py: those make ~$24k, not ~$40k); now ⚡ 4h = the lab's model (deployed in this version), 2h = the deployed one
+# (its research-engine rebuild, corr 0.99): money_expect4.py with ALLSUF=_clr
+EXPECT_YEAR = {"dlm": {"p10": 252, "p50": 2766, "p90": 30595, "dd": 72, "last12": 16346},
+               "bundle": {"p10": 3867, "p50": 34654, "p90": 175047, "dd": 70, "last12": 82657},
+               "bundle_htf": {"p10": 3544, "p50": 35767, "p90": 201378, "dd": 68, "last12": 105463}}
 
 
 @app.route("/api/boot")
