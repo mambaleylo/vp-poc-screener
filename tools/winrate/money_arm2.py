@@ -136,6 +136,23 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     # coin already held by ⚡ on the same side (a separate leg with its own exits); "addon=wick4h" — only onto that stream's
     # position; another module's position or the other side still blocks it
     ADD = set(kw["add"].split("+")) if "add" in kw else set(); ADDON = set(kw["addon"].split("+")) if "addon" in kw else None
+    # the drawdown hypotheses (the user: "снизить просадки без особого ущерба для дохода"): "sidecap=N" at most N ⚡ positions + armed
+    # limits a side; "btcshock=X" no new ⚡ short after BTC rose > X (a fraction) in 24 h, no long after it fell > X; "burst=N" at
+    # most N new ⚡ positions a side in 24 h
+    SC = int(kw.get("sidecap", 0)); BSH = float(kw.get("btcshock", 0)); BUR = int(kw.get("burst", 0)); opens = collections.deque()
+    def blocked(o, h):
+        if SC and sum(1 for p_ in pos if p_["mod"] == "dlm" and p_["side"] == o["side"]) + sum(1 for a in armed.values() if a["o"]["side"] == o["side"]) >= SC:
+            return True
+        if BSH:
+            b0, b1 = M.px_at("BTCUSDT", h - 86400), M.px_at("BTCUSDT", h)
+            if b0 and b1 and ((o["side"] < 0 and b1 / b0 - 1 > BSH) or (o["side"] > 0 and b1 / b0 - 1 < -BSH)):
+                return True
+        if BUR:
+            while opens and opens[0][0] < h - 86400: opens.popleft()
+            if sum(1 for _, sd in opens if sd == o["side"]) >= BUR:
+                return True
+        return False
+    curve = [] if kw.get("curve") == "1" else None   # "curve=1": (hour, equity, open ⚡ longs, shorts, others) every 6 h, the last value
     path = [] if kw.get("path") == "1" else None   # "path=1": the balance at every 30 days (before that day's top-up) + the end, a 5th value
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
     OR = [o for o in OR if A - 64 * 3600 <= o["t"] < B]; io = 0; act = []
@@ -191,6 +208,9 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         if dep and ndep < dep[2] and h >= A + (ndep + 1) * dep[1] * 86400:
             units += dep[0] / (eq / units); cash += dep[0]; eq += dep[0]; ndep += 1
         nav = eq / units; peak = max(peak, nav); mdd = max(mdd, 1 - nav / peak)
+        if curve is not None and h % 21600 == 0:
+            curve.append((h, round(nav, 4), sum(1 for o in pos if o["mod"] == "dlm" and o["side"] > 0), sum(1 for o in pos if o["mod"] == "dlm" and o["side"] < 0),
+                          sum(1 for o in pos if o["mod"] != "dlm")))
         if ddc:
             if not cut_on and nav < peak * (1 - ddc[0]): cut_on = True
             elif cut_on and nav >= peak * (1 - ddc[2]): cut_on = False
@@ -227,7 +247,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             if k_ in armed:
                 if touch:   # filled: the trade
                     a = armed.pop(k_); done.add(k_)
-                    if o["filled"] and o["t1h"] == h: pos.append(dict(o, **{x: a[x] for x in ("rd", "heat", "mg", "notional", "imp")})); n_fill += 1
+                    if o["filled"] and o["t1h"] == h: pos.append(dict(o, **{x: a[x] for x in ("rd", "heat", "mg", "notional", "imp")})); n_fill += 1; opens.append((h, o["side"]))
                 elif far: del armed[k_]
             elif near:
                 want.append((o, touch, s * (cl - o["lv"]) / o["atr"], cl))
@@ -247,6 +267,8 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
                     if touch or ao["side"] * (cl - ao["lv"]) / ao["atr"] > d_o + 0.25: del armed[k2]
                     else: busy = True
             nd = sum(1 for p_ in pos if p_["mod"] == "dlm") + (len(armed) if cnt else 0)
+            blk = (SC or BSH or BUR) and not busy and blocked(o, h)
+            busy = busy or bool(blk)
             s_, hn, room = (None, 0, 0) if busy or nd >= maxpos else fit(o, eq)
             if rule == "Ac" and s_ and s_["rd"] < rd_of(o, eq) * 0.999: s_ = None   # no scaled-down crumbs
             if rule == "Bn" and not busy and (s_ is None or s_["rd"] < rd_of(o, eq) * 0.999 or nd >= maxpos):
@@ -261,7 +283,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             if s_ and nd < maxpos:
                 if touch:   # reached this hour: filled at once
                     done.add(k_)
-                    if o["filled"] and o["t1h"] == h: pos.append(dict(o, **s_)); n_fill += 1
+                    if o["filled"] and o["t1h"] == h: pos.append(dict(o, **s_)); n_fill += 1; opens.append((h, o["side"]))
                 else:
                     armed[k_] = dict(s_, o=o, sym=o["sym"])
             elif touch:
@@ -270,7 +292,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     for o in pos:
         p = M.px_at(o["sym"], B)
         if p: upnl += o["side"] * (p - o["e"]) / o["e"] * o["notional"]
-    return (cash + upnl, mdd, n_fill, n_skip) + ((path + [cash + upnl],) if path is not None else ())
+    return (cash + upnl, mdd, n_fill, n_skip) + ((path + [cash + upnl],) if path is not None else ()) + ((curve,) if curve is not None else ())
 _D = {}
 def _init(D): _D.update(D)
 def job(a):
