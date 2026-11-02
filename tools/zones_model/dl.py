@@ -49,7 +49,8 @@ def coin(c):
             if rows:
                 allr += rows
     if allr:
-        allr.sort()
+        from fill_gaps import fill   # a monthly archive cut short (2022-02/03 on ~30 coins) -> its missing days from the daily ones
+        allr, _, _ = fill(allr, sym, TF)
         with open(fn + ".tmp", "w") as f:   # whole or nothing: a killed run leaves no short file behind
             f.write("\n".join(",".join(map(str, r)) for r in allr))
         os.replace(fn + ".tmp", fn)
