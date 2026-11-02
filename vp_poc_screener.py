@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.769"
+APP_VERSION = "0.99.770"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28653,9 +28653,10 @@ _PROC_START = time.time()
 # v0.99.767 — re-counted once on the bot as it trades from v0.99.766 (tools/winrate money_hdr2.py: ⚡ 4h + 2h + the shifted 4h, the
 # liquidity cut, the square-root impact of every market fill — never in the numbers before; the median of 4 runs dropping 5% of
 # the trades: one path swings the usual year x2). Was the old 2h orders built on candles with lost months (overstated).
+# v0.99.770 — the same count with EMA v13 (v0.99.769: no crowd filter, every touch); ⚡ alone unchanged (the check)
 EXPECT_YEAR = {"dlm": {"p10": 963, "p50": 4213, "p90": 25659, "dd": 82, "last12": 24107},
-               "bundle": {"p10": 8733, "p50": 35064, "p90": 144278, "dd": 81, "last12": 92071},
-               "bundle_htf": {"p10": 9711, "p50": 38614, "p90": 178832, "dd": 81, "last12": 113523}}
+               "bundle": {"p10": 11365, "p50": 47099, "p90": 200069, "dd": 81, "last12": 110517},
+               "bundle_htf": {"p10": 13103, "p50": 50630, "p90": 227851, "dd": 81, "last12": 128427}}
 
 
 @app.route("/api/boot")

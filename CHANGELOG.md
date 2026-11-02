@@ -21391,3 +21391,11 @@ v0.99.769 — 📐 EMA: the crowd filter off, the backtest at every touch the bo
 - The cards: a 2025 row is "2025–26" only when the model has no 2026 row; P/R's 2025 and 2026 re-counted from its backtest
   list (tools/winrate split_years.py); every year from 2025 highlighted.
 - Tests: t_emx_v13 (no crowd block, an exact touch fires, the bot's settle = the new list 200/200), t_emx_rule, t_emx_lv — OK.
+
+v0.99.770 — the header re-counted once with EMA v13
+- tools/winrate money_hdr2.py (the strictest money, 144 weekly windows + the last 12 months, the median of 4 runs dropping 5%):
+  ⚡ + P/R + SMC + EMA + HTF a year from $100 — the bad year $9.7k -> $13.1k, the usual $38.6k -> $50.6k, the good $179k ->
+  $228k, the drawdown 81% (the same), the last 12 months $114k -> $128k; without HTF $35.1k -> $47.1k; ⚡ alone the same
+  (unchanged by EMA: the check).
+- EMA on the 83 more coins ⚡ trades (the models trained on the 127 only): unseen 147 trades +0.27R but 2025 -0.13R, 2026
+  +0.01R, and they push the 127 coins' trades out of the cap — not taken.
