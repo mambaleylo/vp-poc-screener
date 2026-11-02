@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 ARGV, sys.argv = sys.argv[1:], sys.argv[:1]
 import money_arm2 as MA2, money_multi as M, money_expect as X
 from multiprocessing import Pool
-RULE = ARGV[0] if ARGV else "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0|cap=125"; SEEDS = [int(x) for x in (ARGV[1] if len(ARGV) > 1 else "1,2,3").split(",")]
+RULE = ARGV[0] if ARGV else "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0|cap=125"; SEEDS = [int(x) for x in (ARGV[1] if len(ARGV) > 1 else "1,2").split(",")]
 VARS = {"только $100 на старте": "|path=1", "$100 + по $100 каждый месяц 6 раз ($700)": "|path=1|dep=100/30/6"}
 _D = {}
 def _init(D): _D.update(D)
