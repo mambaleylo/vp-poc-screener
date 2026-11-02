@@ -8,9 +8,17 @@ KAS AEVO W BB IO ZK POPCAT NEIRO EIGEN HMSTR CATI TURBO MEW BRETT""".split()
 TF = sys.argv[1] if len(sys.argv) > 1 else "1h"
 OUT = f"data/{TF}"
 os.makedirs(OUT, exist_ok=True)
-months = [f"{y}-{m:02d}" for y in range(2020, 2027) for m in range(1, 13) if f"{y}-{m:02d}" <= "2026-09"]
+END = os.environ.get("END", "2026-09")   # the last month (a month without its monthly archive yet -> its daily files)
+months = [f"{y}-{m:02d}" for y in range(2020, 2027) for m in range(1, 13) if f"{y}-{m:02d}" <= END]
+BD = B.replace("/monthly/", "/daily/")
 def get(sym, mo):
-    url = f"{B}/{sym}/{TF}/{sym}-{TF}-{mo}.zip"
+    rows = get1(f"{B}/{sym}/{TF}/{sym}-{TF}-{mo}.zip")
+    if rows is None and mo >= "2026-01":
+        import calendar
+        y, m = map(int, mo.split("-")); days = [get1(f"{BD}/{sym}/{TF}/{sym}-{TF}-{mo}-{d:02d}.zip") for d in range(1, calendar.monthrange(y, m)[1] + 1)]
+        rows = [r for d in days if d for r in d] or None
+    return rows
+def get1(url):
     try:
         with urllib.request.urlopen(url, timeout=60) as r:
             z = zipfile.ZipFile(io.BytesIO(r.read()))
@@ -35,9 +43,11 @@ def coin(c):
                 allr += rows
     if allr:
         allr.sort()
-        with open(fn, "w") as f:
+        with open(fn + ".tmp", "w") as f:   # whole or nothing: a killed run leaves no short file behind
             f.write("\n".join(",".join(map(str, r)) for r in allr))
+        os.replace(fn + ".tmp", fn)
     return c, len(allr)
 with cf.ThreadPoolExecutor(4) as ex:
     for c, n in ex.map(coin, COINS):
         print(c, n, flush=True)
+print("dl done", flush=True)
