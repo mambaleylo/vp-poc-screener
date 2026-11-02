@@ -152,6 +152,9 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             if sum(1 for _, sd in opens if sd == o["side"]) >= BUR:
                 return True
         return False
+    # "hedge=N/F": while N+ ⚡ positions are open on one side, a BTC perpetual the other way at F x their notional (re-sized every
+    # hour, 0.05% a side on the change, its margin at 20x counted)
+    HG = tuple(float(x) for x in kw["hedge"].split("/")) if "hedge" in kw else None; HDG = {"n": 0.0, "px": None}   # (a dict: fit() reads it)
     curve = [] if kw.get("curve") == "1" else None   # "curve=1": (hour, equity, open ⚡ longs, shorts, others) every 6 h, the last value
     path = [] if kw.get("path") == "1" else None   # "path=1": the balance at every 30 days (before that day's top-up) + the end, a 5th value
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
@@ -187,7 +190,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         else:
             imp = 0.0
         if notional < minn: return None, hn, room   # under Binance's minimum order: not opened
-        mg = notional / M.lev_real(v["sym"], notional, cap); free = eq - sum(o["mg"] for o in pos) - sum(o["mg"] for o in armed.values())
+        mg = notional / M.lev_real(v["sym"], notional, cap); free = eq - sum(o["mg"] for o in pos) - sum(o["mg"] for o in armed.values()) - abs(HDG["n"]) / 20
         if nomg: mg = 0.0   # "nomg=1": the margin never short (what the free margin costs)
         if mg > 0.9 * free:
             if free <= 1: return None, hn, room
@@ -202,6 +205,15 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         for o in pos:
             p = M.px_at(o["sym"], h)
             if p: upnl += o["side"] * (p - o["e"]) / o["e"] * o["notional"]
+        if HG:   # the BTC hedge: its hour's PnL, then re-sized to the open ⚡ sides
+            bp = M.px_at("BTCUSDT", h)
+            if bp and HDG["px"] and HDG["n"]: cash += HDG["n"] * (bp / HDG["px"] - 1)
+            if bp:
+                HDG["px"] = bp; tgt = 0.0
+                for sd in (1, -1):
+                    side_pos = [o for o in pos if o["mod"] == "dlm" and o["side"] == sd]
+                    if len(side_pos) >= HG[0]: tgt -= sd * HG[1] * sum(o["notional"] for o in side_pos)
+                cash -= abs(tgt - HDG["n"]) * 0.0005; HDG["n"] = tgt
         eq = cash + upnl
         if eq <= 0: return (0.0, 1.0, n_fill, n_skip) + ((path + [0.0] * (13 - len(path)),) if path is not None else ())
         if path is not None and h >= A + (len(path) + 1) * 30 * 86400: path.append(eq)
