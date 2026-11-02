@@ -33,4 +33,5 @@ for Y in WK:
 allr = np.array([x for _, x in out]); c = np.cumsum(allr); dd = float(np.max(np.maximum.accumulate(np.r_[0, c]) - np.r_[0, c]))
 print(f"ИТОГ P/R {VAR}: {len(allr)} сделок, {allr.mean():+.3f}R, Σ{allr.sum():+.0f}R, просадка {dd:.0f}R | " + " | ".join(cells), flush=True)
 json.dump([[int(t), float(x)] for t, x in out], open(f"{PL.ST}/wf/prv_roll_{VAR}.json", "w"))
+np.savez(f"{PL.ST}/wf/prv_roll_{VAR}_sc.npz", SC=SC, THR=THR)   # for prv_money.py
 print("prv roll done", VAR, flush=True)
