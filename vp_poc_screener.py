@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.767"
+APP_VERSION = "0.99.768"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -38828,6 +38828,101 @@ def widget_data():
     return d
 
 
+# v0.99.768 — the models' age (the user: "мне в телегу придет уведомление, что надо переобучение, но задача не запустилась из-за
+# отсутствия подписки?", then "да"): the retraining runs as scheduled tasks of the user's claude.ai account (RETRAIN.md) — they
+# stop with the subscription, and nothing would say so. The bot (no subscription needed) checks each model file's
+# "trained_to": P/R monthly (by the 8th: trained through at least the end of the month before last), the others yearly (by
+# 10 January: through at least November of the year before); a stale one -> a Telegram message, at most every 3 days a model
+MODEL_AGE = [("P/R", "vp_prv_model.json", "month"), ("⚡ Лимитки", "vp_dlm_model.json", "year"), ("🧱 SMC", "vp_smc_model.json", "year"),
+             ("📏 HTF", "vp_htf_model.json", "year"), ("🔄 Классика", "vp_cfl_model.json", "year"), ("📐 EMA", "vp_ema_model.json", "year")]
+MODEL_AGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_model_age.json")
+_MAGE = {"cache": {}}
+
+
+def _model_trained_to(fn):
+    """the model file's trained_to (the oldest of the ⚡ streams'), kept while the file is unchanged"""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), fn)
+    try:
+        mt = os.path.getmtime(path)
+    except OSError:
+        return None
+    c = _MAGE["cache"].get(fn)
+    if c and c[0] == mt:
+        return c[1]
+    try:
+        with open(path) as f:
+            m = json.load(f)
+        top = m.get("trained_to")
+        ts_ = [int(x.get("trained_to") or top or 0) for x in m.get("streams") or []] or [int(top or 0)]
+        v = min(ts_) or None
+    except Exception as e:
+        log_error(f"model age {fn}: {e}")
+        v = None
+    _MAGE["cache"][fn] = (mt, v)
+    return v
+
+
+def model_age_status(now=None):
+    """[{name, file, kind, trained_to, due (the trained_to expected by now), stale}]"""
+    now = now or time.time()
+    d = datetime.fromtimestamp(now, timezone.utc)
+    out = []
+    for name, fn, kind in MODEL_AGE:
+        tt = _model_trained_to(fn)
+        if kind == "month":   # from the 8th: through the end of the month before last at least
+            y, m = (d.year, d.month - 1) if d.month > 1 else (d.year - 1, 12)
+            due = datetime(y, m, 1, tzinfo=timezone.utc) if d.day >= 8 else (datetime(y, m - 1, 1, tzinfo=timezone.utc) if m > 1 else datetime(y - 1, 12, 1, tzinfo=timezone.utc))
+            nxt = "3-го числа каждого месяца"
+        else:   # from 10 January: through November of the year before at least
+            yy = d.year if (d.month, d.day) >= (1, 10) else d.year - 1
+            due = datetime(yy - 1, 11, 1, tzinfo=timezone.utc)
+            nxt = "5 января"
+        due_t = int(due.timestamp())
+        out.append({"name": name, "file": fn, "kind": kind, "trained_to": tt, "due": due_t, "stale": bool(tt) and tt < due_t, "next": nxt})
+    return out
+
+
+def model_age_tick(now=None):
+    """a Telegram message per stale model, at most every 3 days a model (kept in vp_model_age.json across restarts)"""
+    now = now or time.time()
+    try:
+        with open(MODEL_AGE_FILE) as f:
+            sent = json.load(f)
+    except Exception:
+        sent = {}
+    changed = False
+    for x in model_age_status(now):
+        if not x["stale"] or now - float(sent.get(x["file"], 0)) < 3 * 86400:
+            continue
+        send_telegram(f"⏰ Модель {x['name']} обучена по {time.strftime('%d.%m.%Y', time.gmtime(x['trained_to']))} — плановое переобучение "
+                      f"({x['next']}) не пришло в бота. Проверьте подписку Claude и запланированные задачи в claude.ai "
+                      f"(или ждёт вашего «да» в чате переобучения), либо запустите вручную по RETRAIN.md.")
+        sent[x["file"]] = now; changed = True
+    if changed:
+        try:
+            tmp = MODEL_AGE_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(sent, f)
+            os.replace(tmp, MODEL_AGE_FILE)
+        except Exception as e:
+            log_error(f"model age save: {e}")
+
+
+def model_age_loop():
+    time.sleep(600)
+    while True:
+        try:
+            model_age_tick()
+        except Exception as e:
+            log_error(f"model age: {e}")
+        time.sleep(6 * 3600)
+
+
+@app.route("/api/model_age")
+def api_model_age():
+    return jsonify({"models": model_age_status()})
+
+
 @app.route("/api/liq")
 def api_liq():
     """v0.99.766 — the liquidity cut: on / the steps / the last cut positions (the settings' group shows them)"""
@@ -43082,6 +43177,10 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div id="liqRecent" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">урезанных позиций пока не было</div>
     </div></details>
+    <details class="settingsGroup" style="--mod-color:#b0bec5;"><summary class="settingsGroupTitle">🗓 Возраст моделей и переобучение</summary><div class="settingsGroupBody">
+      <div class="sub hintx" style="padding:4px 2px;">Переобучение делают запланированные задачи в claude.ai (P/R — 3-го числа каждого месяца, остальные — 5 января; порядок — RETRAIN.md в репозитории), в бота — только после вашего «да». Если модель устарела (задача не запустилась — например, закончилась подписка), бот пишет в Telegram не чаще раза в 3 дня.</div>
+      <div id="modelAge" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
+    </div></details>
     <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">🎨 Оформление</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -46746,7 +46845,7 @@ async function refreshHdg() {   // v0.99.628 — 🪞 hedge mirror
 window._btData = window._btData || {};
 window._btSt = window._btSt || {};
 window._btLive = window._btLive || {};
-const BT_CH = {'1d': 'день', '12h': '12ч', '1h': '1ч', '2h': '2ч', '4h': '4ч', '15m': '15м'};
+const BT_CH = {'1d': 'день', '12h': '12ч', '1h': '1ч', '2h': '2ч', '4h': '4ч', '4h±': '4ч со сдвигом', '15m': '15м'};
 const BT_EMA_TF = {'4h': '4ч', '1d': 'день', '1w': 'неделя', '1M': 'месяц'};
 const BT_SMC = {fvg4_bull: 'FVG 4ч ↑', fvg4_bear: 'FVG 4ч ↓', fvgd_bull: 'FVG дня ↑', fvgd_bear: 'FVG дня ↓', fvgw_bull: 'FVG недели ↑', fvgw_bear: 'FVG недели ↓',
   swd_low: 'свинг-минимум дня', swd_high: 'свинг-максимум дня', sww_low: 'свинг-минимум недели', sww_high: 'свинг-максимум недели',
@@ -46760,8 +46859,8 @@ const BT_SMC_GRP = {st: 'Supertrend', psar: 'Parabolic SAR', ichi: 'Ишимок
   fvg4: 'FVG 4ч', fvgd: 'FVG день', fvgw: 'FVG неделя', swd: 'свинг дня', sww: 'свинг недели', obd: 'ордерблок дня', ob4: 'ордерблок 4ч',
   d: 'SMA / Боллинджер дня', w: 'SMA / Боллинджер недели', pdh: 'максимум вчера', pdl: 'минимум вчера', pdm: 'середина вчера', pwh: 'максимум недели',
   pwl: 'минимум недели', pwm: 'середина недели', wopen: 'открытие недели', pmh: 'максимум месяца', pml: 'минимум месяца', pmm: 'середина месяца', mopen: 'открытие месяца', yopen: 'открытие года'};
-const btLabel = t => t.lvl ? (BT_SMC[t.lvl] || t.lvl) : (t.tf ? `EMA ${t.n} · ${BT_EMA_TF[t.tf] || t.tf}` : (BT_CH[t.c] || t.c) + (t.st ? (String(t.st).startsWith('close') ? ' · от закрытия' : ' · за тенью') : ''));   // v0.99.689 — ⚡ the stream
-const btKey = t => t.lvl ? t.lvl.split('_')[0] : (t.tf || t.c);
+const btLabel = t => t.lvl ? (BT_SMC[t.lvl] || t.lvl) : (t.tf ? `EMA ${t.n} · ${BT_EMA_TF[t.tf] || t.tf}` : (t.st === 'wick4h_o2' ? '4ч со сдвигом' : (BT_CH[t.c] || t.c)) + (t.st ? (String(t.st).startsWith('close') ? ' · от закрытия' : ' · за тенью') : ''));   // v0.99.689 — ⚡ the stream
+const btKey = t => t.lvl ? t.lvl.split('_')[0] : (t.tf || (t.st === 'wick4h_o2' ? '4h±' : t.c));   // v0.99.768 — the shifted 4h its own chip
 const BT_KIND = {fail: 'ложный пробой', FAILED: 'ложный пробой', be: 'безубыток после частичной', be2: 'безубыток после +2R', BREAKEVEN: 'безубыток', stop: 'стоп', hard: 'аварийный стоп', STOP_CLOSE: 'стоп по закрытию', HARD_STOP: 'аварийный стоп', take: 'тейк', trend: 'конец тренда', time: 'по времени', LOSS: 'стоп', WIN: 'тейк', TREND_END: 'конец тренда',
   TIME_EXIT: 'по времени', BREAKEVEN: 'безубыток', TIME: 'по времени'};
 const BT_KIND_SHORT = {hard: 'авар. стоп', HARD_STOP: 'авар. стоп', STOP_CLOSE: 'стоп закр.', time: 'время', TIME: 'время', TIME_EXIT: 'время', be: 'б/у', be2: 'б/у +2R', BREAKEVEN: 'б/у', fail: 'ложн. пробой', FAILED: 'ложн. пробой', trend: 'тренд', TREND_END: 'тренд'};
@@ -47445,7 +47544,7 @@ async function refreshDlm(force) {   // v0.99.679 — ⚡ deep limits; v0.99.687
     ${(d.last || []).length ? `<details><summary>последние итоги (${d.last.length}${lastSplit(d.last)})</summary>${d.last.map((t, i) => btRowHtml(btFromDlm(t), `btLiveOpen('dlm', ${Math.min(40, op.length) + i})`)).join('')}</details>` : ''}
     ${d.old_n ? `<div class="dim" style="font-size:var(--fs-xs);margin-top:6px;">старый модуль 15м (до замены): ${d.old_n} сделок, итого ${sgR(d.old_sum)} — в статистику выше не входят</div>` : ''}`);
   window._btLive.dlm = op.slice(-40).reverse().map(btFromDlm).concat((d.last || []).map(btFromDlm));
-  h += btSection('dlm', 'Сделки бэктеста — 2025–2026 (каждый год модель не видела; 210 монет)');
+  h += btSection('dlm', 'Сделки бэктеста — 2023–2026 (каждый год модель не видела; 210 монет; 4ч, 2ч и 4ч со сдвигом)');
   h += `<details class="zcard hintx"><summary class="zh" style="margin:0;">ℹ️ Как нашёлся</summary><div class="zsub">v0.99.689: добавлен второй вид — лимитка на 2 ATR от закрытия 2ч свечи (тот же рецепт: 20 моделей с дневным контекстом). Сам по себе на монетах, которых модель не видела, WR 77%, +0.15R, каждый год в плюсе, по минуткам WR 78%, +0.16R; вместе с 4ч — вдвое больше сделок и за год со $100 медиана ~$5 200 вместо ~$1 900 (посчитано так, как торгует бот: обе лимитки стоят, сделка — первая исполненная). Цена — просадки глубже (до 65–70% от пика). Потоки 1ч и 30м, оживлённые тем же рецептом, остались около нуля. Прошлая ⚡ (лимитки 15м) показывала в бэктесте WR 84% и +0.045R, но бэктест был завышен: исследование ставило лимитку каждую свечу и оставляло только моменты, где прошлые лимитки не исполнились, — то есть наличие сделки зависело от будущего. Честно (каждая лимитка сама по себе, признаки — как их видит бот) 15м — около 0R. Заново, честно, проверены 15м, 30м, 1ч, 2ч, 4ч, 6ч, 8ч и 12ч: лимитки на 0.5–2 ATR в прострел и за тень свечи, тейки 0.5–2 ATR, стопы 1–3 ATR; модель каждый год училась только на прошлых годах и на 85 монетах, проверка — на 42 монетах, которых она не видела, и ещё на 83 монетах Binance. Весь период в плюсе 30м, 1ч, 2ч и 4ч, но с 2025 года держится только 4ч (6ч, 8ч, 12ч — слабее): лимитка на 1 ATR за тенью — одна модель WR 78%, +0.16R. Среднее 20 моделей, половина из которых видит ещё дневной контекст (дневные EMA20 / EMA50 / RSI монеты, её место в 20-дневном диапазоне, дневная EMA50 у BTC), — WR 82%, +0.235R на монетах, которых модель не видела, последние 12 месяцев +0.24R; по минутным свечам Binance WR 86%, +0.31R. Обучение на большем числе монет и лимитки на 0.5–1.5 ATR не улучшили. Тейк 0.5–0.75 ATR и частичные тейки поднимают винрейт до 82–87%, но денег дают в 2–5 раз меньше; стопы 1–1.5 ATR дают больше R на сделку, но хуже по деньгам в последний год. Одна крупная сделка за раз (лесенка 50%) в ~45% лет уходит в минус — убрана. Бот считает признаки так же, как исследование (совпадают до 6-го знака); виртуальные сделки — по 4ч свечам, стоп раньше тейка.</div></details>`;
   setPanelHtml(panel, `<div class="fx-zpanel">${h}</div>`);
 }
@@ -48865,7 +48964,15 @@ async function loadSettings() {
     applySettingsToInputs(s);
     updateHeaderButtonVisibility(s);
   } catch (e) {}
-  loadLiq();
+  loadLiq(); loadModelAge();
+}
+async function loadModelAge() {   // v0.99.768 — the models' age
+  try {
+    const d = await (await fetch('/api/model_age')).json(), el = document.getElementById('modelAge');
+    if (!el) return;
+    const dt = t => t ? new Date(t * 1000).toLocaleDateString('ru-RU') : '—';
+    el.innerHTML = (d.models || []).map(x => `${x.stale ? '⚠️' : '✅'} <b>${x.name}</b> — обучена по ${dt(x.trained_to)}${x.stale ? ' · <span class="loss">устарела, переобучение не пришло</span>' : ''} · план: ${x.kind === 'month' ? 'каждый месяц' : 'раз в год'} (${x.next})`).join('<br>');
+  } catch (e) {}
 }
 async function loadLiq() {   // v0.99.766 — the liquidity cut's last cut positions
   try {
@@ -50330,6 +50437,7 @@ if __name__ == "__main__":
     threading.Thread(target=cfl_loop, daemon=True).start()   # v0.99.739 — 🔄 Классика наоборот (virtual)
     threading.Thread(target=rbs_loop, daemon=True).start()   # v0.99.757 — 🚀 Пробой 4ч (virtual)
     threading.Thread(target=dlm_loop, daemon=True).start()   # v0.99.679 — ⚡ 15m deep limits
+    threading.Thread(target=model_age_loop, daemon=True).start()   # v0.99.768 — the models' age -> Telegram
     threading.Thread(target=bno_loop, daemon=True).start()   # v0.99.698 — P/R, SMC, EMA positions on Binance
     threading.Thread(target=hdg_loop, daemon=True).start()   # v0.99.628 — 🪞 hedge mirror
     threading.Thread(target=model_refresh_loop, daemon=True).start()   # v0.99.636 — retrained models from the repo, daily

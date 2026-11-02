@@ -44,7 +44,7 @@ with sync_playwright() as p:
     pg.screenshot(path="ui_dlm_chart2h.png")
     t2 = pg.locator("#vgiModalTitle").inner_text(); print("chart 2h:", t2, "· bars asked", sorted(set(seen_ch)))
     pg.keyboard.press("Escape"); pg.wait_for_timeout(500)
-    # v0.99.693 — the user's TLM 2h long of 28.09 (out by time 30.09 20:00 UTC): its exit dot was drawn a day early (no '2h'
+    # v0.99.768: the exit bar = the 2h bar holding the exit hour (an emergency stop may be mid-bar). v0.99.693 — the user's TLM 2h long of 28.09 (out by time 30.09 20:00 UTC): its exit dot was drawn a day early (no '2h'
     # in the chart's bar length), and the 3 ATR emergency stop of the list was not drawn
     pg.evaluate("() => { const f = emwPanel; emwPanel = (c, box, bars, opt) => { window._dots = opt.dots; window._hl = opt.hlines; return f(c, box, bars, opt); }; }")
     i_tlm = next(i for i, t in enumerate(_BTD["dlm"]) if t["st"] == "close2h" and t["k"] == "stop" and t["t"] >= 1785542400)   # a 2h stop of 2026-08+ (v0.99.750: the walk-forward list)
@@ -53,7 +53,7 @@ with sync_playwright() as p:
     pg.screenshot(path="ui_dlm_tlm.png")
     dots = pg.evaluate("() => window._dots"); hl = pg.evaluate("() => window._hl")
     tlm = _BTD["dlm"][i_tlm]
-    exit_ok = dots[-1]["t"] == tlm["x"] - 7200 and abs(dots[-1]["p"] - tlm["xp"]) < 1e-12 and dots[0]["t"] == tlm["f"] // 7200 * 7200
+    exit_ok = dots[-1]["t"] == (tlm["x"] - 3600) // 7200 * 7200 and abs(dots[-1]["p"] - tlm["xp"]) < 1e-12 and dots[0]["t"] == tlm["f"] // 7200 * 7200
     hs_ok = any(h["tag"] == "ав" and abs(h["p"] - tlm["sl2"]) < 1e-12 for h in hl)
     print("TLM 2h: entry dot", time.strftime("%d.%m %H:%M", time.gmtime(dots[0]["t"])), "· exit dot", time.strftime("%d.%m %H:%M", time.gmtime(dots[-1]["t"])), "(the exit bar)", exit_ok, "· emergency stop drawn", hs_ok)
     pg.keyboard.press("Escape")
@@ -78,7 +78,7 @@ with sync_playwright() as p:
         _settle(t["f"])
         if len(op) >= mp or eq <= 0: continue
         st = max(0.002, abs(t["e"] - t["sl"]) / t["e"]); sth = abs(t["e"] - t["sl2"]) / t["e"]
-        k = (lr["lo"] if len(op) < lr["n"] else lr["hi"]) * (c2h if t.get("st") == "close2h" and t["d"] < 0 else 1)
+        k = (lr["lo"] if len(op) < lr["n"] else lr["hi"]) * (c2h if t.get("st") == "close2h" and t["d"] < 0 else 1) * (V.DLM_STREAM_SIDE_RISK.get(("wick4h_o2", 1), 1.0) if t.get("st") == "wick4h_o2" else 1)   # v0.99.768
         ru = eq * rk / 100 * k; need = ru * sth / st; room = capH * eq - sum(p_[4] for p_ in op)
         if need > room:
             if room < need * 0.1: continue

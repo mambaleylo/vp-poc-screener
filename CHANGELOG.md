@@ -21361,3 +21361,16 @@ v0.99.767 — the header and the ⚡ tab's money re-counted once, on the bot as 
   $1.0k / $4.2k / $25.7k / 82% / $24.1k. The ⚡ tab: the median $4.2k (cautious $2.7k), the worst 10% $1.0k, the last 12 months
   $24.1k, below $100 at 6 months in 3% of the windows (was $7.2k / $4.9k / $2.8k / $11.4k / 0%).
 - t_hdr_htf reads the numbers from the bot.
+
+v0.99.768 — the models' age in Telegram; the ⚡ backtest list with the shifted 4h stream
+- The user: "мне в телегу придет уведомление, что надо переобучение, но задача не запустилась из-за отсутствия подписки?",
+  "да": the retraining runs as scheduled tasks of the user's claude.ai account (RETRAIN.md: P/R on the 3rd of each month, the
+  rest on 5 January; the user approves before main). The bot checks each model file's trained_to every 6 h: P/R from the 8th
+  through at least the end of the month before last, the others from 10 January through at least November of the year
+  before; a stale one -> a Telegram message, at most every 3 days a model (vp_model_age.json); the settings' group "🗓 Возраст
+  моделей и переобучение" (/api/model_age).
+- The user: "бэктест старый ещё что-ли? нету 4ч со сдвигом": the ⚡ backtest list re-made (tools/winrate dlm_bt_list2.py) from
+  the lab's yearly walk-forward orders of the three streams the bot trades (4h, 2h, the shifted 4h at score >= 1.05), the bot's
+  exits and pool: 3083 trades 2023-2026, +0.258R, WR 79% (4h 1225, 2h 1096, the shifted 4h 762); its own chip "4ч со сдвигом";
+  the list's money replica x0.75 for it.
+- Tests: t_model_age, t_dlm_ui (the exit bar of a mid-bar emergency stop), t_dlm_bot, t_liq — OK.
