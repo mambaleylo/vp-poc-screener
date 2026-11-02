@@ -7,18 +7,21 @@ usage: dlm_allorders_rs.py VAR [NS]"""
 import sys; AV = list(sys.argv)
 import os, glob, json, time, calendar, numpy as np, lightgbm as lgb, warnings; warnings.filterwarnings("ignore")
 VAR = AV[1]; NS = int(AV[2]) if len(AV) > 2 else 3
-os.environ["TFH"] = "2"
-import s21h2_engine as E, dlm_engine as DE
+stream = os.environ.get("STREAM", "close2h")   # wick4h: the s23 engine's w1 events, label E0 (the deployed 4h model's)
+CFG = {"close2h": ("2", "s21h2_engine", "s21h2", "d2", 1), "wick4h": ("4", "s23_engine", "s23_4h", "w1", 0)}[stream]
+os.environ["TFH"] = CFG[0]
+import importlib, dlm_engine as DE
+E = importlib.import_module(CFG[1])
 from s15_wf import load
 from common import V
 ST = os.environ.get("LABSTORE", "/home/user/vp-lab-store"); ts = lambda y, m=1, d=1: calendar.timegm((y, m, d, 0, 0, 0))
-stream = "close2h"; MJ = json.load(open("/home/user/vp-poc-screener/vp_dlm_model.json")); S = [s for s in MJ["streams"] if s["name"] == stream][0]
+MJ = json.load(open("/home/user/vp-poc-screener/vp_dlm_model.json")); S = [s for s in MJ["streams"] if s["name"] == stream][0]
 # the research events (training)
-fi = E.FAMS.index("d2"); D = load("s21h2", [fi]); F2 = []
-for f in sorted(glob.glob("s21h2/*.npz")):
+fi = E.FAMS.index(CFG[3]); D = load(CFG[2], [fi]); F2 = []
+for f in sorted(glob.glob(f"{CFG[2]}/*.npz")):
     z = np.load(f); m = z["fam"] == fi
-    if m.any(): F2.append(np.load(f"f2_s21h2/{os.path.basename(f)}")["F2"][m])
-X33 = np.concatenate([D["F"], np.concatenate(F2)[:, [0, 1, 2, 5, 8]]], axis=1); T = D["t"]; TR = ~D["chk"]; y = np.clip(D["R"][1], -1.5, 1.5)
+    if m.any(): F2.append(np.load(f"f2_{CFG[2]}/{os.path.basename(f)}")["F2"][m])
+X33 = np.concatenate([D["F"], np.concatenate(F2)[:, [0, 1, 2, 5, 8]]], axis=1); T = D["t"]; TR = ~D["chk"]; y = np.clip(D["R"][CFG[4]], -1.5, 1.5)
 pr = dict(n_estimators=300, learning_rate=0.05, num_leaves=63, min_child_samples=1000, subsample=0.7, subsample_freq=1, colsample_bytree=0.7, reg_lambda=5.0, verbose=-1, n_jobs=4)
 if VAR == "Y":
     P = [(ts(Y), ts(Y + 1)) for Y in (2022, 2023, 2024, 2025, 2026)]
