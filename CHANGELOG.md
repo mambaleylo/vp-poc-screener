@@ -21334,3 +21334,19 @@ v0.99.765 — ⚡ a third stream: the 4h wick limits on the 4h grid shifted by 2
   from it (was a fixed "~65").
 - Tests: t_dlm_o2 (the bot's shifted bars, 100 limits with their 33 features and 26 trades = the lab; a scan by the model file
   = the lab's scores), t_dlm_bot (3 streams), t_dlm_binance, t_dlm_ui, t_dlm_engine, t_widget, t_tab_order — OK.
+
+v0.99.766 — the universal liquidity cut of the position size
+- The user: "при каком балансе на счету начнутся проблемы с проскальзыванием", then "гибкую систему, с разным шагом урезания,
+  чтобы работала всегда, универсальным модулем, чтобы не пришлось больше его переделывать", "да, внедрять".
+- The lab (tools/winrate liq_cap.py, money_liq.py, money_arm2 liq= / slip=): the bundle trades thin alts (the median trade's
+  coin turns over ~$0.3M an hour; a position ~$0.84 per $1 of the balance): from ~$5-10k a third of the positions are >5% of
+  their coin's hourly turnover, from ~$100k half exceed Binance's largest position. With the square-root impact of every
+  market fill the year from $100k uncut: x15.7 (the impact x1), x4.2 with the bad year ruined (x2). The steps 4:0.5/8:0.25/12:0
+  the best or near it in both: from $100 x256 vs x218 (x1), from $100k x16.2 / x13.1 (x1 / x2), the drawdown 85-92% -> 64-65%;
+  the cost: from $10k x56 vs x68 (x1).
+- The bot: liq_cut() in compute_risk_based_position (every module's real position): the position's share of its coin's hourly
+  turnover (the median quote volume of the last 24 closed 1h candles on Binance, kept 30 min) through the stepped slope —
+  continuous, monotone, a small account untouched; no turnover -> no cut (logged). The settings' group "💧 Размер позиции по
+  ликвидности": on / off, own steps as text (empty = the version's default, so a later default reaches every phone; a bad
+  one refused), the last cut positions (/api/liq).
+- t_liq: the steps parsed / refused, the slope, a small / large / liquid position, off, no turnover, the settings, the page.

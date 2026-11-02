@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.765"
+APP_VERSION = "0.99.766"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1157,6 +1157,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "cas_enabled", "autotrade_cas", "telegram_alerts_cas", "risk_pct_cas",   # v0.99.653
                   "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
                   "htf_enabled", "autotrade_htf", "telegram_alerts_htf", "risk_pct_htf",   # v0.99.732
+                  "liq_enabled", "liq_steps",   # v0.99.766
                   "cfl_enabled", "telegram_alerts_cfl", "autotrade_cfl", "risk_pct_cfl",   # v0.99.739, v0.99.740
                   "rbs_enabled", "telegram_alerts_rbs",   # v0.99.757
                   "dlm_enabled", "autotrade_dlm2", "telegram_alerts_dlm", "risk_pct_dlm2", "dlm_binance", "dlm_more_coins", "bn_others", "bn_cross",   # v0.99.679, v0.99.684, v0.99.686 (v0.99.687: the single mode and the ladder dropped; the 4h module's own autotrade / risk keys: it starts virtual at 4% (v0.99.688), the 15m one held up to 50%)
@@ -1243,6 +1244,7 @@ def get_settings():
         "cas_enabled": CAS_ENABLED, "autotrade_cas": AUTOTRADE_ENABLED_CAS, "telegram_alerts_cas": TELEGRAM_ALERTS_CAS, "risk_pct_cas": MODULE_RISK_PCT.get("cas"),   # v0.99.653
         "smc_enabled": SMC_ENABLED, "autotrade_smc": AUTOTRADE_ENABLED_SMC, "telegram_alerts_smc": TELEGRAM_ALERTS_SMC, "risk_pct_smc": MODULE_RISK_PCT.get("smc"),   # v0.99.678
         "htf_enabled": HTF_ENABLED, "autotrade_htf": AUTOTRADE_ENABLED_HTF, "telegram_alerts_htf": TELEGRAM_ALERTS_HTF, "risk_pct_htf": MODULE_RISK_PCT.get("htf"),   # v0.99.732
+        "liq_enabled": LIQ_ENABLED, "liq_steps": LIQ_STEPS,   # v0.99.766
         "cfl_enabled": CFL_ENABLED, "telegram_alerts_cfl": TELEGRAM_ALERTS_CFL, "autotrade_cfl": AUTOTRADE_ENABLED_CFL, "risk_pct_cfl": MODULE_RISK_PCT.get("cfl"),   # v0.99.739, v0.99.740
         "rbs_enabled": RBS_ENABLED, "telegram_alerts_rbs": TELEGRAM_ALERTS_RBS,   # v0.99.757
         "dlm_enabled": DLM_ENABLED, "autotrade_dlm2": AUTOTRADE_ENABLED_DLM, "telegram_alerts_dlm": TELEGRAM_ALERTS_DLM, "risk_pct_dlm2": MODULE_RISK_PCT.get("dlm"),   # v0.99.679, v0.99.687
@@ -1529,6 +1531,16 @@ def apply_settings(updates):
         globals()["TELEGRAM_ALERTS_TRADE_RESULTS"] = bool(updates["telegram_alerts_trade_results"])
     if "telegram_trade_results_real_only" in updates:
         globals()["TELEGRAM_TRADE_RESULTS_REAL_ONLY"] = bool(updates["telegram_trade_results_real_only"])
+    if "liq_enabled" in updates:   # v0.99.766 — the liquidity cut
+        globals()["LIQ_ENABLED"] = bool(updates["liq_enabled"])
+    if "liq_steps" in updates:
+        sp = str(updates["liq_steps"] or "").strip()
+        try:
+            if sp:
+                liq_steps_parse(sp)
+            globals()["LIQ_STEPS"] = sp   # "" = the version's default
+        except Exception as e:
+            log_error(f"settings liq_steps «{sp}» not taken: {e}")
     if "auto_update" in updates:   # v0.99.637
         globals()["AUTO_UPDATE"] = bool(updates["auto_update"])
     if "research_binance" in updates:   # v0.99.681
@@ -4178,6 +4190,95 @@ def compute_max_safe_leverage(direction, sl_distance_pct, mmr_pct, leverage_cap,
     return None
 
 
+# v0.99.766 — the universal liquidity cut (the user: "при каком балансе… начнутся проблемы с проскальзыванием", then "гибкую
+# систему, с разным шагом урезания, чтобы работала всегда, универсальным модулем, чтобы не пришлось больше его переделывать после
+# каждого изменения в ботах"): every real position of every module is sized in compute_risk_based_position() below, so the cut
+# lives there — a position's share of its coin's hourly turnover (the median $ of the last 24 closed 1h candles on Binance) goes
+# through a stepped slope: "5:0" = it stops growing at 5% of an hour's turnover; "2:0.5/4:0.25/8:0" = from 2% each further $ of
+# the plan adds $0.5, from 4% $0.25, from 8% nothing. Continuous and monotone: the position still grows with the balance, ever
+# slower; a small account never meets it. No turnover known -> no cut (logged). The steps from tools/winrate money_liq.py
+LIQ_ENABLED = os.environ.get("VP_LIQ", "1") == "1"
+# the version's default (tools/winrate money_liq.py ROUND2, 4 noise runs, the square-root impact x1 and x2): the best or near it in
+# both — from $100 a year x256 vs x218 uncut (x1); from $100k x16.2 vs x15.7 (x1) and x13.1 vs x4.2 with the bad year x0 (x2)
+LIQ_STEPS_DEFAULT = "4:0.5/8:0.25/12:0"   # the settings' empty field = this one, so a later version's
+LIQ_STEPS = os.environ.get("VP_LIQ_STEPS", "")   # better default reaches every phone; a typed one is kept
+
+
+def liq_steps_now():
+    return LIQ_STEPS or LIQ_STEPS_DEFAULT
+_LIQ = {"cache": {}, "cuts": deque(maxlen=40), "miss": {}}
+_liq_lock = threading.Lock()
+
+
+def liq_steps_parse(spec):
+    """"2:0.5/4:0.25/8:0" (or with commas / spaces) -> [(0.02, 0.5), (0.04, 0.25), (0.08, 0.0)]; the shares rising, the slopes in
+    [0, 1] and falling; ValueError otherwise"""
+    parts = [x for x in re.split(r"[/,;\s]+", str(spec or "").strip()) if x]
+    out = []
+    for x in parts:
+        a, b = x.split(":")
+        th, sl = float(a.strip().rstrip("%")) / 100.0, float(b)
+        if th <= 0 or not 0 <= sl <= 1 or (out and (th <= out[-1][0] or sl > out[-1][1])):
+            raise ValueError(f"шаг «{x}»: доля растёт, наклон от 1 к 0 и не растёт")
+        out.append((th, sl))
+    return out
+
+
+def liq_g(p, steps):
+    """the position's share of the hourly turnover after the cut (slope 1 up to the first step)"""
+    out, prev, slope = 0.0, 0.0, 1.0
+    for th, sl in steps:
+        if p <= th:
+            return out + (p - prev) * slope
+        out += (th - prev) * slope; prev, slope = th, sl
+    return out + (p - prev) * slope
+
+
+def liq_turnover(symbol, now=None):
+    """the coin's hourly turnover in $ (the median of its last 24 closed 1h candles' quote volume on Binance), kept 30 min; None
+    when Binance has no such coin / does not answer (Gate's own symbol or Binance's "XXXUSDT" both taken)"""
+    now = now or time.time()
+    sym = symbol if "_" in str(symbol) else (str(symbol)[:-4] + "_USDT" if str(symbol).endswith("USDT") else str(symbol))
+    with _liq_lock:
+        c = _LIQ["cache"].get(sym)
+        if c and now - c[0] < 1800:
+            return c[1]
+    b = bn_closed(sym, "1h", 3600, 25, now) or []
+    vs = sorted(float(x.get("volume") or 0) for x in b[-24:])
+    v = (vs[len(vs) // 2] if len(vs) % 2 else (vs[len(vs) // 2 - 1] + vs[len(vs) // 2]) / 2) if len(vs) >= 12 else None
+    with _liq_lock:
+        _LIQ["cache"][sym] = (now, v if v and v > 0 else None)
+    return v if v and v > 0 else None
+
+
+def liq_cut(symbol, notional):
+    """the position's notional after the liquidity cut -> (notional, k: the share kept, the hourly turnover or None)"""
+    if not LIQ_ENABLED or not symbol or not notional or notional <= 0:
+        return notional, 1.0, None
+    try:
+        steps = liq_steps_parse(liq_steps_now())
+        V_ = liq_turnover(symbol)
+    except Exception as e:
+        log_error(f"liquidity cut {symbol}: {e}")
+        return notional, 1.0, None
+    if not steps or not V_:
+        if not V_:
+            with _liq_lock:
+                last = _LIQ["miss"].get(symbol, 0)
+                _LIQ["miss"][symbol] = time.time()
+            if time.time() - last > 6 * 3600:
+                log_error(f"liquidity cut {symbol}: no hourly turnover (Binance) — the position not cut")
+        return notional, 1.0, V_
+    p = notional / V_; q = liq_g(p, steps)
+    if q >= p * 0.9999:
+        return notional, 1.0, V_
+    k = q / p
+    with _liq_lock:
+        _LIQ["cuts"].appendleft({"t": int(time.time()), "symbol": str(symbol), "share": round(p * 100, 2), "kept": round(k, 3),
+                                 "from": round(notional, 2), "to": round(notional * k, 2), "turnover": round(V_)})
+    return notional * k, k, V_
+
+
 def compute_risk_based_position(direction, entry, sl, leverage_cap, mmr_pct, total_equity, risk_pct=None,
                                  symbol=None, tiers_by_symbol=None, safety_margin=None):
     """v0.99.102 — the new, fully-automatic replacement for both manual
@@ -4241,6 +4342,7 @@ def compute_risk_based_position(direction, entry, sl, leverage_cap, mmr_pct, tot
     # notional now targets (price-move loss + both-sides fees) = risk_
     # amount exactly, instead of just the price-move portion alone.
     notional_usd = risk_amount / (sl_distance_pct / 100.0 + 2 * SCALP_TAKER_FEE_PCT)
+    notional_usd, _lk, _lv = liq_cut(symbol, notional_usd)   # v0.99.766 — the liquidity cut (every module's real position)
     real_mmr_pct, real_leverage_cap = mmr_pct, leverage_cap
     if symbol and tiers_by_symbol:
         tier_mmr, tier_lev = lookup_risk_tier_for_notional(symbol, notional_usd, tiers_by_symbol)
@@ -38723,6 +38825,14 @@ def widget_data():
     return d
 
 
+@app.route("/api/liq")
+def api_liq():
+    """v0.99.766 — the liquidity cut: on / the steps / the last cut positions (the settings' group shows them)"""
+    with _liq_lock:
+        cuts = list(_LIQ["cuts"])[:20]
+    return jsonify({"enabled": LIQ_ENABLED, "steps": liq_steps_now(), "own": bool(LIQ_STEPS), "default": LIQ_STEPS_DEFAULT, "cuts": cuts})
+
+
 @app.route("/api/widget")
 def api_widget():
     """v0.99.761 — the balance and the year's forecast for KWGT ($wg("http://127.0.0.1:8080/api/widget", json, .bal_s)$)"""
@@ -42952,6 +43062,23 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
+    <details class="settingsGroup" style="--mod-color:#4fc3f7;"><summary class="settingsGroupTitle">💧 Размер позиции по ликвидности</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Урезать позицию, когда она велика для монеты</div>
+          <div class="sub hintx">для всех модулей сразу: размер каждой реальной сделки сравнивается с часовым оборотом её монеты (медиана за последние 24 часа на Binance). Пока позиция меньше первого шага — ничего не меняется (на небольшом счёте почти никогда); дальше она растёт медленнее, а выше последнего шага с наклоном 0 — не растёт. Так рыночные стопы и входы не двигают цену, а Binance не отказывает в слишком большой позиции.</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setLiqEnabled"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ Шаги урезания</div>
+          <div class="sub hintx">«доля оборота %:наклон» через «/». «5:0» — позиция не больше 5% часового оборота; «2:0.5/4:0.25/8:0» — от 2% каждый лишний $ плана даёт $0.5, от 4% — $0.25, от 8% — ничего. Наклоны от 1 к 0, доли по возрастанию. Пусто — шаги по умолчанию этой версии бота (<span id="liqDefault">4:0.5/8:0.25/12:0</span>).</div>
+        </div>
+        <input type="text" id="setLiqSteps" placeholder="по умолчанию" style="width:150px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+      </div>
+      <div id="liqRecent" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">урезанных позиций пока не было</div>
+    </div></details>
     <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">🎨 Оформление</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -48668,6 +48795,7 @@ const setInputs = {
   dlm_binance: document.getElementById('setDlmBinance'),   // v0.99.684
   bn_others: document.getElementById('setBnOthers'),   // v0.99.698
   bn_cross: document.getElementById('setBnCross'),   // v0.99.717
+  liq_enabled: document.getElementById('setLiqEnabled'),   // v0.99.766
   dlm_more_coins: document.getElementById('setDlmMoreCoins'),   // v0.99.686
   autotrade_smc: document.getElementById('setAutotradeSmc'),
   telegram_alerts_smc: document.getElementById('setTgSmc'),
@@ -48696,6 +48824,7 @@ const setValueInputs = {
   risk_pct_smc: document.getElementById('setRiskPctSmc'),   // v0.99.678 — these number fields were in the checkbox map: a typed risk was sent as false and reset to the default
   risk_pct_htf: document.getElementById('setRiskPctHtf'),   // v0.99.732
   risk_pct_cfl: document.getElementById('setRiskPctCfl'),   // v0.99.740
+  liq_steps: document.getElementById('setLiqSteps'),   // v0.99.766
   zones_tp_pct: document.getElementById('setZonesTpPct'),
   zones_max_days: document.getElementById('setZonesMaxDays'),
   snr_top_n: document.getElementById('setSnrTopN'),
@@ -48732,6 +48861,17 @@ async function loadSettings() {
     const s = await (await fetch('/api/settings')).json();
     applySettingsToInputs(s);
     updateHeaderButtonVisibility(s);
+  } catch (e) {}
+  loadLiq();
+}
+async function loadLiq() {   // v0.99.766 — the liquidity cut's last cut positions
+  try {
+    const d = await (await fetch('/api/liq')).json(), el = document.getElementById('liqRecent');
+    if (!el) return;
+    const de = document.getElementById('liqDefault'); if (de && d.default) de.textContent = d.default;
+    const usdS = v => '$' + Math.round(v).toLocaleString('ru-RU');
+    el.innerHTML = (d.cuts || []).length ? 'последние урезания:<br>' + d.cuts.map(c => `${new Date(c.t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'})} · ${c.symbol.replace('_USDT', '').replace(/USDT$/, '')}: позиция ${usdS(c.from)} = ${c.share}% часового оборота ${usdS(c.turnover)} → ${usdS(c.to)} (×${c.kept})`).join('<br>')
+      : (d.enabled ? 'урезанных позиций пока не было' : 'урезание выключено');
   } catch (e) {}
 }
 
