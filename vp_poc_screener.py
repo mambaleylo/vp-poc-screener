@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.772"
+APP_VERSION = "0.99.773"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)

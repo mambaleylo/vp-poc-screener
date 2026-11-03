@@ -21422,3 +21422,19 @@ v0.99.772 — the header re-counted once with SMC v0.99.771
   usual $50.6k -> $50.4k, the good $228k -> $221k, the drawdown 81% -> 83%, the last 12 months $128k -> $145k; without HTF
   $47.1k -> $45.2k; ⚡ alone the same. The worse bad year / drawdown come from the honest SMC list (every touch the bot
   trades: the shallow touches the lab had skipped), the last 12 months' gain from the take 4R.
+
+v0.99.773 — 📏 HTF: the levels armed up to 2.5 daily ATR from the price (was 1.5)
+- The user: "для htf ещё тоже полную проверку, новые гипотезы для увеличения количества сделок, винрейта и среднего r", then
+  "досягаемость 2,5". The HTF lab re-made from scratch on the clean 2020- candles (tools/winrate htf_sc.py: both models'
+  yearly walk-forward scores, the 127 bot coins): the deployed models reproduced (corr 0.973 / 0.976, the 2026 picks +0.83R
+  vs the bot's +0.84R). The checks as for ⚡ / EMA / SMC: the lab and the bot trigger alike (0.1% through the level); the
+  market entry on Binance's 1-min candles of the 290 trades -0.05R (better than the level); the list with 2026 by the bot's
+  own models — the money the same as the old list's; the 83 check coins worse.
+- 33 rule variants (htf_var.py) in the bundle's strictest money with HTF and paired noise runs (money_ema.py MOD=htf): the
+  reach 2.5 better in 6 of 6 runs on the usual year (+10%: $44.6k -> $49.0k) and 5 of 6 on the last 12 months (+4%), the
+  drawdown the same; + take 4R: the usual year +23% but the last 12 months -2% — not taken; the threshold, both / one
+  model, shorts, the stop, the emergency stop, the hold, the close-stop bar, the break-even, the partial, the deeper limit,
+  the cap, the day / week-month levels only, the risk by the score, the 210 coins — worse or noise.
+- vp_htf_model.json: rule.reach_datr 2.5 (the models and thresholds unchanged), research.years 2023..2026; vp_bt_trades.json
+  "htf": 376 trades +0.85R WR 68% (htf_export3.py).
+- Tests: t_htf_v3 (reach 2.5, a level 2 dATR away armed, the bot's settle = the new list 200/200), t_htf_bot — OK.
