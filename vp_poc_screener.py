@@ -28658,9 +28658,10 @@ _PROC_START = time.time()
 # months up, the bad year and the drawdown a little worse (the honest any-touch list, not the take)
 # v0.99.774 — and with HTF v0.99.773 (the reach 2.5); the noise runs now drop each module's trades by the trade's own hash
 # (before, a change of one module re-shuffled the others' drops: the bundle without HTF had moved $45k -> $53k on HTF alone)
-EXPECT_YEAR = {"dlm": {"p10": 963, "p50": 4213, "p90": 25659, "dd": 82, "last12": 24107},
-               "bundle": {"p10": 7798, "p50": 46551, "p90": 197226, "dd": 83, "last12": 99871},
-               "bundle_htf": {"p10": 15597, "p50": 55135, "p90": 210351, "dd": 83, "last12": 146147}}
+# v0.99.775 — with the default risks ⚡ 4% + P/R 3.75 / SMC 3.125 / EMA 3.75 / HTF 2.5 (money_mix.py: the drawdown 83% -> 77%)
+EXPECT_YEAR = {"dlm": {"p10": 775, "p50": 3482, "p90": 19239, "dd": 74, "last12": 19149},
+               "bundle": {"p10": 6418, "p50": 57987, "p90": 249745, "dd": 77, "last12": 122435},
+               "bundle_htf": {"p10": 13098, "p50": 57941, "p90": 223344, "dd": 77, "last12": 155791}}
 
 
 @app.route("/api/boot")

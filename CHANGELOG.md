@@ -21445,3 +21445,15 @@ v0.99.774 — the header re-counted once with HTF v0.99.773; the noise runs made
   HTF had moved $45.2k -> $53.2k when only HTF had changed). ⚡ + P/R + SMC + EMA + HTF a year from $100: the bad year
   $9.6k -> $15.6k, the usual $50.4k -> $55.1k (+9%, the lab's paired +10%), the good $221k -> $210k, the drawdown 83%,
   the last 12 months $145k -> $146k; without HTF $46.6k; ⚡ alone the same.
+
+v0.99.775 — the bundle's default risks: ⚡ 4% (was 4.5), P/R 3.75 (3), SMC 3.125 (2.5), EMA 3.75 (3), HTF 2.5 (2)
+- The user: "есть какие-то связки с адекватным снижением доходности, но с более выгодными просадками?", then "донастроить"
+  and "⚡ 4%, остальные x1.25". tools/winrate money_mix.py (the header's money, 6 paired noise runs; the others' drop by each
+  trade's hash): the risk moved from ⚡ (whose clustered trades make the deep drawdowns) to the other modules — the usual year
+  +9% and the drawdown 83% -> 77%, both in 6 of 6 runs; the bad year $15.6k -> $12.4k, the last 12 months -4%; the worst 10%
+  windows' drawdown the same ~89% (no mix lowers it). ⚡ 3.5% / 3% or ⚡ off: much less money; the others above x1.4: their
+  own deep drawdowns. The fields typed in the settings stay as typed (the defaults apply to the empty ones).
+- The header re-counted once (money_hdr2.py with these risks): the bad year $15.6k -> $13.1k, the usual $55.1k -> $57.9k, the
+  good $210k -> $223k, the drawdown 83% -> 77%, the last 12 months $146k -> $156k; ⚡ alone (4%) $4.2k -> $3.5k, 82% -> 74%;
+  vp_dlm_model.json research.money with it. The settings' hints and the ⚡ list's money replica (risk 4) updated.
+- Tests: t_dlm_bot (risk 4 x 0.625 = 2.5%), t_htf_bot (HTF 2.5%), t_hdr_htf — OK.
