@@ -24,8 +24,21 @@ pr = dict(n_estimators=300, learning_rate=0.05, num_leaves=63, min_child_samples
           colsample_bytree=0.7, reg_lambda=5.0, verbose=-1, n_jobs=4)
 M = json.load(open("/home/user/vp-poc-screener/vp_dlm_model.json")); S = {s["name"]: s for s in M["streams"]}
 YEARS = range(2023, 2027)
+# BRD=1 (the user's drawdown round): + 6 market-breadth features (breadth_build.py) at the order's time, by its side: the
+# market's mean 24 h / 72 h return, the share of coins running with / against the side > 5% in 24 h, the spread, the share
+# above their 7-day average; both feature sets (28 / 33) get them
+BRD = os.environ.get("BRD") == "1"
+if BRD:
+    _B = np.load(f"{ST}/wf/breadth.npz")
+def brd(t_close, side):
+    i = np.clip((np.asarray(t_close, np.int64) - 3600 - int(_B["T"][0])) // 3600, 0, len(_B["T"]) - 1); s_ = np.asarray(side, np.float64)
+    up, dn = _B["up5"][i], _B["dn5"][i]
+    return np.column_stack([s_ * _B["r24"][i], s_ * _B["r72"][i], np.where(s_ > 0, up, dn), np.where(s_ > 0, dn, up), _B["disp"][i],
+                            s_ * (2 * _B["above"][i] - 1)]).astype(np.float32)
+NB = 6 if BRD else 0
+cols = lambda X_: list(range(X_)) + list(range(33, 33 + NB))
 for stream in os.environ.get("STREAMS", "wick4h,close2h").split(","):   # + the new charts (dlm_engine.STREAMS: the wick4h exits)
-    rows = {k: [] for k in ("coin", "t", "F", "R", "tout")}
+    rows = {k: [] for k in ("coin", "t", "F", "R", "tout", "side")}
     TRS = os.environ.get("TRAIN_STREAMS", stream).split(",")   # TRAIN_STREAMS=wick4h,wick4h_o2: one model on both 4h grids' orders
     for c, g in GROUP.items():
         if g != "train": continue
@@ -33,17 +46,18 @@ for stream in os.environ.get("STREAMS", "wick4h,close2h").split(","):   # + the 
             z = np.load(f"{ST}/{FEAT}/{ts_}/{c}.npz")
             if not len(z["t"]): continue
             rows["coin"].append(np.full(len(z["t"]), c))
-            for k in ("t", "F", "R", "tout"): rows[k].append(z[k])
+            for k in ("t", "F", "R", "tout", "side"): rows[k].append(z[k])
     D = {k: np.concatenate(v) for k, v in rows.items()}; y = np.clip(D["R"], -1.5, 1.5); t0 = time.time()
+    if BRD: D["F"] = np.hstack([D["F"][:, :33], brd(D["t"], D["side"])])   # feat "t" = the order's time (the bar's close)
     MODELS, THR = {}, {}
     prev = None
     for Y in [2022] + list(YEARS):
         tr = np.flatnonzero(D["tout"] < ts(Y) - 3 * 86400)
         if len(tr) < 20000: continue
-        ms = [(X_, lgb.LGBMRegressor(random_state=sd, **pr).fit(D["F"][tr][:, :X_], y[tr])) for X_ in (28, 33) for sd in range(NS)]
+        ms = [(X_, lgb.LGBMRegressor(random_state=sd, **pr).fit(D["F"][tr][:, cols(X_)], y[tr])) for X_ in (28, 33) for sd in range(NS)]
         MODELS[Y] = ms
         ref = np.flatnonzero((D["t"] >= ts(Y - 1)) & (D["t"] < ts(Y)))
-        sc_ref = np.mean([m.predict(D["F"][ref][:, :X_]) for X_, m in (MODELS.get(Y - 1) or ms)], axis=0)   # the previous year by its own model
+        sc_ref = np.mean([m.predict(D["F"][ref][:, cols(X_)]) for X_, m in (MODELS.get(Y - 1) or ms)], axis=0)   # the previous year by its own model
         THR[Y] = float(np.quantile(sc_ref, 0.99)); THR[(Y, "keep")] = float(np.quantile(sc_ref, QK))
         print(stream, Y, "train", len(tr), "thr", round(THR[Y], 4), f"{time.time() - t0:.0f}s", flush=True)
     st = S.get(stream, S["wick4h"]); p = DE.STREAMS[stream]; bs = p["hh"] * 3600; B = DE.btc_ctx(stream)
@@ -52,11 +66,12 @@ for stream in os.environ.get("STREAMS", "wick4h,close2h").split(","):   # + the 
         h1 = DE.load1h(c); ev = DE.features(c, stream, B, h1)
         if ev is None: continue
         tsc = ev["t"] + bs; yr = tsc.astype("datetime64[s]").astype("datetime64[Y]").astype(int) + 1970
+        if BRD: ev["f"] = np.hstack([ev["f"][:, :33], brd(tsc, ev["side"])])
         keep = np.zeros(len(tsc), bool); sc = np.full(len(tsc), np.nan); th = np.full(len(tsc), np.inf)
         for Y in YEARS:
             ii = np.flatnonzero(yr == Y)
             if not len(ii) or Y not in MODELS: continue
-            sc[ii] = np.mean([m.predict(ev["f"][ii][:, :X_]) for X_, m in MODELS[Y]], axis=0); th[ii] = THR[Y]
+            sc[ii] = np.mean([m.predict(ev["f"][ii][:, cols(X_)]) for X_, m in MODELS[Y]], axis=0); th[ii] = THR[Y]
         tk = np.array([THR.get((int(y_), "keep"), np.inf) for y_ in yr])
         keep = np.isfinite(sc) & (sc >= tk)
         ii = np.flatnonzero(keep)

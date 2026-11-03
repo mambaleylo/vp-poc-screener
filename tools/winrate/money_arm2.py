@@ -5,7 +5,7 @@ it while it waits for room -> no trade; filled -> the trade (fill_walk's R / exi
 among the ones wanting it in an hour) / "Bn" the score over its stream's threshold first, an armed lower one taken off when
 there is no room. P/R, SMC, EMA, HTF at the market as money_multi. A year from $100, 144 weekly windows, 5 seeds.
 usage: money_arm2.py [rules] -> the table (+ <LABSTORE>/wf/money_arm2.json)"""
-import sys, os, json, bisect, collections, numpy as np
+import sys, os, json, bisect, collections, itertools, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dlm_engine as DE, money_multi as M, money_expect as X, money_osc as O, money_params as MP
 from multiprocessing import Pool
@@ -34,6 +34,27 @@ def btc_vol_ratio(h):
         _VOL.update(T=T, ratio=np.where(s720 > 0, s24 / s720, 1.0))
     i = np.searchsorted(_VOL["T"], h - 3600, side="right") - 1
     return float(_VOL["ratio"][i]) if i >= 720 else 1.0
+_FUND = {}
+def funding_at(sym, t):
+    """the coin's last funding rate settled at or before t (<LABSTORE>/data/funding), None when unknown"""
+    if sym not in _FUND:
+        fn = f"{M.ST}/data/funding/{sym}.csv"
+        a = np.loadtxt(fn, delimiter=",", ndmin=2) if os.path.exists(fn) else np.zeros((0, 2))
+        _FUND[sym] = (a[:, 0].astype(np.int64), a[:, 1]) if len(a) else None
+    z = _FUND[sym]
+    if z is None: return None
+    i = np.searchsorted(z[0], t, side="right") - 1
+    return float(z[1][i]) if i >= 0 and t - z[0][i] < 12 * 3600 else None
+_BTR = {}
+def btc_above_ema50(t):
+    """BTC's last closed day above its daily EMA50 at t"""
+    if "d" not in _BTR:
+        T, C = M.h1("BTCUSDT"); d = T // 86400; last = np.r_[np.flatnonzero(d[1:] != d[:-1]), len(d) - 1]
+        dc = C[last]; e = np.empty(len(dc)); e[0] = dc[0]
+        for k in range(1, len(dc)): e[k] = e[k - 1] + 2 / 51 * (dc[k] - e[k - 1])
+        _BTR.update(d=d[last], up=dc > e)
+    i = np.searchsorted(_BTR["d"], t // 86400, side="left") - 1   # the last day closed before t's day
+    return bool(_BTR["up"][i]) if i >= 50 else True
 _SIG = {}
 def sig_ratio(sym, h):
     """a coin's std of hourly log returns over the 30 days before the day of h / BTC's (a beta proxy), cached a day"""
@@ -194,6 +215,14 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     VOL = tuple(float(x) for x in kw["vol"].split("/")) if "vol" in kw else None
     CONF = tuple(float(x) for x in kw["conf"].split("/")) if "conf" in kw else None
     BETA = float(kw.get("beta", 0)); HCAP = int(kw.get("hcap", 0))
+    # round 3 (v0.99.776): "fund=X" — no new ⚡ on a side whose crowd pays the funding above X (side x rate > X: crowded);
+    # "btrend=1" — ⚡ longs only while BTC is above its daily EMA50, shorts only below; "cprio=N/P" — with N+ ⚡ open on a side,
+    # a new one there needs its score >= P x the threshold; "hburst=N" — at most N new ⚡ a side an hour; "noc2hs=1" — no 2h
+    # shorts; "noo2=1" — no shifted 4h stream
+    FUNDX = float(kw.get("fund", 0)); BTREND = kw.get("btrend") == "1"; CPRIO = tuple(float(x) for x in kw["cprio"].split("/")) if "cprio" in kw else None
+    HBUR = int(kw.get("hburst", 0))
+    if kw.get("noc2hs") == "1": OR = [o for o in OR if not (o["stream"] == "close2h" and o["side"] < 0)]
+    if kw.get("noo2") == "1": OR = [o for o in OR if o["stream"] != "wick4h_o2"]
     curve = [] if kw.get("curve") == "1" else None   # "curve=1": (hour, equity, open ⚡ longs, shorts, others) every 6 h, the last value
     path = [] if kw.get("path") == "1" else None   # "path=1": the balance at every 30 days (before that day's top-up) + the end, a 5th value
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
@@ -366,6 +395,12 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
                     if touch or ao["side"] * (cl - ao["lv"]) / ao["atr"] > d_o + 0.25: del armed[k2]
                     else: busy = True
             if BST and cool.get(o["side"], 0) > h: busy = True
+            if FUNDX and not busy:
+                fr = funding_at(o["sym"], h)
+                if fr is not None and o["side"] * fr > FUNDX: busy = True
+            if BTREND and not busy and (btc_above_ema50(h) != (o["side"] > 0)): busy = True
+            if CPRIO and not busy and o["prio"] < CPRIO[1] and sum(1 for p_ in pos if p_["mod"] == "dlm" and p_["side"] == o["side"]) >= CPRIO[0]: busy = True
+            if HBUR and not busy and sum(1 for t_, sd in itertools.takewhile(lambda x: x[0] >= h, reversed(opens)) if sd == o["side"]) >= HBUR: busy = True
             if CONF and not busy:
                 same = [p_ for p_ in pos if p_["mod"] == "dlm" and p_["side"] == o["side"]]
                 if len(same) >= CONF[0]:
