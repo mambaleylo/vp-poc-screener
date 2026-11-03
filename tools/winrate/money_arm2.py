@@ -55,6 +55,13 @@ def btc_above_ema50(t):
         _BTR.update(d=d[last], up=dc > e)
     i = np.searchsorted(_BTR["d"], t // 86400, side="left") - 1   # the last day closed before t's day
     return bool(_BTR["up"][i]) if i >= 50 else True
+_HMM = {}
+def hmm_p(h, which):
+    """hmm_regime.py's filtered probability at h (the last 4 h bar closed by h): "p" = panic, "a" = active + panic"""
+    if "T" not in _HMM:
+        z = np.load(f"{M.ST}/wf/hmm_regime.npz"); _HMM.update(T=z["T"], p=np.nan_to_num(z["p_panic"]), a=np.nan_to_num(z["p_panic"] + z["p_act"]))
+    i = np.searchsorted(_HMM["T"], h, side="right") - 1
+    return float(_HMM[which][i]) if i >= 0 else 0.0
 _SIG = {}
 def sig_ratio(sym, h):
     """a coin's std of hourly log returns over the 30 days before the day of h / BTC's (a beta proxy), cached a day"""
@@ -221,6 +228,8 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     # shorts; "noo2=1" — no shifted 4h stream
     FUNDX = float(kw.get("fund", 0)); BTREND = kw.get("btrend") == "1"; CPRIO = tuple(float(x) for x in kw["cprio"].split("/")) if "cprio" in kw else None
     HBUR = int(kw.get("hburst", 0))
+    HMMR = (float(kw["hmm"].split("/")[0]), float(kw["hmm"].split("/")[1]), kw["hmm"].split("/")[2], kw["hmm"].split("/")[3] if kw["hmm"].count("/") > 2 else "all") if "hmm" in kw else None
+    # "hmm=P/m/w[/dlm]": while hmm_regime's probability (w: "p" panic, "a" active + panic) is above P, the new trades' risk x m (m 0: none)
     if kw.get("noc2hs") == "1": OR = [o for o in OR if not (o["stream"] == "close2h" and o["side"] < 0)]
     if kw.get("noo2") == "1": OR = [o for o in OR if o["stream"] != "wick4h_o2"]
     curve = [] if kw.get("curve") == "1" else None   # "curve=1": (hour, equity, open ⚡ longs, shorts, others) every 6 h, the last value
@@ -245,11 +254,13 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             r *= ld[0] if n_ < ld[2] else ld[1]
             v = dict(v, t0=v.get("t0") or v["t"] + 3600)
         if VOL and btc_vol_ratio(int(v.get("t0") or v["t"] + 3600)) > VOL[0]: r *= VOL[1]
+        if HMMR and (HMMR[3] == "all" or v["mod"] == "dlm") and hmm_p(int(v.get("t0") or v["t"] + 3600), HMMR[2]) > HMMR[0]: r *= HMMR[1]
         return eq * r * WF(v) * v.get("xm", 1.0)   # "xm": a per-trade risk multiplier (money_wk.py), 1 = as the bot
     def used(): return sum(o["heat"] for o in pos) + hf * sum(o["heat"] for o in armed.values())
     def sused(s): return sum(o["heat"] for o in pos if o["side"] == s) + hf * sum(a["heat"] for a in armed.values() if a["o"]["side"] == s)
     def fit(v, eq, extra=0.0):
         rd = rd_of(v, eq); hn = rd * v["sth"] / v["st"]; room = heat * eq - used() + extra
+        if rd <= 0: return None, 0.0, room   # a zero risk (hmm=…/0): no trade
         if sh: room = min(room, sh * eq - sused(v["side"]) + extra)
         if net: room = min(room, net * eq - (sused(v["side"]) - sused(-v["side"])) + extra)
         if hn > room:

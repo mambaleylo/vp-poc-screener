@@ -51,7 +51,14 @@ MIX = {   # name: (the rule's extra, ⚡ streams kept)
     "11. ⚡ не больше 14 сразу": ("|mp=14", None),
     "12. без шортов 2ч": ("|noc2hs=1", None),
     "12. без 4ч со сдвигом": ("|noo2=1", None),
-}.items()} if os.environ.get("ROUND") == "4" else {
+}.items()} if os.environ.get("ROUND") == "4" else {k_: (RK_ + e_, kp) for k_, (e_, kp) in {   # ROUND=5: the HMM regimes (hmm_regime.py)
+    "как сейчас (риски v0.99.775)": ("", None),
+    "HMM: паника > 50% — новые сделки x0.5": ("|hmm=0.5/0.5/p", None),
+    "HMM: паника > 50% — новых нет": ("|hmm=0.5/0/p", None),
+    "HMM: паника > 50% — новых ⚡ нет": ("|hmm=0.5/0/p/dlm", None),
+    "HMM: активный+паника > 80% — x0.6": ("|hmm=0.8/0.6/a", None),
+    "HMM: активный+паника > 80% — ⚡ x0.5": ("|hmm=0.8/0.5/a/dlm", None),
+}.items()} if os.environ.get("ROUND") == "5" else {
     "как сейчас (⚡ 4.5%)": ("", None),
     "⚡ 3.5%": ("|dlm=3.5", None),
     "⚡ 2.5%": ("|dlm=2.5", None),
