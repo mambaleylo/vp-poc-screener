@@ -4,7 +4,7 @@ their own — so the risk moved from ⚡ to them, ⚡ without a stream, ⚡ off.
 the liquidity cut, the slippage, the bundle with HTF, a year from $100), K paired runs (⚡'s orders drop as money_hdr2, the
 others by each trade's hash), every 2nd weekly window + the last 12 months: the usual / bad / good year, the drawdown of the
 usual and of the worst-10% window, the share of windows below the start at 6 months.
-usage: ALLSUF=_clr money_mix.py [K]   -> <LABSTORE>/wf/money_mix.json"""
+usage: [ROUND=2] ALLSUF=_clr money_mix.py [K]   -> <LABSTORE>/wf/money_mix[2].json   (ROUND=2: the fine grid around ⚡ 3.5% + x1.25)"""
 import sys, os, json, zlib, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 ARGV, sys.argv = sys.argv[1:], sys.argv[:1]
@@ -14,6 +14,16 @@ BASE = "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0|cap=125|slip=1|liq=4:0.5/8:0.25/12:0|p
 W = X.STARTS[::2]
 O = lambda x: f"|prv={3.0 * x:g}|smc={2.5 * x:g}|emx={3.0 * x:g}|htf={2.0 * x:g}"   # the others' risk x x (now 3 / 2.5 / 3 / 2 %)
 MIX = {   # name: (the rule's extra, ⚡ streams kept)
+    "как сейчас (⚡ 4.5%)": ("", None),
+    "⚡ 4%, остальные x1.1": ("|dlm=4.0" + O(1.1), None),
+    "⚡ 4%, остальные x1.25": ("|dlm=4.0" + O(1.25), None),
+    "⚡ 3.75%, остальные x1.2": ("|dlm=3.75" + O(1.2), None),
+    "⚡ 3.5%, остальные x1.1": ("|dlm=3.5" + O(1.1), None),
+    "⚡ 3.5%, остальные x1.25": ("|dlm=3.5" + O(1.25), None),
+    "⚡ 3.5%, остальные x1.4": ("|dlm=3.5" + O(1.4), None),
+    "⚡ 3%, остальные x1.25": ("|dlm=3.0" + O(1.25), None),
+    "⚡ 3%, остальные x1.4": ("|dlm=3.0" + O(1.4), None),
+} if os.environ.get("ROUND") == "2" else {
     "как сейчас (⚡ 4.5%)": ("", None),
     "⚡ 3.5%": ("|dlm=3.5", None),
     "⚡ 2.5%": ("|dlm=2.5", None),
@@ -55,5 +65,5 @@ if __name__ == "__main__":
              "p50_runs": [int(x) for x in p50], "dd_runs": [int(round(x * 100)) for x in dd]}
         out[nm] = o
         print(f"{nm} | ${o['p10']:,} | ${o['p50']:,} | ${o['p90']:,} | {o['dd']}% | {o['dd90']}% | {o['m6_below']}% | ${o['last12']:,}", flush=True)
-    json.dump(out, open(f"{M.ST}/wf/money_mix.json", "w"), indent=1, ensure_ascii=False)
+    json.dump(out, open(f"{M.ST}/wf/money_mix{os.environ.get('ROUND', '')}.json", "w"), indent=1, ensure_ascii=False)
     print("money mix done", flush=True)
