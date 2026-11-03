@@ -12,6 +12,7 @@ import money_arm2 as MA2, money_multi as M, money_expect as X
 from multiprocessing import Pool
 BASE = "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0|cap=125|slip=1|liq=4:0.5/8:0.25/12:0|path=1"; K = int(ARGV[0]) if ARGV else 4
 W = X.STARTS[::2]
+RK_ = "|dlm=4|prv=3.75|smc=3.125|emx=3.75|htf=2.5"   # the bot's risks since v0.99.775
 O = lambda x: f"|prv={3.0 * x:g}|smc={2.5 * x:g}|emx={3.0 * x:g}|htf={2.0 * x:g}"   # the others' risk x x (now 3 / 2.5 / 3 / 2 %)
 MIX = {   # name: (the rule's extra, ⚡ streams kept)
     "как сейчас (⚡ 4.5%)": ("", None),
@@ -23,7 +24,22 @@ MIX = {   # name: (the rule's extra, ⚡ streams kept)
     "⚡ 3.5%, остальные x1.4": ("|dlm=3.5" + O(1.4), None),
     "⚡ 3%, остальные x1.25": ("|dlm=3.0" + O(1.25), None),
     "⚡ 3%, остальные x1.4": ("|dlm=3.0" + O(1.4), None),
-} if os.environ.get("ROUND") == "2" else {
+} if os.environ.get("ROUND") == "2" else {k_: (RK_ + e_, kp) for k_, (e_, kp) in {   # ROUND=3: the drawdown ideas on the bot's risks
+    "как сейчас (риски v0.99.775)": ("", None),
+    "1. стоп пачки ⚡ 15% счёта, пауза 24ч": ("|bstop=0.15/24", None),
+    "1. стоп пачки ⚡ 25% счёта, пауза 24ч": ("|bstop=0.25/24", None),
+    "1. стоп пачки ⚡ 35% счёта, пауза 48ч": ("|bstop=0.35/48", None),
+    "2. риск x0.5 при волатильности BTC x2": ("|vol=2.0/0.5", None),
+    "2. риск x0.5 при волатильности BTC x3": ("|vol=3.0/0.5", None),
+    "3. подтверждение: 4+ в сторону и они < -0.5R": ("|conf=4/0.5", None),
+    "3. подтверждение: 6+ в сторону и они < -0.3R": ("|conf=6/0.3", None),
+    "4. предел по бете x25 счёта": ("|beta=25", None),
+    "4. предел по бете x50 счёта": ("|beta=50", None),
+    "5. в просадке 40% риск x0.6": ("|ddc=0.4/0.6/0.25", None),
+    "5. в просадке 50% риск x0.5": ("|ddc=0.5/0.5/0.3", None),
+    "6. HTF не больше 2 за час": ("|hcap=2", None),
+    "6. HTF не больше 3 за час": ("|hcap=3", None),
+}.items()} if os.environ.get("ROUND") == "3" else {
     "как сейчас (⚡ 4.5%)": ("", None),
     "⚡ 3.5%": ("|dlm=3.5", None),
     "⚡ 2.5%": ("|dlm=2.5", None),

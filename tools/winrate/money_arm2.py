@@ -25,6 +25,28 @@ def stream_orders(st, suf=""):
                     "r": float(z["R"][k]), "t1": int(z["tout"][k]), "st": sa * a / e, "sth": ha * a / e, "stream": st, "mod": "dlm",
                     "mkt": 0 if int(z["kind"][k]) == 1 else 1})   # "mkt": the market fills of the trade (a take is a limit: 0)
     return out
+_VOL = {}
+def btc_vol_ratio(h):
+    """the user's drawdown round: BTC's mean |hourly log return| of the last 24 h / of the last 30 days, at the hour h"""
+    if "T" not in _VOL:
+        T, C = M.h1("BTCUSDT"); r = np.abs(np.diff(np.log(C), prepend=np.log(C[0]))); cs = np.cumsum(r)
+        s24 = (cs - np.r_[np.zeros(24), cs[:-24]]) / 24; s720 = (cs - np.r_[np.zeros(720), cs[:-720]]) / 720
+        _VOL.update(T=T, ratio=np.where(s720 > 0, s24 / s720, 1.0))
+    i = np.searchsorted(_VOL["T"], h - 3600, side="right") - 1
+    return float(_VOL["ratio"][i]) if i >= 720 else 1.0
+_SIG = {}
+def sig_ratio(sym, h):
+    """a coin's std of hourly log returns over the 30 days before the day of h / BTC's (a beta proxy), cached a day"""
+    key = (sym, h // 86400)
+    if key not in _SIG:
+        def sd(s_):
+            T, C = M.h1(s_); j = np.searchsorted(T, (h // 86400) * 86400, side="right")
+            c = C[max(0, j - 721):j]
+            return float(np.std(np.diff(np.log(c)))) if len(c) > 50 else None
+        a, b = sd(sym), sd("BTCUSDT")
+        if len(_SIG) > 200000: _SIG.clear()
+        _SIG[key] = (a / b) if (a and b) else 1.5
+    return _SIG[key]
 def orders(suf=None):
     out = []
     for st in ("wick4h", "close2h"):
@@ -163,6 +185,15 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     HLOSS = float(kw.get("hloss", 0))   # "hloss=X": the hedge only while the side's open ⚡ are down X R a position on average (unrealized)
     HSIDE = int(kw.get("hside", 0))   # "hside=1": hedge only the crowd of ⚡ longs (BTC short), -1 only the shorts' (BTC long)
     HG = tuple(float(x) for x in kw["hedge"].split("/")) if "hedge" in kw else None; HDG = {"n": 0.0, "px": None}   # (a dict: fit() reads it)
+    # the user's drawdown round (v0.99.776): "bstop=X/H" — the open ⚡ of a side together down more than X of the equity -> all
+    # closed at the hour's price, no new ⚡ on that side for H hours; "vol=Z/m" — BTC's last-24h volatility over Z x its 30-day
+    # level -> every new trade's risk x m; "conf=N/X" — with N+ ⚡ open on a side, a new one there only while their average
+    # unrealized R is above -X; "beta=B" — the open notional of a side weighted by each coin's volatility / BTC's at most B x the
+    # equity; "hcap=N" — at most N new HTF trades an hour
+    BST = tuple(float(x) for x in kw["bstop"].split("/")) if "bstop" in kw else None; cool = {}
+    VOL = tuple(float(x) for x in kw["vol"].split("/")) if "vol" in kw else None
+    CONF = tuple(float(x) for x in kw["conf"].split("/")) if "conf" in kw else None
+    BETA = float(kw.get("beta", 0)); HCAP = int(kw.get("hcap", 0))
     curve = [] if kw.get("curve") == "1" else None   # "curve=1": (hour, equity, open ⚡ longs, shorts, others) every 6 h, the last value
     path = [] if kw.get("path") == "1" else None   # "path=1": the balance at every 30 days (before that day's top-up) + the end, a 5th value
     cash = eq0; pos = []; armed = {}; peak = eq0; mdd = 0.0; done = set(); n_fill = n_skip = 0
@@ -184,6 +215,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
                 n_ = sum(1 for o in pos if o["mod"] == "dlm") + len(armed)
             r *= ld[0] if n_ < ld[2] else ld[1]
             v = dict(v, t0=v.get("t0") or v["t"] + 3600)
+        if VOL and btc_vol_ratio(int(v.get("t0") or v["t"] + 3600)) > VOL[0]: r *= VOL[1]
         return eq * r * WF(v) * v.get("xm", 1.0)   # "xm": a per-trade risk multiplier (money_wk.py), 1 = as the bot
     def used(): return sum(o["heat"] for o in pos) + hf * sum(o["heat"] for o in armed.values())
     def sused(s): return sum(o["heat"] for o in pos if o["side"] == s) + hf * sum(a["heat"] for a in armed.values() if a["o"]["side"] == s)
@@ -204,6 +236,14 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             imp = (SLIP * s_ * (notional / (24 * V_)) ** 0.5) if (SLIP and V_ and s_) else 0.0
         else:
             imp = 0.0
+        if BETA:
+            t_ = int(v.get("t0") or v["t"] + 3600)
+            ex = sum(o["notional"] * sig_ratio(o["sym"], t_) for o in pos if o["side"] == v["side"]) + \
+                 sum(a["notional"] * sig_ratio(a["sym"], t_) for a in armed.values() if a["o"]["side"] == v["side"])
+            need = notional * sig_ratio(v["sym"], t_); rb = BETA * eq - ex
+            if need > rb:
+                if rb <= need * 0.1: return None, hn, room
+                q = rb / need; rd *= q; notional *= q
         if notional < minn: return None, hn, room   # under Binance's minimum order: not opened
         mg = notional / M.lev_real(v["sym"], notional, cap); free = eq - sum(o["mg"] for o in pos) - sum(o["mg"] for o in armed.values()) - abs(HDG["n"]) / 20
         if nomg: mg = 0.0   # "nomg=1": the margin never short (what the free margin costs)
@@ -257,6 +297,18 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         if curve is not None and h % 21600 == 0:
             curve.append((h, round(nav, 4), sum(1 for o in pos if o["mod"] == "dlm" and o["side"] > 0), sum(1 for o in pos if o["mod"] == "dlm" and o["side"] < 0),
                           sum(1 for o in pos if o["mod"] != "dlm")))
+        if BST:
+            for sd in (1, -1):
+                sp = [o for o in pos if o["mod"] == "dlm" and o["side"] == sd]
+                if len(sp) < 2: continue
+                pxs = [M.px_at(o["sym"], h) for o in sp]
+                pl = sum(o["side"] * (p_ - o["e"]) / o["e"] * o["notional"] for o, p_ in zip(sp, pxs) if p_)
+                if pl < -BST[0] * eq:
+                    for o, p_ in zip(sp, pxs):
+                        if not p_: continue
+                        r_ = o["side"] * (p_ - o["e"]) / o["e"] / o["st"] - 0.001 / o["st"]
+                        cash += o["rd"] * (r_ - o.get("imp", 0.0) / o["st"]); pos.remove(o)
+                    cool[sd] = h + int(BST[1] * 3600)
         if ddc:
             if not cut_on and nav < peak * (1 - ddc[0]): cut_on = True
             elif cut_on and nav >= peak * (1 - ddc[2]): cut_on = False
@@ -268,6 +320,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         while jo < len(OT) and OT[jo]["t0"] <= h:   # the other modules at the market
             v = OT[jo]; jo += 1
             if paused or v["t0"] < h - 3600 or any(o["sym"] == v["sym"] for o in pos) or any(a["sym"] == v["sym"] for a in armed.values()): continue
+            if HCAP and v["mod"] == "htf" and sum(1 for o in pos if o["mod"] == "htf" and o["t0"] >= h - 3600) >= HCAP: continue
             s_, hn, room = fit(v, eq)
             if oth and armed and (s_ is None or s_["rd"] < rd_of(v, eq) * 0.999):   # no room: the armed ⚡ limits (the lowest priority first) make way
                 freed = 0.0
@@ -312,6 +365,12 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
                     ao = a["o"]
                     if touch or ao["side"] * (cl - ao["lv"]) / ao["atr"] > d_o + 0.25: del armed[k2]
                     else: busy = True
+            if BST and cool.get(o["side"], 0) > h: busy = True
+            if CONF and not busy:
+                same = [p_ for p_ in pos if p_["mod"] == "dlm" and p_["side"] == o["side"]]
+                if len(same) >= CONF[0]:
+                    ur = [p_["side"] * (px_ - p_["e"]) / p_["e"] / p_["st"] for p_ in same for px_ in [M.px_at(p_["sym"], h)] if px_]
+                    if ur and np.mean(ur) < -CONF[1]: busy = True
             nd = sum(1 for p_ in pos if p_["mod"] == "dlm") + (len(armed) if cnt else 0)
             blk = (SC or BSH or BUR or FUSE) and not busy and blocked(o, h)
             busy = busy or bool(blk)
