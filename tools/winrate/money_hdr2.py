@@ -5,7 +5,7 @@ money (money_arm2, the header's rule) — ⚡ alone / + P/R, SMC, EMA / + HTF, a
 2025-10) and the last 12 months, the median of K runs each dropping a random 5% of the trades (the money's noise; one path
 swings the usual year x2); ⚡ alone also cautious (every trade 0.025R worse), the balance at 6 months.
 -> <LABSTORE>/wf/money_hdr2.json. usage: ALLSUF=_clr money_hdr2.py [K]"""
-import sys, os, json, numpy as np
+import sys, os, json, zlib, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 ARGV, sys.argv = sys.argv[1:], sys.argv[:1]
 import money_arm2 as MA2, money_multi as M, money_expect as X
@@ -25,7 +25,10 @@ if __name__ == "__main__":
         rng = np.random.default_rng(300 + k)
         D[(k, "or")] = sorted([o for o in base + o2 if rng.random() >= 0.05], key=lambda o: o["t"])
         D[(k, "or_h")] = [dict(o, r=o["r"] - 0.025) for o in D[(k, "or")]]
-        D[(k, "ot")] = [v for v in OT if rng.random() >= 0.05]
+        # v0.99.774: the other modules' 5% by each trade's own hash (was the same rng after ⚡'s draws: a change of one
+        # module's list re-shuffled which trades of the OTHERS were dropped — the bundle without HTF moved $45k -> $53k
+        # when only HTF had changed); ⚡'s draw is unchanged (its orders' list)
+        D[(k, "ot")] = [v for v in OT if zlib.crc32(f"{k}|{v['mod']}|{v['sym']}|{v['side']}|{v['t0']}".encode()) % 100 >= 5]
     kinds = list(X.KINDS) + ["dlm_harsh"]
     with Pool(4, initializer=_init, initargs=(D,)) as Pl:
         res = Pl.map(job, [(kd, k, A) for kd in kinds for k in range(K) for A in X.STARTS + [X.LAST]], chunksize=6)
