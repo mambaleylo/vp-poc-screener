@@ -83,6 +83,7 @@ def build(p, detail=False):
             j = int(J[i]); OPEN[i] = O[j]; PX[i] = C[j - 1] if j >= 1 else np.nan; f = FILL[i]
             if p["deep"] > 0 and not ((SIDE[i] > 0 and L[j] <= f) or (SIDE[i] < 0 and H[j] >= f)): continue
             R[i], K[i], kd, ex, qb = walk(O, H, L, C, Tb, j, int(SIDE[i]), f, f * p["stop"] * DATR[i] / 100, p["hard"], p["take"], p["hold"], p["kh"], p["be"], p["pf"])
+            if kd == 3 and j + p["hold"] > len(C): R[i] = np.nan; continue   # still open at the data's end: not a finished trade
             INFO[i] = (("be2" if qb >= 0 else "hard") if kd == 0 else {1: "take", 3: "time", 4: "stop"}[kd], float(ex))
     idx = idx[np.abs(PX[idx] - LV[idx]) / PX[idx] * 100 <= p["reach"] * DATR[idx]]   # the bot's arm filter
     NEAR = SIDE * (OPEN - FILL) / (LV * DATR / 100)
