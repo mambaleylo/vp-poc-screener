@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.771"
+APP_VERSION = "0.99.772"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28654,9 +28654,11 @@ _PROC_START = time.time()
 # liquidity cut, the square-root impact of every market fill — never in the numbers before; the median of 4 runs dropping 5% of
 # the trades: one path swings the usual year x2). Was the old 2h orders built on candles with lost months (overstated).
 # v0.99.770 — the same count with EMA v13 (v0.99.769: no crowd filter, every touch); ⚡ alone unchanged (the check)
+# v0.99.772 — and with SMC v0.99.771 (take 4R; the list at every touch the bot trades, 2026 by the bot's model): the last 12
+# months up, the bad year and the drawdown a little worse (the honest any-touch list, not the take)
 EXPECT_YEAR = {"dlm": {"p10": 963, "p50": 4213, "p90": 25659, "dd": 82, "last12": 24107},
-               "bundle": {"p10": 11365, "p50": 47099, "p90": 200069, "dd": 81, "last12": 110517},
-               "bundle_htf": {"p10": 13103, "p50": 50630, "p90": 227851, "dd": 81, "last12": 128427}}
+               "bundle": {"p10": 7078, "p50": 45226, "p90": 184584, "dd": 83, "last12": 111077},
+               "bundle_htf": {"p10": 9621, "p50": 50379, "p90": 221246, "dd": 83, "last12": 145304}}
 
 
 @app.route("/api/boot")

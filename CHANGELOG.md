@@ -21416,3 +21416,9 @@ v0.99.771 — 🧱 SMC: take 4R (was 3R); the backtest as the bot trades it
 - vp_smc_model.json: rule.take_r 4 (the trees and thr unchanged), research.years 2022..2026; vp_bt_trades.json "smc": 327
   trades +0.95R WR 67% (smc_export6.py).
 - Tests: t_smc_v6 (take 4R, an exact touch fires, the bot's settle = the new list 200/200), t_smc_bot — OK.
+
+v0.99.772 — the header re-counted once with SMC v0.99.771
+- tools/winrate money_hdr2.py (as v0.99.770): ⚡ + P/R + SMC + EMA + HTF a year from $100 — the bad year $13.1k -> $9.6k, the
+  usual $50.6k -> $50.4k, the good $228k -> $221k, the drawdown 81% -> 83%, the last 12 months $128k -> $145k; without HTF
+  $47.1k -> $45.2k; ⚡ alone the same. The worse bad year / drawdown come from the honest SMC list (every touch the bot
+  trades: the shallow touches the lab had skipped), the last 12 months' gain from the take 4R.
