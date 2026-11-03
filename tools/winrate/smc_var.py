@@ -54,23 +54,23 @@ def bars(name):
 @njit(cache=True)
 def walk(O, H, L, C, Tb, j, s, fill, risk, hard, take, hold, kh, be, pf):
     """the bot's _cs_walk on the 1h candles from the touch hour j -> R (per the stop's risk, less the costs), hours"""
-    n = len(C); hs = fill - s * hard * risk; ssl = fill - s * risk; tp = fill + s * take * risk; took = False
-    e = min(n, j + hold); ex = C[e - 1]; k = e - 1 - j
+    n = len(C); hs = fill - s * hard * risk; ssl = fill - s * risk; tp = fill + s * take * risk; took = False; qb = -1
+    e = min(n, j + hold); ex = C[e - 1]; k = e - 1 - j; kind = 3   # 0 the emergency stop / the break-even, 1 take, 3 time, 4 the close stop
     for q in range(e - j):
         b = j + q
         if (s > 0 and L[b] <= hs) or (s < 0 and H[b] >= hs):
             gap = (s > 0 and O[b] <= hs) or (s < 0 and O[b] >= hs)
-            ex = O[b] if (gap and q > 0) else hs; k = q; break
+            ex = O[b] if (gap and q > 0) else hs; k = q; kind = 0; break
         if be > 0 and q > 0 and not took and ((s > 0 and H[b] - fill >= be * risk) or (s < 0 and fill - L[b] >= be * risk)):
-            took = True; hs = fill
+            took = True; hs = fill; qb = q
         if q > 0 and ((s > 0 and H[b] >= tp) or (s < 0 and L[b] <= tp)):
-            ex = tp; k = q; break
+            ex = tp; k = q; kind = 1; break
         if kh > 0 and not took and (Tb[b] + 3600) % (kh * 3600) == 0 and ((s > 0 and C[b] <= ssl) or (s < 0 and C[b] >= ssl)):
-            ex = C[b]; k = q; break
+            ex = C[b]; k = q; kind = 4; break
     rest = s * (ex - fill) / risk
     r = (pf * be + (1 - pf) * rest) if (took and pf > 0) else rest
-    return r - (0.001 + 0.0003 * (k + 1) / 24) * fill / risk, k + 1
-def build(p):
+    return r - (0.001 + 0.0003 * (k + 1) / 24) * fill / risk, k + 1, kind, ex, qb
+def build(p, detail=False):
     D = events(p["ev"]); T, SIDE, SYM, LV, J, DATR, fam, SC, yr = D["T"], D["SIDE"], D["SYM"], D["LV"], D["J"], D["DATR"], D["fam"], D["SC"], D["yr"]
     thr = np.array([np.quantile(D["THR"][Y], p["q"]) if Y in D["THR"] else np.inf for Y in range(1970, 2030)])
     PASS = np.isfinite(SC) & (SC >= thr[np.clip(yr - 1970, 0, 59)])
@@ -86,14 +86,15 @@ def build(p):
     if p["fams"]: ok &= np.isin(np.array([LE.FAMS[f].split("_")[0] for f in range(len(LE.FAMS))])[fam], p["fams"])
     idx = np.where(ok)[0]
     FILL = LV * (1 - SIDE * p["deep"] * DATR / 100)
-    R = np.full(len(T), np.nan); K = np.zeros(len(T), np.int64); OPEN = np.full(len(T), np.nan); PX = np.full(len(T), np.nan)
+    R = np.full(len(T), np.nan); K = np.zeros(len(T), np.int64); INFO = {}; OPEN = np.full(len(T), np.nan); PX = np.full(len(T), np.nan)
     for k_ in sorted(set(SYM[idx])):
         Tb, O, H, L, C, V = bars(D["names"][k_])
         for i in idx[SYM[idx] == k_]:
             j = int(J[i]); OPEN[i] = O[j]; PX[i] = C[j - 1] if j >= 1 else np.nan
             f = FILL[i]
             if p["deep"] > 0 and not ((SIDE[i] > 0 and L[j] <= f) or (SIDE[i] < 0 and H[j] >= f)): continue   # the deeper limit not reached
-            R[i], K[i] = walk(O, H, L, C, Tb, j, int(SIDE[i]), f, f * p["stop"] * DATR[i] / 100, p["hard"], p["take"], p["hold"], p["kh"], p["be"], p["pf"])
+            R[i], K[i], kd, ex, qb = walk(O, H, L, C, Tb, j, int(SIDE[i]), f, f * p["stop"] * DATR[i] / 100, p["hard"], p["take"], p["hold"], p["kh"], p["be"], p["pf"])
+            INFO[i] = (("be2" if qb >= 0 else "hard") if kd == 0 else {1: "take", 3: "time", 4: "stop"}[kd], float(ex), int(T[i] + qb * 3600) if qb >= 0 else None)
     idx = idx[np.abs(PX[idx] - LV[idx]) / PX[idx] * 100 <= p["reach"] * DATR[idx]]   # the bot's arm filter
     NEAR = SIDE * (OPEN - FILL) / (LV * DATR / 100)
     o = idx[np.lexsort((NEAR[idx], T[idx]))]; busy, act, out = {}, [], []
@@ -106,6 +107,7 @@ def build(p):
         st = max(0.002, p["stop"] * float(DATR[i]) / 100)
         x = {"t0": int(t), "t1": int(end), "r": float(R[i]), "st": st, "sth": st * p["hard"], "mod": "smc", "sym": D["names"][SYM[i]],
              "side": int(SIDE[i]), "e": float(FILL[i]), "stream": None, "bot": bool(D["BOT"][i])}
+        if detail: x.update({"kind": INFO[i][0], "ex": INFO[i][1], "be_t": INFO[i][2], "lvl": LE.FAMS[fam[i]], "risk": float(FILL[i] * p["stop"] * DATR[i] / 100)})
         if p["xs"]: x["xm"] = p["xs"][0] if SC[i] >= thr[yr[i] - 1970] + 0.0 and SC[i] >= np.quantile(D["THR"][yr[i]], 1 - (1 - p["q"]) / 2) else p["xs"][1]
         out.append(x)
     return out

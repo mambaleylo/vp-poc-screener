@@ -21399,3 +21399,20 @@ v0.99.770 — the header re-counted once with EMA v13
   (unchanged by EMA: the check).
 - EMA on the 83 more coins ⚡ trades (the models trained on the 127 only): unseen 147 trades +0.27R but 2025 -0.13R, 2026
   +0.01R, and they push the 127 coins' trades out of the cap — not taken.
+
+v0.99.771 — 🧱 SMC: take 4R (was 3R); the backtest as the bot trades it
+- The user: "сделай полную проверку и попытку улучшить по smc", then "да, тейк 4R". The SMC lab re-made from scratch on the
+  clean 2020- candles (the days Binance's monthly archives had cut restored), the 127 bot coins + the 83 check coins
+  (tools/winrate/smclab): the rebuilt recipe vs the deployed model corr 0.976 (was 0.978).
+- The checks as for ⚡ / EMA: the lab counted a touch only 0.1% past the level, the bot trades every touch (lv_engine
+  LV_TOUCH=0 now: +2% trades, R about the same); the market entry after the touch costs -0.04R on Binance's 1-min candles of
+  the 317 trades (better than the limit); the list's 2026 had come from a rebuilt model, not the bot's — now 2026 by the
+  deployed model and thr (the money the same as the old list's: the usual year $41.8k vs $41.1k); the 83 check coins:
+  SMC holds there (+0.57R) but the bundle's money is worse (the last 12 months $68k vs $84k) — not taken.
+- 34 rule variants (smc_var.py) in the bundle's strictest money with paired noise runs (money_ema.py MOD=smc): the take 4R
+  better in 6 of 6 runs on the last 12 months (+35%: $101k -> $136k), the usual year and the drawdown the same; 5R / 6R,
+  the cap 20 / 8, no break-even, the threshold, the reach, the stop, the hold, the close-stop bar, longs only, no 4h levels,
+  the partial, the deeper limit, the risk by the score — worse or noise.
+- vp_smc_model.json: rule.take_r 4 (the trees and thr unchanged), research.years 2022..2026; vp_bt_trades.json "smc": 327
+  trades +0.95R WR 67% (smc_export6.py).
+- Tests: t_smc_v6 (take 4R, an exact touch fires, the bot's settle = the new list 200/200), t_smc_bot — OK.

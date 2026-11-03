@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.770"
+APP_VERSION = "0.99.771"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -33656,7 +33656,7 @@ def api_cas_status():
 # stop 1 daily ATR past it, take 3R, out after 72 h.
 SMC_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_smc_model.json")
 SMC_MODEL_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/{ref}/vp_smc_model.json"
-SMC_MODEL_VER = 4   # v0.99.709 — 4: the hold 72 -> 96 h. 3 (v0.99.706): the threshold q 0.99 -> 0.993 (fewer, better trades). 2 (v0.99.700): the stop at a 4h close (1 dATR), the emergency one 2 dATR, the honest touch order
+SMC_MODEL_VER = 4   # v0.99.771 — the same 4 with rule.take_r 4 (was 3: the bundle's last 12 months +35%, tools/winrate smc_var.py / money_ema.py MOD=smc), the backtest at any touch, 2026 by this model; v0.99.709 — 4: the hold 72 -> 96 h. 3 (v0.99.706): the threshold q 0.99 -> 0.993 (fewer, better trades). 2 (v0.99.700): the stop at a 4h close (1 dATR), the emergency one 2 dATR, the honest touch order
 SMC_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_smc_state.json")
 SMC_ENABLED = os.environ.get("VP_SMC", "1") == "1"
 AUTOTRADE_ENABLED_SMC = os.environ.get("VP_AUTOTRADE_SMC", "0") == "1"
