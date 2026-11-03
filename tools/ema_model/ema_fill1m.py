@@ -7,6 +7,7 @@ usage: python3 ema_fill1m.py LIST.json   (the money format of ema_var.py; the 1m
 import os, sys, io, json, time, zipfile, datetime as dt, urllib.request, urllib.error, numpy as np, concurrent.futures as cf
 BD = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision/data/futures/um/daily/klines"
 CACHE = "/home/user/ema1m"; os.makedirs(CACHE, exist_ok=True)
+TRIG = float(os.environ.get("TRIG", "0")) / 100   # TRIG=0.1 for HTF
 def day1m(sym, ds):
     fn = f"{CACHE}/{sym}-{ds}.npy"
     if os.path.exists(fn): return np.load(fn)
@@ -30,7 +31,8 @@ def one(x):
     if not len(a): return None
     s, e, risk = x["side"], x["e"], x["e"] * x["st"]
     w = np.flatnonzero((a[:, 0] >= t0) & (a[:, 0] < t0 + 3600))
-    hit = [i for i in w if (a[i, 3] <= e if s > 0 else a[i, 2] >= e)]
+    tg = e * (1 - s * TRIG)   # the bot's trigger (HTF: 0.1% through the level; EMA / SMC: the level itself)
+    hit = [i for i in w if (a[i, 3] <= tg if s > 0 else a[i, 2] >= tg)]
     if not hit: return ("miss", x)
     i = hit[0]; cl = a[i, 4]; nx = a[i + 1, 1] if i + 1 < len(a) else cl
     return ("ok", s * (cl - e) / risk, s * (nx - e) / risk, x["r"])
