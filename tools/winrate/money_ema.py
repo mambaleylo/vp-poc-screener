@@ -11,14 +11,14 @@ import money_arm2 as MA2, money_multi as M, money_expect as X
 from multiprocessing import Pool
 RULE = "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0|cap=125|slip=1|liq=4:0.5/8:0.25/12:0|path=1"
 K = int(ARGV[0]); STEP = int(ARGV[1]); NAMES = ARGV[2:]
-KEEP = {"dlm", "prv", "smc", "emx"}
-MOD = os.environ.get("MOD", "emx")   # the module whose list the variants replace: emx (ema_var.py) or smc (smc_var.py)
+MOD = os.environ.get("MOD", "emx")   # the module whose list the variants replace: emx (ema_var.py), smc (smc_var.py) or htf (htf_var.py)
+KEEP = {"dlm", "prv", "smc", "emx"} | ({"htf"} if MOD == "htf" else set())   # HTF judged in the header's bundle with HTF
 def keep(v, k):   # the paired drop: the same trade -> the same fate in every variant
     return zlib.crc32(f"{k}|{v['mod']}|{v['sym']}|{v['side']}|{v['t0']}".encode()) % 100 >= 5
 def var_list(nm):
     if nm == "bot": return [v for v in M.build("base") if v["mod"] == MOD]
     out = []
-    fn = f"ema211_var_{nm[4:]}" if nm.startswith("211_") else (f"smc_var_{nm}" if MOD == "smc" else f"ema_var_{nm}")   # "211_<name>": the list on the 210 coins (/home/user/ema211)
+    fn = f"ema211_var_{nm[4:]}" if nm.startswith("211_") else (f"{MOD}_var_{nm}" if MOD in ("smc", "htf") else f"ema_var_{nm}")   # "211_<name>": the list on the 210 coins (/home/user/ema211)
     for x in json.load(open(f"{M.ST}/wf/{fn}.json")):
         sym = M.bn(x["sym"])
         if sym: out.append(dict(x, sym=sym, r=float(x["r"]) - 0.03))
