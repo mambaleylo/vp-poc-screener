@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.773"
+APP_VERSION = "0.99.774"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28656,9 +28656,11 @@ _PROC_START = time.time()
 # v0.99.770 — the same count with EMA v13 (v0.99.769: no crowd filter, every touch); ⚡ alone unchanged (the check)
 # v0.99.772 — and with SMC v0.99.771 (take 4R; the list at every touch the bot trades, 2026 by the bot's model): the last 12
 # months up, the bad year and the drawdown a little worse (the honest any-touch list, not the take)
+# v0.99.774 — and with HTF v0.99.773 (the reach 2.5); the noise runs now drop each module's trades by the trade's own hash
+# (before, a change of one module re-shuffled the others' drops: the bundle without HTF had moved $45k -> $53k on HTF alone)
 EXPECT_YEAR = {"dlm": {"p10": 963, "p50": 4213, "p90": 25659, "dd": 82, "last12": 24107},
-               "bundle": {"p10": 7078, "p50": 45226, "p90": 184584, "dd": 83, "last12": 111077},
-               "bundle_htf": {"p10": 9621, "p50": 50379, "p90": 221246, "dd": 83, "last12": 145304}}
+               "bundle": {"p10": 7798, "p50": 46551, "p90": 197226, "dd": 83, "last12": 99871},
+               "bundle_htf": {"p10": 15597, "p50": 55135, "p90": 210351, "dd": 83, "last12": 146147}}
 
 
 @app.route("/api/boot")

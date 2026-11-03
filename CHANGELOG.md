@@ -21438,3 +21438,10 @@ v0.99.773 — 📏 HTF: the levels armed up to 2.5 daily ATR from the price (was
 - vp_htf_model.json: rule.reach_datr 2.5 (the models and thresholds unchanged), research.years 2023..2026; vp_bt_trades.json
   "htf": 376 trades +0.85R WR 68% (htf_export3.py).
 - Tests: t_htf_v3 (reach 2.5, a level 2 dATR away armed, the bot's settle = the new list 200/200), t_htf_bot — OK.
+
+v0.99.774 — the header re-counted once with HTF v0.99.773; the noise runs made stable
+- tools/winrate money_hdr2.py: the 5% of P/R / SMC / EMA / HTF trades each noise run drops is now chosen by each trade's own
+  hash (was the same random stream: a change of one module's list re-shuffled the drops of the others — the bundle without
+  HTF had moved $45.2k -> $53.2k when only HTF had changed). ⚡ + P/R + SMC + EMA + HTF a year from $100: the bad year
+  $9.6k -> $15.6k, the usual $50.4k -> $55.1k (+9%, the lab's paired +10%), the good $221k -> $210k, the drawdown 83%,
+  the last 12 months $145k -> $146k; without HTF $46.6k; ⚡ alone the same.
