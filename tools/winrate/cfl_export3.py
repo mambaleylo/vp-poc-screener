@@ -29,7 +29,7 @@ out, bad = [], 0
 for x in L:
     i = next(j for j in [idx.get((x["sym"], x["t0"] - 3600)), idx.get((x["sym"], x["t0"] - 4 * 3600))] if j is not None) if False else None
     # find the event: the one whose entry (the next hour's open) is t0 and whose side is the trade's opposite
-    cand = [k for k in np.flatnonzero((SYM == Dd["names"].index(x["sym"])) & (-SIDE == x["side"])) if RC.get(k) and RC[k][2] == x["t0"]]
+    cand = [k for k in np.flatnonzero((SYM == Dd["names"].index(x["sym"])) & (-SIDE == x["side"])) if RC.get((k, ())) and RC[(k, ())][2] == x["t0"]]
     i = cand[0]
     Tb, O, H, Lw, C_, V = bars(SYM[i]); jE = int(J[i]) + 1; s = x["side"]; fill = float(O[jE]); risk = fill * 0.75 * float(DA[i]) / 100; hd = fill * 1.5 * float(DA[i]) / 100
     kind, ex, k_ = walk_kind(Tb, O, H, Lw, C_, jE, s, fill, risk, hd, 4.0, 96, 24)

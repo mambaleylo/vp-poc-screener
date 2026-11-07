@@ -12,7 +12,7 @@ import os, sys, json, numpy as np
 ARGV = sys.argv[1:]
 exec(open("cfl_lab3.py").read().rsplit('if __name__ == "__main__":', 1)[0])
 ST = os.environ.get("LABSTORE", "/home/user/vp-lab-store")
-BASE = dict(q=0.997, win=180, drought=None, side=1, famq=False, coins="bot", cap=20)
+BASE = dict(q=0.997, win=180, drought=None, side=1, famq=False, coins="bot", cap=20, tfs=None, ex={})
 VARS = {
     "base": {},
     "q995": dict(q=0.995), "q99": dict(q=0.99), "q98": dict(q=0.98),
@@ -20,6 +20,13 @@ VARS = {
     "dr14": dict(drought=(14, 0.99)), "dr21": dict(drought=(21, 0.99)), "dr10_98": dict(drought=(10, 0.98)),
     "dr7_98": dict(drought=(7, 0.98)), "dr10_97": dict(drought=(10, 0.97)), "dr14_98": dict(drought=(14, 0.98)),
     "both": dict(side=0), "famq": dict(famq=True), "c210": dict(coins="all"),
+    # round 2 (v0.99.776: the deployed A = dr14+c210 + one of these): the exits / the entry, as the other modules' lessons
+    "be2": dict(ex={"be_at": 2.0}), "be1": dict(ex={"be_at": 1.0}), "part1": dict(ex={"p_at": 1.0, "p_fr": 1 / 3, "p_be": True}),
+    "take3": dict(ex={"take": 3.0}), "take5": dict(ex={"take": 5.0}), "take6": dict(ex={"take": 6.0}),
+    "hold72": dict(ex={"hold": 72}), "hold144": dict(ex={"hold": 144}), "ctf4": dict(ex={"ctf": 4}),
+    "stop1": dict(ex={"sk": 1.0, "hard": 2.0}), "stop05": dict(ex={"sk": 0.5, "hard": 1.0}), "hard3": dict(ex={"hard": 2.25}),
+    "lim025": dict(ex={"lim": 0.25, "wait": 4}), "lim05": dict(ex={"lim": 0.5, "wait": 8}),
+    "only4h": dict(tfs="4h"), "only1d": dict(tfs="1d"), "cap10": dict(cap=10), "cap30": dict(cap=30),
 }
 TH = {}
 def thr(q, win):
@@ -38,21 +45,23 @@ def thr_fam(q, win):
     FT[(q, win)] = out; return out
 P_DEP = dict(sk=0.75, hard=1.5, ctf=24, take=4.0, hold=96)
 RC = {}
-def outcome(i):
-    if i not in RC:
+def outcome(i, ex=None):
+    key = (i, tuple(sorted((ex or {}).items())))
+    if key not in RC:
         Tb, O, H, L, C_, V = bars(SYM[i]); jE = int(J[i]) + 1
-        if jE + 1 >= len(C_): RC[i] = None
+        if jE + 1 >= len(C_): RC[key] = None
         else:
-            p = dict(DEF); p.update(P_DEP)
+            p = dict(DEF); p.update(P_DEP); p.update(ex or {})
             r, kk = walk2(Tb, O, H, L, C_, jE, -int(SIDE[i]), float(DA[i]), p["sk"], p["hard"], p["ctf"], p["take"], p["hold"], p["be_at"], p["be_to"],
                           p["tr_at"], p["tr_d"], p["p_at"], p["p_fr"], p["p_be"], p["lim"], p["wait"])
-            RC[i] = (float(r), int(kk), int(Tb[jE]), float(O[jE]))
-    return RC[i]
+            RC[key] = (float(r), int(kk), int(Tb[jE]), float(O[jE])) if r == r else None   # a limit not filled: none
+    return RC[key]
 def build(p):
     base_ok = np.isfinite(SC) & (T >= ts(2023)) & (T < ts(2026, 10)) & ((BOT) if p["coins"] == "bot" else True)
     if p["side"]: base_ok &= (-SIDE == p["side"])
     c = np.where(base_ok)[0]
     c = c[np.array([T[i] - FIRST[SYM[i]] >= 90 * 86400 for i in c], bool)]
+    if p["tfs"]: c = c[np.array([E3.FAMS[int(FAM[i])].endswith("_" + p["tfs"]) for i in c], bool)]
     day = (T[c] // 86400).astype(np.int64)
     if p["famq"]:
         ft = thr_fam(p["q"], p["win"]); th1 = np.array([ft.get((int(FAM[i]), int(d_)), np.inf) for i, d_ in zip(c, day)])
@@ -71,14 +80,15 @@ def build(p):
         if p["drought"] and SC[i] < th1[n_] and not (last is None or t - last >= p["drought"][0] * 86400): continue   # the lower bar only after D idle days
         key = (SYM[i], SIDE[i])
         if busy.get(key, 0) > t: continue
-        oc = outcome(i)
+        oc = outcome(i, p["ex"])
         if oc is None: continue
         r, kk, t0, fill = oc
         act = [a for a in act if a[0] > t]
         if sum(1 for a in act if a[1] == SIDE[i]) >= p["cap"]: continue
         end = t0 + kk * 3600; busy[key] = end + 24 * 3600; act.append((end, SIDE[i])); last = t
-        st = max(0.002, P_DEP["sk"] * float(DA[i]) / 100)
-        out.append({"t0": t0, "t1": int(end), "r": r, "st": st, "sth": st * P_DEP["hard"] / P_DEP["sk"], "mod": "cfl", "sym": Dd["names"][SYM[i]],
+        sk_, hd_ = p["ex"].get("sk", P_DEP["sk"]), p["ex"].get("hard", P_DEP["hard"])
+        st = max(0.002, sk_ * float(DA[i]) / 100)
+        out.append({"t0": t0, "t1": int(end), "r": r, "st": st, "sth": st * hd_ / sk_, "mod": "cfl", "sym": Dd["names"][SYM[i]],
                     "side": -int(SIDE[i]), "e": fill, "stream": None, "bot": bool(BOT[i])})
     return out
 def idle(L):
