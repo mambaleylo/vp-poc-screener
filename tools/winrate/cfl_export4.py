@@ -56,6 +56,10 @@ bt = json.load(open(f"{ROOT}/vp_bt_trades.json")); bt["cfl"] = out
 json.dump(bt, open(f"{ROOT}/vp_bt_trades.json", "w"), separators=(",", ":"))
 M = json.load(open(f"{ROOT}/vp_cfl_model.json"))
 M["rule"].update({"stop_datr": SK, "stop_close_h": CTF, "hard_x": round(HD / SK, 6), "take_r": TK, "side_cap": CAP})
+def g_(c): b_ = c[:-4]; return (b_[4:] if b_.startswith("1000") else b_) + "_USDT"
+thr_g = {g_(c) for c in M["thr_coins"]}; ru = np.array([y["r"] for y in out if y["s"] not in thr_g])   # the coins never trained on
+M["research"]["check"] = {"avg": round(float(ru.mean()), 2), "wr": round(float((ru > 0).mean() * 100), 1), "n": len(ru)}
+M["research"]["check_coins"] = len({g_(c) for c in M["coins"]} - thr_g)
 im, gap = idle([{"t0": y["t"]} for y in out])
 M["research"].update({"years": years, "avg": round(float(rr.mean()), 3), "wr": round(float((rr > 0).mean() * 100), 1), "n": len(out),
                       "idle_months": im, "longest_pause_d": gap, "coins_n": len(M["coins"])})
