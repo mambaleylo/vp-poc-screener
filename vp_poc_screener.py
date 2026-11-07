@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.775"
+APP_VERSION = "0.99.776"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28659,9 +28659,12 @@ _PROC_START = time.time()
 # v0.99.774 — and with HTF v0.99.773 (the reach 2.5); the noise runs now drop each module's trades by the trade's own hash
 # (before, a change of one module re-shuffled the others' drops: the bundle without HTF had moved $45k -> $53k on HTF alone)
 # v0.99.775 — with the default risks ⚡ 4% + P/R 3.75 / SMC 3.125 / EMA 3.75 / HTF 2.5 (money_mix.py: the drawdown 83% -> 77%)
+# v0.99.776 — + 🔄 Классика when its real trades are on (2% on its own 25% room, the drought rule, 210 coins): bundle_cfl / bundle_htf_cfl
 EXPECT_YEAR = {"dlm": {"p10": 775, "p50": 3482, "p90": 19239, "dd": 74, "last12": 19149},
                "bundle": {"p10": 6418, "p50": 57987, "p90": 249745, "dd": 77, "last12": 122435},
-               "bundle_htf": {"p10": 13098, "p50": 57941, "p90": 223344, "dd": 77, "last12": 155791}}
+               "bundle_htf": {"p10": 13098, "p50": 57941, "p90": 223344, "dd": 77, "last12": 151719},
+               "bundle_cfl": {"p10": 10572, "p50": 67899, "p90": 299487, "dd": 79, "last12": 236065},
+               "bundle_htf_cfl": {"p10": 20709, "p50": 74134, "p90": 353924, "dd": 79, "last12": 386702}}
 
 
 @app.route("/api/boot")

@@ -21457,3 +21457,23 @@ v0.99.775 — the bundle's default risks: ⚡ 4% (was 4.5), P/R 3.75 (3), SMC 3.
   good $210k -> $223k, the drawdown 83% -> 77%, the last 12 months $146k -> $156k; ⚡ alone (4%) $4.2k -> $3.5k, 82% -> 74%;
   vp_dlm_model.json research.money with it. The settings' hints and the ⚡ list's money replica (risk 4) updated.
 - Tests: t_dlm_bot (risk 4 x 0.625 = 2.5%), t_htf_bot (HTF 2.5%), t_hdr_htf — OK.
+
+v0.99.776 — 🔄 Классика наоборот into the work: the drought rule, 210 coins, its own risk room, 2%, real trades on, the 5th tab
+- The user: "отличные результаты, надо его взять в работу, но мне не нравится … по 2 или 3 месяца простоев", then "A: больше
+  денег", "по умолчанию включи авто торговлю и по очереди в списке сделай его 5-м". The lab re-made from scratch on the gap-filled
+  candles (tools/winrate run_cfl_repro.sh: the rebuilt recipe vs the deployed model corr 0.95, 76-80% the same picks);
+  cfl_var.py (13+ variants) and money_cfl.py (the bundle with HTF, 6 paired noise runs):
+  - the drought rule: no Классика trade for 14 days -> the threshold q 0.99 instead of 0.997 until one opens; + the 83 check
+    coins (never trained on: +0.81R): 605 trades +0.97R WR 64%, the empty months 20 -> 9 of 45, the longest pause 203 -> 91 days;
+  - on the common open-risk room Классика took ⚡'s place in the same sell-offs (the bundle's usual year -8..-18%); on its own
+    room of 25% of the equity (BN_CFL_HEAT; bn_heat / bn_heat_cap by part) it adds: the usual year +48%, the bad +51%, the last
+    12 months x2.6, the drawdown +2 points — 6 of 6 runs;
+  - the risk 2% (BN_OTHERS_RISK["cfl"]); the real trades on by default (a new setting key autotrade_cfl2: an old saved "off"
+    does not stay); its tab and settings group 5th (after EMA, before HTF).
+- vp_cfl_model.json: coins 210, thr_coins 127 (the rolling threshold's store takes the trained coins' scores only), rule
+  drought_d 14 / drought_q 0.99, research; vp_bt_trades.json "cfl": 605 trades (cfl_export3.py, every R = the lab's).
+- The header: bundle_cfl / bundle_htf_cfl when Классика's real trades are on — ⚡ + P/R + SMC + EMA + Классика + HTF a year
+  from $100: the bad year $13.1k -> $20.7k, the usual $57.9k -> $74.1k, the good $223k -> $354k, the drawdown 77% -> 79%,
+  the last 12 months $152k -> $387k.
+- Tests: t_cfl_v4 (the drought rule, the threshold's coins, the own room, 2%, the switch), t_cfl_bot (the score reference = the
+  deployed trees; the seed's threshold within 0.03 of the gap-filled research), t_tab_order, t_hdr_htf — OK.
