@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 ARGV, sys.argv = sys.argv[1:], sys.argv[:1]
 import money_arm2 as MA2, money_multi as M, money_expect as X
 from multiprocessing import Pool
-RULE = "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0|cap=125|slip=1|liq=4:0.5/8:0.25/12:0|dlm=4|prv=3.75|smc=3.125|emx=3.75|htf=2.5"
+RULE = "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0|cap=125|slip=1|liq=4:0.5/8:0.25/12:0|dlm=4|prv=3.75|smc=3.125|emx=3.75|htf=2.5|cfl=2|cflheat=0.25"
 K = int(ARGV[0]) if ARGV else 2
 BAL = (1000, 2000, 3000, 5000, 7500, 10000, 20000, 50000)
 W = list(range(X.STARTS[0] - 4 * 7 * 86400, X.LAST + 330 * 86400, 7 * 86400))
@@ -19,7 +19,7 @@ def job(a):
     return b, k, A, MA2.run(_D[("or", k)], _D[("ot", k)], A, A + 30 * 86400, RULE, 1, eq0=float(b))[0] - b
 if __name__ == "__main__":
     base = MA2.orders(); o2 = [dict(o, xm=0.75) for o in MA2.stream_orders("wick4h_o2", "") if o["prio"] >= 1.05]
-    OR = sorted(base + o2, key=lambda o: o["t"]); OT = [v for v in M.build("base") if v["mod"] in X.KINDS["bundle_htf"] - {"dlm"}]; D = {}
+    OR = sorted(base + o2, key=lambda o: o["t"]); OT = [v for v in M.build("base") if v["mod"] in X.KINDS["bundle_htf_cfl"] - {"dlm"}]; D = {}
     tmax = max(o["t"] for o in OR); W = [A for A in W if A + 30 * 86400 <= tmax]
     for k in range(K):
         rng = np.random.default_rng(300 + k); D[("or", k)] = [o for o in OR if rng.random() >= 0.05]
