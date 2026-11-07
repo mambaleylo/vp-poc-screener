@@ -28662,10 +28662,10 @@ _PROC_START = time.time()
 # v0.99.776 — + 🔄 Классика when its real trades are on (2% on its own 25% room, the drought rule, 210 coins): bundle_cfl / bundle_htf_cfl;
 # v0.99.777 — its stop 0.5 dATR at the 4h close, the take 6R, <= 30, its own room 35%
 EXPECT_YEAR = {"dlm": {"p10": 775, "p50": 3482, "p90": 19239, "dd": 74, "last12": 19149},
-               "bundle": {"p10": 6418, "p50": 57987, "p90": 249745, "dd": 77, "last12": 122435},
-               "bundle_htf": {"p10": 13098, "p50": 57941, "p90": 223344, "dd": 77, "last12": 151719},
-               "bundle_cfl": {"p10": 17687, "p50": 81238, "p90": 466600, "dd": 80, "last12": 466462},   # v0.99.777 (money_hdr2.py)
-               "bundle_htf_cfl": {"p10": 27370, "p50": 113165, "p90": 506894, "dd": 80, "last12": 524924}}
+               "bundle": {"p10": 6379, "p50": 57220, "p90": 248014, "dd": 77, "last12": 114069},   # v0.99.778 (money_hdr2.py): every exit but a take a market fill
+               "bundle_htf": {"p10": 13119, "p50": 57174, "p90": 219282, "dd": 77, "last12": 128725},
+               "bundle_cfl": {"p10": 17474, "p50": 78457, "p90": 449995, "dd": 80, "last12": 453184},
+               "bundle_htf_cfl": {"p10": 27061, "p50": 109665, "p90": 489657, "dd": 80, "last12": 506607}}
 
 
 @app.route("/api/boot")
