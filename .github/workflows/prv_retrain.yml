@@ -73,3 +73,11 @@ jobs:
           gh issue create --title "P/R: переобучение за $END не принято" --body "$(tail -5 /tmp/decide.txt)
 
           Модель в боте не менялась. Журнал: tools/prv_audit/RETRAIN_LOG.md, запуск: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+      - name: Tell it broke
+        if: ${{ failure() && (github.event_name == 'schedule' || github.event.inputs.apply == 'true') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --title "P/R: переобучение за $END сломалось" --body "Один из шагов упал — модель в боте не менялась (бот продолжает со старой и напишет в Telegram, когда она устареет).
+
+          Запуск: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

@@ -31,7 +31,7 @@ GAP, WIN, Q = 10 * 86400, 24, float(M.get("q") or 0.99)
 tmax = int(T.max()); told = int(M["trained_to"])
 full = (T < tmax - GAP) & (T >= month_add(tmax, -WIN) - GAP); last = T >= tmax - 365 * 86400
 print(f"монет {len(syms)}, событий {len(T)}, данные по {D_(tmax)}; было обучено по {D_(told)}", flush=True)
-assert tmax > told + 20 * 86400, "no new month of data"
+if tmax <= told + 20 * 86400: print("нового месяца данных нет — модель обучится, но prv_decide.py её не примет", flush=True)
 BTCF, BTCF1, TFS = float(M.get("btc_filter") or 4.0), float(M.get("btc_filter_1h") or 1.0), set(M.get("tfs") or [1])
 mo = (T > told) & (T <= tmax)   # the new month: the old model's out of sample
 ok_f = (SD * F["b_r24"] > -BTCF) & (SD * F["b_r1"] > -BTCF1) & np.isin(TF, list(TFS))
