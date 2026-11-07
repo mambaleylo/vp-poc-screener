@@ -16,7 +16,7 @@ TAG = os.environ.get("CFL_TAG", "")   # CFL_SC=roll_cfl_Q.npz CFL_TAG=_Q: anothe
 if os.environ.get("CFL_SC"):
     SC = np.load(os.environ["CFL_SC"])["SC"]
     mk = BOT & (T >= ts(2021)) & np.isfinite(SC); tt, ss = T[mk], SC[mk]; o = np.argsort(tt); tt, ss = tt[o], ss[o]
-BASE = dict(q=0.997, win=180, drought=None, side=1, famq=False, coins="bot", cap=20, tfs=None, ex={})
+BASE = dict(q=0.997, win=180, drought=None, side=1, famq=False, coins="bot", cap=20, tfs=None, ex={}, cool=24, flt=None, xm=None)
 VARS = {
     "base": {},
     "q995": dict(q=0.995), "q99": dict(q=0.99), "q98": dict(q=0.98),
@@ -39,6 +39,15 @@ VARS = {
     "hold48": dict(ex={"hold": 48}), "hold120": dict(ex={"hold": 120}), "hold168": dict(ex={"hold": 168}),
     "dr7": dict(drought=(7, 0.99)), "dr10": dict(drought=(10, 0.99)), "dr14_985": dict(drought=(14, 0.985)),
     "shortsq": dict(side=0, q=0.997),
+    # round 6 (v0.99.777's rule B = dr14+c210+cap30+s0.5t6+ctf4 + one of these): more trades, a tighter stop, the pause after a
+    # coin's exit, the market's regime (the event's own features), the risk by the signal's strength (money_arm2's per-trade "xm")
+    "cap40": dict(cap=40), "cap50": dict(cap=50),
+    "s0.4t6": dict(ex={"sk": 0.4, "hard": 0.8, "take": 6.0}), "s0.4t8": dict(ex={"sk": 0.4, "hard": 0.8, "take": 8.0}),
+    "s0.5t7": dict(ex={"sk": 0.5, "hard": 1.0, "take": 7.0}),
+    "cool0": dict(cool=0), "cool12": dict(cool=12), "cool48": dict(cool=48),
+    "btcup": dict(flt=("b_e50", 1)), "btcdn": dict(flt=("b_e50", -1)), "e200up": dict(flt=("d_e200", 1)), "e200dn": dict(flt=("d_e200", -1)),
+    "fundneg": dict(flt=("fund", -1)),
+    "xtop": dict(xm="top"), "xdr": dict(xm="dr"),
 }
 TH = {}
 def thr(q, win):
@@ -74,6 +83,8 @@ def build(p):
     c = np.where(base_ok)[0]
     c = c[np.array([T[i] - FIRST[SYM[i]] >= 90 * 86400 for i in c], bool)]
     if p["tfs"]: c = c[np.array([E3.FAMS[int(FAM[i])].endswith("_" + p["tfs"]) for i in c], bool)]
+    if p.get("flt"):   # round 6: the event's own feature's sign (the bot has it: CFL_FNAMES)
+        fi = E3.FNAMES.index(p["flt"][0]); c = c[(Dd["F"][c, fi] * p["flt"][1]) > 0]
     day = (T[c] // 86400).astype(np.int64)
     if p["famq"]:
         ft = thr_fam(p["q"], p["win"]); th1 = np.array([ft.get((int(FAM[i]), int(d_)), np.inf) for i, d_ in zip(c, day)])
@@ -97,11 +108,15 @@ def build(p):
         r, kk, t0, fill = oc
         act = [a for a in act if a[0] > t]
         if sum(1 for a in act if a[1] == SIDE[i]) >= p["cap"]: continue
-        end = t0 + kk * 3600; busy[key] = end + 24 * 3600; act.append((end, SIDE[i])); last = t
+        end = t0 + kk * 3600; busy[key] = end + int(p.get("cool", 24)) * 3600; act.append((end, SIDE[i])); last = t
         sk_, hd_ = p["ex"].get("sk", P_DEP["sk"]), p["ex"].get("hard", P_DEP["hard"])
         st = max(0.002, sk_ * float(DA[i]) / 100)
         out.append({"t0": t0, "t1": int(end), "r": r, "st": st, "sth": st * hd_ / sk_, "mod": "cfl", "sym": Dd["names"][SYM[i]],
                     "side": -int(SIDE[i]), "e": fill, "stream": None, "bot": bool(BOT[i])})
+        if p.get("xm") == "top":   # the strongest (over the q 0.999 bar of the same window) at 1.5x the risk
+            out[-1]["xm"] = 1.5 if SC[i] >= thr(0.999, p["win"]).get(int(T[i] // 86400), np.inf) else 1.0
+        elif p.get("xm") == "dr":   # the drought's own (under the main bar) at half the risk
+            out[-1]["xm"] = 0.5 if (p["drought"] and SC[i] < th1[n_]) else 1.0
     return out
 def merge(p, v):
     """a variant on top of p: its exit settings join p's (not replace them), so "cap30+s0.5t6+ctf4" keeps all three"""
