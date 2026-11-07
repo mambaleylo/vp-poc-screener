@@ -3,7 +3,7 @@
 import os, io, sys, time, zipfile, urllib.request, concurrent.futures as cf
 ST = os.environ.get("LABSTORE", "/home/user/vp-lab-store"); OUT = f"{ST}/data/funding"; os.makedirs(OUT, exist_ok=True)
 B = "https://data.binance.vision/data/futures/um/monthly/fundingRate"
-FEND = os.environ.get("FUND_END", "2026-09")   # the last month (the monthly retrain: the month before; an older file gets the missing months)
+FEND = os.environ.get("FUND_END", "2026-09"); C1H = os.environ.get("PRV_C1H")   # the candles elsewhere (GitHub Actions: no lab-store)   # the last month (the monthly retrain: the month before; an older file gets the missing months)
 months = [f"{y}-{m:02d}" for y in range(2020, 2030) for m in range(1, 13) if f"{y}-{m:02d}" <= FEND]
 def get(sym, mo):
     for k in range(3):
@@ -36,7 +36,7 @@ if __name__ == "__main__":
         import re
         src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "vp_poc_screener.py")).read()
         g = re.search(r'RESEARCH_COINS_127 = tuple\("""(.*?)"""', src, re.S).group(1).split() + re.search(r'RESEARCH_COINS_211 = RESEARCH_COINS_127 \+ tuple\("""(.*?)"""', src, re.S).group(1).split()
-        syms = sorted({x for c in g for x in (c.replace("_USDT", "") + "USDT", "1000" + c.replace("_USDT", "") + "USDT") if os.path.exists(f"{ST}/data/1h/{x}.csv.gz")} | {"BTCUSDT", "ETHUSDT"})
+        syms = sorted({x for c in g for x in (c.replace("_USDT", "") + "USDT", "1000" + c.replace("_USDT", "") + "USDT") if os.path.exists(f"{ST}/data/1h/{x}.csv.gz") or (C1H and os.path.exists(f"{C1H}/{x}.csv"))} | {"BTCUSDT", "ETHUSDT"})
     with cf.ThreadPoolExecutor(4) as ex:
         for s, n in ex.map(coin, syms): print(s, n, flush=True)
     print("fund done", len(os.listdir(OUT)), flush=True)

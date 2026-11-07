@@ -45,7 +45,9 @@ for s in (1, -1):
     v = np.flatnonzero(mo & (SD == s) & ok_f)
     a = np.mean([m.predict(X[v]) for m in ms], axis=0) if len(v) else np.array([])
     b = TV.model_score(M["models"][str(s)], X[v].astype(float)) if len(v) else np.array([])
+    w12 = np.flatnonzero(last & (SD == s) & ok_f); a12 = np.mean([m.predict(X[w12]) for m in ms], axis=0) if len(w12) else np.array([])
     cmp[str(s)] = {"events": int(len(v)), "new": int((a >= thr[str(s)]).sum()), "old": int((b >= float(M["thr"][str(s)])).sum()),
+                   "new_month_avg": round(float((a12 >= thr[str(s)]).sum()) / 12.0, 2),   # the new model's own monthly average (the last 12 months)
                    "both": int(((a >= thr[str(s)]) & (b >= float(M["thr"][str(s)]))).sum()), "train": int(ok.sum()),
                    "thr_old": float(M["thr"][str(s)]), "thr_new": thr[str(s)]}
     print(f"сторона {s:+d}: обучающих {ok.sum()}, порог {M['thr'][str(s)]} -> {thr[str(s)]}; в новом месяце событий {len(v)}, "

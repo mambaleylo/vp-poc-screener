@@ -28,6 +28,7 @@ def month_add(t, k):
 tmax = int(M["trained_to"]); GAP = 10 * 86400
 full = (T < tmax - GAP) & (T >= month_add(tmax, -24) - GAP); last = (T >= tmax - 365 * 86400) & (T <= tmax)
 print(f"coins {len(syms)}, events {len(T)}, data to {dt.datetime.utcfromtimestamp(int(T.max()))}, deployed trained_to {dt.datetime.utcfromtimestamp(tmax)}", flush=True)
+RES = {}
 for s in (1, -1):
     ok = full & (SD == s) & ~np.isnan(lab)
     ms = [lgb.LGBMRegressor(n_estimators=300, learning_rate=0.03, num_leaves=15, min_child_samples=1000, subsample=0.7, subsample_freq=1,
@@ -38,4 +39,6 @@ for s in (1, -1):
     ta, tb = np.quantile(a, 0.99), float(M["thr"][str(s)])
     sa, sb = a >= ta, b >= tb
     print(f"сторона {s:+d}: событий {len(w)}, обучающих {ok.sum()}, корреляция оценок {np.corrcoef(a, b)[0, 1]:.4f}; выше порога: пересборка {sa.sum()}, бот {sb.sum()}, общих {(sa & sb).sum()}", flush=True)
+    RES[str(s)] = {"corr": float(np.corrcoef(a, b)[0, 1]), "rebuilt": int(sa.sum()), "bot": int(sb.sum()), "both": int((sa & sb).sum()), "events": int(len(w))}
+json.dump(RES, open(f"{ST}/prv_repro.json", "w"), indent=1)   # for the monthly retrain's decision (prv_decide.py)
 print("prv repro done", flush=True)
