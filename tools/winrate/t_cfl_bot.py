@@ -21,7 +21,7 @@ if RESEARCH:
 ok = True
 m = V.cfl_model()
 ok &= bool(m) and m["feats"] == V.CFL_FNAMES and m["fams"] == V.CFL_FAMS
-ok &= m["rule"].get("side") == 1 and m["rule"].get("stop_close_h") == 24 and m["rule"].get("hard_x") == 2.0 and m["ver"] == V.CFL_MODEL_VER and all(t["d"] == 1 for t in json.load(open("/home/user/vp-poc-screener/vp_bt_trades.json"))["cfl"])
+ok &= m["rule"].get("side") == 1 and m["rule"].get("stop_close_h") == 4 and m["rule"].get("hard_x") == 2.0 and m["ver"] == V.CFL_MODEL_VER and all(t["d"] == 1 for t in json.load(open("/home/user/vp-poc-screener/vp_bt_trades.json"))["cfl"])
 print("(0) model", bool(m), m and len(m["models"]), m and m["rule"])
 BARS = {}
 def bars(sym):
@@ -184,8 +184,8 @@ tr = mk(1.002); ok5 &= len(calls) == 1 and tr["real"] is True
 a, k = calls[-1]
 ok5 &= a[0] == "cfl" and a[2] == "LONG" and abs(a[3] - p["e"] * 1.002) < 1e-12 and a[4] == tr["hs"] and a[5] == tr["tp"] and k["extra"]["kx"] == 2.0
 ok5 &= abs(k["risk_pct_override"] - V.CFL_RISK_DEFAULT * 2.0) < 1e-12 and abs((tr["entry"] - tr["hs"]) / (tr["entry"] - tr["sl"]) - 2.0) < 1e-9 and tr["ch"] == 24
-ok5 &= abs((tr["tp"] - tr["entry"]) / (tr["entry"] - tr["sl"]) - 4.0) < 1e-9 and tr["hold"] == 96
-tr = mk(1.06); ok5 &= len(calls) == 1 and tr.get("late") and not tr["real"]   # 6% away with a 3% stop (0.75 x 4%): > 1R
+ok5 &= abs((tr["tp"] - tr["entry"]) / (tr["entry"] - tr["sl"]) - 6.0) < 1e-9 and tr["hold"] == 96
+tr = mk(1.06); ok5 &= len(calls) == 1 and tr.get("late") and not tr["real"]   # 6% away with a 2% stop (0.5 x 4%, v0.99.777): > 1R
 tr = mk(1.0, late=True); ok5 &= len(calls) == 1 and tr.get("rt") and not tr["real"]   # an old close: the record only
 V.AUTOTRADE_ENABLED_CFL = False
 print("(5) реальные сделки: по умолчанию вкл (v0.99.776), выключено — нет сделки, при вкл — вызов с тем же стопом/тейком, поздние и старые — нет:", bool(ok5), len(calls))

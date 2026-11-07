@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.776"
+APP_VERSION = "0.99.777"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28659,7 +28659,8 @@ _PROC_START = time.time()
 # v0.99.774 — and with HTF v0.99.773 (the reach 2.5); the noise runs now drop each module's trades by the trade's own hash
 # (before, a change of one module re-shuffled the others' drops: the bundle without HTF had moved $45k -> $53k on HTF alone)
 # v0.99.775 — with the default risks ⚡ 4% + P/R 3.75 / SMC 3.125 / EMA 3.75 / HTF 2.5 (money_mix.py: the drawdown 83% -> 77%)
-# v0.99.776 — + 🔄 Классика when its real trades are on (2% on its own 25% room, the drought rule, 210 coins): bundle_cfl / bundle_htf_cfl
+# v0.99.776 — + 🔄 Классика when its real trades are on (2% on its own 25% room, the drought rule, 210 coins): bundle_cfl / bundle_htf_cfl;
+# v0.99.777 — its stop 0.5 dATR at the 4h close, the take 6R, <= 30, its own room 35%
 EXPECT_YEAR = {"dlm": {"p10": 775, "p50": 3482, "p90": 19239, "dd": 74, "last12": 19149},
                "bundle": {"p10": 6418, "p50": 57987, "p90": 249745, "dd": 77, "last12": 122435},
                "bundle_htf": {"p10": 13098, "p50": 57941, "p90": 223344, "dd": 77, "last12": 151719},
@@ -35275,7 +35276,7 @@ def cfl_open(c, t_close, m):
     if TELEGRAM_ALERTS_CFL:
         send_telegram(f"🔄 {sym.replace('_USDT', '')} {tr['direction']} · Классика наоборот: против сигнала «{cfl_fam_ru(c['fam'])}» "
                       f"({'лонг' if c['S'] > 0 else 'шорт'})\n" + (f"вход {tr['entry']:.6g} · стоп {tr['sl']:.6g} · тейк {tr['tp']:.6g} · " if tr.get("entry") else "")
-                      + (f"аварийный {tr['hs']:.6g} · стоп по закрытию дня · " if tr.get("hs") else "")
+                      + (f"аварийный {tr['hs']:.6g} · стоп по закрытию {'дня' if int(tr.get('ch') or 0) >= 24 else str(int(tr.get('ch') or 0)) + 'ч'} · " if tr.get("hs") else "")
                       + f"до {tr['hold']} ч\n" + ("💰 сделка на бирже" if tr["real"] else "без сделки (только сигнал)"), category="cfl")
     return True
 
@@ -35283,7 +35284,7 @@ def cfl_open(c, t_close, m):
 def cfl_set_fill(tr, fill_bn, r):
     fill = fill_bn / tr["scl"]; risk = fill * float(r.get("stop_datr", 1.0)) * tr["datr"] / 100
     tr.update({"entry": fill, "sl": fill - tr["side"] * risk, "tp": fill + tr["side"] * float(r.get("take_r", 3.0)) * risk})
-    ch, hx = _close_stop_rule({"rule": r})   # v0.99.741 — the stop at the 1d close, the emergency one (hx x the stop) on the exchange
+    ch, hx = _close_stop_rule({"rule": r})   # v0.99.741 — the stop at the 1d close, the emergency one (hx x the stop) on the exchange; v0.99.777 — at the 4h close (the rule's stop_close_h)
     if ch:
         tr.update({"ch": ch, "hx": hx, "hs": fill - tr["side"] * hx * risk})
 
@@ -37408,7 +37409,7 @@ def bn_margin_mode(bsym):
         return "ISOLATED" if want == "CROSSED" else "CROSSED"
 
 
-BN_CFL_HEAT = float(os.environ.get("VP_BN_CFL_HEAT", "0.25"))   # v0.99.776 — 🔄 Классика on its own open-risk room (tools/winrate money_cfl.py: on the common one it took ⚡'s room in the same sell-offs, the bundle's usual year -8..-18%; on its own 25% the usual year +48%)
+BN_CFL_HEAT = float(os.environ.get("VP_BN_CFL_HEAT", "0.35"))   # v0.99.777 — 35% (money_cfl.py, run_cfl5.sh: with the stop 0.5 dATR at the 4h close and the take 6R the usual year $115k vs $69.6k on 25%, 6 of 6 paired runs). v0.99.776 — 🔄 Классика on its own open-risk room (tools/winrate money_cfl.py: on the common one it took ⚡'s room in the same sell-offs, the bundle's usual year -8..-18%; on its own 25% the usual year +48%)
 
 
 def bn_heat(equity=None, part="main"):
@@ -43187,7 +43188,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">Работа (4ч и день — 127 монет)</div>
-          <div class="sub">на закрытии каждой 4ч-свечи: сигналы 12 классических индикаторов, модель выбирает лучшие ~0.3%; сделка — лонг против сигнала на продажу по рынку на открытии следующего часа; стоп — закрытие дневной свечи (00:00 UTC) на 0.75 дневного ATR ниже входа, аварийный 1.5 ATR, тейк 4R, выход через 96 ч; не больше 20 сразу. Реальные сделки — переключатель «↳ 🔄 Классика» в автоторговле (по умолчанию выключен)</div>
+          <div class="sub">на закрытии каждой 4ч-свечи: сигналы 12 классических индикаторов, модель выбирает лучшие ~0.3%; сделка — лонг против сигнала на продажу по рынку на открытии следующего часа; стоп — закрытие 4ч-свечи на 0.5 дневного ATR ниже входа, аварийный 1 ATR, тейк 6R, выход через 96 ч; не больше 30 сразу. Реальные сделки — переключатель «↳ 🔄 Классика» в автоторговле (по умолчанию включён)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setCfl"><span class="switchSlider"></span></label>
       </div>

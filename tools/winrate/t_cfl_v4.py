@@ -39,15 +39,15 @@ chk("простой 5 дн: по мягкому порогу ничего", open
 SC[B] = 0.95; opened.clear(); V.cfl_scan(t0)
 chk("выше основного порога — открывается всегда", opened == [B])
 # (3) the risk and the room
-chk("риск Классики по умолчанию 2%", V.BN_OTHERS_RISK["cfl"] == 2.0 and V.BN_CFL_HEAT == 0.25)
+chk("риск Классики по умолчанию 2%", V.BN_OTHERS_RISK["cfl"] == 2.0 and V.BN_CFL_HEAT == 0.35)
 V._BNO["pos"] = {"AAA_USDT": {"mode": "cfl", "qty": 10.0, "entry": 10.0, "sl_px": 9.0, "side": 1},     # $10 at risk
                  "BBB_USDT": {"mode": "smc", "qty": 30.0, "entry": 10.0, "sl_px": 9.0, "side": 1}}     # $30 at risk
 with V._dlm_lock: V._DLM["trades"] = []; V._DLM["orders"] = []
 chk("риск открытых: Классика отдельно ($10), остальные без неё ($30)", abs(V.bn_heat(100.0, "cfl") - 10) < 1e-9 and abs(V.bn_heat(100.0) - 30) < 1e-9)
 r1, w1 = V.bn_heat_cap(2.0, 100.0, "cfl"); r2, w2 = V.bn_heat_cap(2.0, 100.0, "cfl")
-V._BNO["pos"]["CCC_USDT"] = {"mode": "cfl", "qty": 14.0, "entry": 10.0, "sl_px": 9.0, "side": 1}   # Классика $24 of its $25
+V._BNO["pos"]["CCC_USDT"] = {"mode": "cfl", "qty": 24.0, "entry": 10.0, "sl_px": 9.0, "side": 1}   # Классика $34 of its $35 (v0.99.777)
 r3, w3 = V.bn_heat_cap(2.0, 100.0, "cfl"); r4, w4 = V.bn_heat_cap(2.0, 100.0, "smc")
-chk(f"своя комната 25%: свободно — полный риск, $1 места — урезано ({r3}), остальным не мешает ({r4})", r1 == 2.0 and abs(r3 - 1.0) < 1e-9 and r4 == 2.0)
+chk(f"своя комната 35%: свободно — полный риск, $1 места — урезано ({r3}), остальным не мешает ({r4})", r1 == 2.0 and abs(r3 - 1.0) < 1e-9 and r4 == 2.0)
 # (4) the switch
 chk("автоторговля Классики по умолчанию вкл, новый ключ настройки", V.AUTOTRADE_ENABLED_CFL is True and "autotrade_cfl2" in V.SETTINGS_KEYS and "autotrade_cfl" not in V.SETTINGS_KEYS)
 print("t_cfl_v4 OK" if ok else "t_cfl_v4 FAIL")
