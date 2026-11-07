@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.779"
+APP_VERSION = "0.99.780"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -32518,7 +32518,12 @@ def model_refresh_once():
             os.replace(tmp, fn)
             with lock:
                 st["model"] = None          # reloaded from the file on the next use
-            done.append(name)
+            # v0.99.780 — what changed (the user: "пришло «новые правила сделок: EMA, P/R» — где я должен был да жать?" — P/R's
+            # file had only its backtest card re-split): the trading part vs only the research / backtest numbers; a later "trained_to" = retrained
+            DISP = ("research", "money", "cards", "bt", "notes")
+            only_disp = lm is not None and lm.get("ver") == ver and {k: v for k, v in m.items() if k not in DISP} == {k: v for k, v in lm.items() if k not in DISP}
+            retr = int(m.get("trained_to") or 0) > local and local > 0
+            done.append((name, "disp" if only_disp else ("retrain" if retr else "rules"), int(m.get("trained_to") or 0)))
             log_error(f"model refresh: {name} — the repo's model taken (trained to {time.strftime('%Y-%m-%d', time.gmtime(int(m['trained_to'])))})")
         except Exception as e:
             log_error(f"model refresh {name}: {e}")
@@ -32951,13 +32956,28 @@ def api_bt_chart(symbol):
         return jsonify({"error": f"свечи не загрузились: {str(e)[:150]}"})
 
 
+def model_refresh_text(done):
+    """v0.99.780 — the message of the models taken from the repo: [(name, kind, trained_to)] -> text"""
+    d_ = lambda t: time.strftime("%d.%m.%Y", time.gmtime(t)) if t else "?"
+    L = []
+    for name, kind, tt in done:
+        if kind == "retrain":
+            L.append(f"• {name} — переобучена (данные по {d_(tt)})")
+        elif kind == "rules":
+            L.append(f"• {name} — новые правила сделок")
+        else:
+            L.append(f"• {name} — только цифры бэктеста и карточки, правила сделок те же")
+    head = "🔄 Модели обновлены из репозитория (уже одобренные изменения, нажимать ничего не нужно):" if any(k != "disp" for _, k, _ in done) else "🔄 Обновлены данные моделей (правила сделок не менялись):"
+    return head + "\n" + "\n".join(L)
+
+
 def model_refresh_loop():
     time.sleep(600)
     while True:
         try:
             done = model_refresh_once()
-            if done:   # v0.99.743 — told: the rules the modules trade by changed
-                send_telegram("🔄 Модели обновлены из репозитория (новые правила сделок): " + ", ".join(done), category="system")
+            if done:   # v0.99.743 — told: the rules the modules trade by changed; v0.99.780 — what changed, each
+                send_telegram(model_refresh_text(done), category="system")
         except Exception as e:
             log_error(f"model_refresh_loop: {e}")
         time.sleep(24 * 3600)
