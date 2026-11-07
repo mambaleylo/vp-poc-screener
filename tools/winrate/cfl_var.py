@@ -27,6 +27,14 @@ VARS = {
     "stop1": dict(ex={"sk": 1.0, "hard": 2.0}), "stop05": dict(ex={"sk": 0.5, "hard": 1.0}), "hard3": dict(ex={"hard": 2.25}),
     "lim025": dict(ex={"lim": 0.25, "wait": 4}), "lim05": dict(ex={"lim": 0.5, "wait": 8}),
     "only4h": dict(tfs="4h"), "only1d": dict(tfs="1d"), "cap10": dict(cap=10), "cap30": dict(cap=30),
+    # round 3: the stop x take grid (sk dATR at the 1d close, take R of it, the emergency hard dATR), the trail, the half, more trades
+    **{f"s{sk}t{tk}": dict(ex={"sk": sk, "hard": round(2 * sk, 3), "take": float(tk)}) for sk in (0.5, 0.75, 1.0, 1.25) for tk in (3, 4, 5, 6, 8)},
+    "hd15": dict(ex={"hard": 1.125}), "hd3": dict(ex={"hard": 2.25}),
+    "tr2": dict(ex={"tr_at": 2.0, "tr_d": 1.5}), "tr3": dict(ex={"tr_at": 3.0, "tr_d": 1.5}), "tr2n": dict(ex={"tr_at": 2.0, "tr_d": 1.5, "take": 0.0}),
+    "half2": dict(ex={"p_at": 2.0, "p_fr": 0.5, "p_be": True}), "ctf12": dict(ex={"ctf": 12}),
+    "hold48": dict(ex={"hold": 48}), "hold120": dict(ex={"hold": 120}), "hold168": dict(ex={"hold": 168}),
+    "dr7": dict(drought=(7, 0.99)), "dr10": dict(drought=(10, 0.99)), "dr14_985": dict(drought=(14, 0.985)),
+    "shortsq": dict(side=0, q=0.997),
 }
 TH = {}
 def thr(q, win):
