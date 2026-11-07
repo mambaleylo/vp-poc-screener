@@ -4,7 +4,7 @@ without Классика vs + each variant list of cfl_var.py at a risk (name@ri
 the rng as money_hdr2, the others by each trade's hash), every STEP-th weekly window + the last 12 months: the bad / usual /
 good year, the drawdown, the worst-10% windows' drawdown, the last 12 months, the share of windows below the start at 6 months.
 usage: ALLSUF=_clr money_cfl.py K STEP none base@1 …   -> <LABSTORE>/wf/money_cfl.json"""
-import sys, os, json, zlib, numpy as np
+import sys, os, re, json, zlib, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 ARGV, sys.argv = sys.argv[1:], sys.argv[:1]
 import money_arm2 as MA2, money_multi as M, money_expect as X
@@ -16,9 +16,13 @@ def cfl_list(nm):
     if nm == "none": return [], 0.0
     v, rk = nm.split("#")[0].split("@")
     out = []
+    m_ = re.search(r"\+s[\d.]+t(\d+)", v) or re.search(r"\+take(\d+)", v); tk = float(m_.group(1)) if m_ else 4.0
     for x in json.load(open(f"{M.ST}/wf/cfl_var_{v}.json")):
         s = M.bn(x["sym"])
-        if s: out.append(dict(x, sym=s, r=float(x["r"]) - 0.03))
+        if not s: continue
+        # v0.99.778: the market fills — the entry + the exit unless the take (a limit): a take is the R of the take less the fee
+        kk = (int(x["t1"]) - int(x["t0"])) // 3600; take = abs(float(x["r"]) - (tk - (0.001 + 0.0003 * kk / 24) / x["st"])) < 1e-6
+        out.append(dict(x, sym=s, r=float(x["r"]) - 0.03, mkt=1 if take else 2))
     return out, float(rk)
 _D = {}
 def _init(D): _D.update(D)

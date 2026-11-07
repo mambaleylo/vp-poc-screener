@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.777"
+APP_VERSION = "0.99.778"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -35245,6 +35245,11 @@ def cfl_open(c, t_close, m):
         return False
     if sum(1 for t in opn if t["side"] == side) >= int(r.get("side_cap", 12)):
         return False
+    cd_ = int(r.get("cooldown_h") or 0) * 3600   # v0.99.778 — the rule's pause after a coin's exit (the lab's busy = the exit + 24 h > the signal hour, t_close - 1 h): was not kept
+    if cd_:
+        with _cfl_lock:
+            if any(t["bsym"] == c["bsym"] and t["side"] == side and t["status"] != "OPEN" and int(t.get("t_out") or 0) + cd_ > t_close - 3600 for t in _CFL["trades"]):
+                return False
     sym, scl = _bn_gate_sym(c["bsym"])
     tr = {"id": f"cfl_{c['bsym']}_{c['fam']}_{t_close}", "symbol": sym, "bsym": c["bsym"], "scl": scl, "fam": c["fam"], "side": side,
           "direction": "LONG" if side > 0 else "SHORT", "score": c["score"], "datr": c["datr"], "t_in": t_close, "hour": t_close,

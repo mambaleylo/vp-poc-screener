@@ -46,7 +46,7 @@ def build(pool_name):
             scl = 1000.0 if sym.startswith("1000") and not t["s"].startswith("1000") else 1.0   # the lists keep Gate's prices
             st = max(0.002, abs(t["e"] - t["sl"]) / t["e"]); sth = max(st, abs(t["e"] - t.get("hs", t["sl"])) / t["e"])
             EV.append({"t0": int(t["t"]), "t1": int(t["x"]), "r": float(t["r"]) - 0.03, "st": st, "sth": sth, "mod": mod, "sym": sym, "side": t["d"],
-                       "e": t["e"] * scl, "stream": None})
+                       "e": t["e"] * scl, "stream": None, "mkt": 1 if t.get("k") == "take" else 2})   # v0.99.778: the market fills — the entry + the exit unless a take (a limit); was 1 + (r < 0): a time exit in profit missed its exit's impact
     EV.sort(key=lambda v: v["t0"])
     return EV
 def run(EV, A, B, cap=20.0, wf=None, eq0=200.0, heat=0.9, side_cap=20, rk_=None, load=(5, 0.625, 1.25)):
