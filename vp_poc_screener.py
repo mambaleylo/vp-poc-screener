@@ -43442,7 +43442,7 @@ INDEX_HTML = """<!doctype html>
       <div id="wdStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
     </div></details>
     <details class="settingsGroup" style="--mod-color:#b0bec5;"><summary class="settingsGroupTitle">🗓 Возраст моделей и переобучение</summary><div class="settingsGroupBody">
-      <div class="sub hintx" style="padding:4px 2px;">Переобучение делают запланированные задачи в claude.ai (P/R — 3-го числа каждого месяца, остальные — 5 января; порядок — RETRAIN.md в репозитории), в бота — только после вашего «да». Если модель устарела (задача не запустилась — например, закончилась подписка), бот пишет в Telegram не чаще раза в 3 дня.</div>
+      <div class="sub hintx" style="padding:4px 2px;">P/R переобучается сама 3-го числа каждого месяца на машине GitHub (GitHub Actions, не зависит от подписки): новая модель попадает в бота, только если прошла все проверки, иначе остаётся старая. Остальные модели — запланированная задача в claude.ai 5 января, в бота — только после вашего «да» (порядок — RETRAIN.md в репозитории). Если модель устарела (задача не запустилась — например, закончилась подписка), бот пишет в Telegram не чаще раза в 3 дня.</div>
       <div id="modelAge" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
     </div></details>
     <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">🎨 Оформление</summary><div class="settingsGroupBody">

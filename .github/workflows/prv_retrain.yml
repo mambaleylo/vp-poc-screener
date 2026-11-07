@@ -66,7 +66,7 @@ jobs:
           git commit -q -m "$MSG" || exit 0
           for i in 1 2 3; do git pull -q --rebase origin main && git push -q origin HEAD:main && break; sleep 10; done
       - name: Tell why it was not taken
-        if: ${{ steps.dec.outputs.rc != '0' }}
+        if: ${{ steps.dec.outputs.rc != '0' && (github.event_name == 'schedule' || github.event.inputs.apply == 'true') }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

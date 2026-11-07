@@ -53,7 +53,7 @@ for s in (1, -1):
     print(f"сторона {s:+d}: обучающих {ok.sum()}, порог {M['thr'][str(s)]} -> {thr[str(s)]}; в новом месяце событий {len(v)}, "
           f"выше порога: старая {cmp[str(s)]['old']}, новая {cmp[str(s)]['new']}, общих {cmp[str(s)]['both']}", flush=True)
 N = dict(M); N["models"] = models; N["thr"] = thr; N["trained_to"] = tmax
-N["train"] = dict(M.get("train") or {}, window_months=WIN, **{"from": int(month_add(tmax, -WIN))})
+N["train"] = dict(M.get("train") or {}, window_months=WIN, retrain_months=1, **{"from": int(month_add(tmax, -WIN))})
 json.dump(N, open(f"{OUT}/vp_prv_model.json", "w"), separators=(",", ":"))
 json.dump({"cmp": cmp, "trained_to": tmax, "old_trained_to": told}, open(f"{OUT}/prv_month_cmp.json", "w"), indent=1)
 print("KB", os.path.getsize(f"{OUT}/vp_prv_model.json") // 1024, "prv month done", flush=True)
