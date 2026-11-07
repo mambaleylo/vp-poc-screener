@@ -12,6 +12,10 @@ import os, sys, json, numpy as np
 ARGV = sys.argv[1:]
 exec(open("cfl_lab3.py").read().rsplit('if __name__ == "__main__":', 1)[0])
 ST = os.environ.get("LABSTORE", "/home/user/vp-lab-store")
+TAG = os.environ.get("CFL_TAG", "")   # CFL_SC=roll_cfl_Q.npz CFL_TAG=_Q: another retrain schedule's scores (roll_mod.py cfl VAR)
+if os.environ.get("CFL_SC"):
+    SC = np.load(os.environ["CFL_SC"])["SC"]
+    mk = BOT & (T >= ts(2021)) & np.isfinite(SC); tt, ss = T[mk], SC[mk]; o = np.argsort(tt); tt, ss = tt[o], ss[o]
 BASE = dict(q=0.997, win=180, drought=None, side=1, famq=False, coins="bot", cap=20, tfs=None, ex={})
 VARS = {
     "base": {},
@@ -116,5 +120,5 @@ if __name__ == "__main__":
         if p["coins"] == "all":
             ub = np.array([not x["bot"] for x in L]); ex = f" | невиденные {ub.sum()} {r[ub].mean() if ub.any() else 0:+.2f}R"
         print(f"{nm:12s}: {len(L)} сделок, {r.mean():+.3f}R, WR {(r > 0).mean() * 100:.0f}%, пустых месяцев {im} из 45, самая длинная пауза {gap} дн | {ys}{ex}", flush=True)
-        json.dump(L, open(f"{ST}/wf/cfl_var_{nm}.json", "w"))
+        json.dump(L, open(f"{ST}/wf/cfl_var_{nm}{TAG}.json", "w"))
     print("cfl var done", flush=True)
