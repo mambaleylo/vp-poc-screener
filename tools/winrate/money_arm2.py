@@ -153,8 +153,9 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     arm_d = float(kw.get("arm", ARM)); hf = float(kw.get("hf", 1.0)); cnt = kw.get("cnt", "1") == "1"
     if "dlm" in kw: rk = dict(rk, dlm=float(kw["dlm"]))
     if "k" in kw: rk = {m_: v_ * float(kw["k"]) for m_, v_ in rk.items()}   # every module's risk x k
-    for m_ in ("prv", "smc", "emx", "htf"):
+    for m_ in ("prv", "smc", "emx", "htf", "cfl"):
         if m_ in kw: rk = dict(rk, **{m_: float(kw[m_])})
+    rk = dict(rk); rk.setdefault("cfl", 1.0)   # 🔄 Классика (the bot's BN_OTHERS_RISK 1%)
     if rk["dlm"] <= 0: OR = []   # ⚡ off
     if "mp" in kw: maxpos = int(kw["mp"])
     if "cap" in kw: cap = float(kw["cap"])
