@@ -147,6 +147,7 @@ def bar(coin, h):
     if coin not in H1: H1[coin] = DE.load1h(coin)
     T, O_, H, L, C, V = H1[coin]; i = np.searchsorted(T, h)
     return (H[i], L[i], C[i]) if i < len(T) and T[i] == h else None
+WD_LAST = {}   # the withdrawals of the last run (wd=…): the sum taken out, the whole money's drawdown, the account's last value
 def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=100.0, maxpos=20):
     rng = np.random.default_rng(seed)
     kw = dict(x.split("=") for x in rule.split("|")[1:]); rule = rule.split("|")[0]   # "A|arm=0.5|hf=0.5|cnt=0"
@@ -243,6 +244,16 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
     RS = (float(kw["res"].split("/")[0]), kw["res"].split("/")[1], float(kw["res"].split("/")[2])) if "res" in kw else None
     RES = 0.0
     if RS: RES = eq0 * RS[0]; cash = eq0 - RES
+    # withdrawals (the user: "после удачного месяца вывести часть, после плохого — не выводить"): every 30 days from the start, the
+    # money taken off the exchange for good (WDX, never traded or refilling): "wd=p/F" F of the month's profit (a month in profit);
+    # "wd=g/M/F" F of the month's profit when the month made >= M (0.5 = +50%); "wd=h/F" F of the gain above the high-water mark
+    # (the account's best month-end after the withdrawals: nothing until a fall is made back); "wd=c/X" the account above $X;
+    # "wd=t/X1:F1/X2:F2/..." the high-water mark rule with F by the balance (F of the tier the balance is in, 0 below the first).
+    # Only the free cash moves out. WD_LAST: the withdrawn sum, the whole money's (the account + withdrawn) drawdown
+    # (the user: "не обязательно выводить, если на балансе ниже какой-то суммы, особенно в первые месяцы"): "wdmin=X" nothing out while
+    # the account is below $X, "wdm0=N" nothing out in the first N months
+    WMIN = float(kw.get("wdmin", 0)); WM0 = int(kw.get("wdm0", 0))
+    WD = kw["wd"].split("/") if "wd" in kw else None; WD_LAST.clear(); WDX = 0.0; nwd = 0; eq_m = eq0; hwm = eq0; tpk = eq0; tdd = 0.0
     OR = [o for o in OR if A - 64 * 3600 <= o["t"] < B]; io = 0; act = []
     OT = sorted(OT, key=lambda v: v["t0"]); jo = bisect.bisect_left([v["t0"] for v in OT], A)
     def rd_of(v, eq):
@@ -336,6 +347,23 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         if path is not None and h >= A + (len(path) + 1) * 30 * 86400: path.append(eq + RES)
         if dep and ndep < dep[2] and h >= A + (ndep + 1) * dep[1] * 86400:
             units += dep[0] / (eq / units); cash += dep[0]; eq += dep[0]; ndep += 1
+        if WD and h >= A + (nwd + 1) * 30 * 86400:
+            nwd += 1; prof = eq - eq_m; w = 0.0; k_ = WD[0]
+            if k_ == "p" and prof > 0: w = float(WD[1]) * prof
+            elif k_ == "g" and eq_m > 0 and prof >= float(WD[1]) * eq_m: w = float(WD[2]) * prof
+            elif k_ == "c" and eq > float(WD[1]): w = eq - float(WD[1])
+            elif k_ in ("h", "t") and eq > hwm:
+                if k_ == "h": f_ = float(WD[1])
+                else: f_ = max([0.0] + [float(x.split(":")[1]) for x in WD[1:] if eq >= float(x.split(":")[0])])
+                w = f_ * (eq - hwm)
+            if nwd <= WM0 or eq < WMIN: w = 0.0
+            w = max(0.0, min(w, cash - sum(o["mg"] for o in pos) - sum(a["mg"] for a in armed.values())))
+            if w > 0:
+                units -= w / (eq / units); cash -= w; eq -= w; WDX += w
+            hwm = max(hwm, eq); eq_m = eq
+        if WD:
+            tot_ = eq + RES + WDX; tpk = max(tpk, tot_); tdd = max(tdd, 1 - tot_ / tpk)
+            WD_LAST.update(wd=WDX, tdd=tdd, acct=eq + RES)
         nav = (eq + RES) / units; peak = max(peak, nav); mdd = max(mdd, 1 - nav / peak)
         if curve is not None and h % 21600 == 0:
             curve.append((h, round(nav, 4), sum(1 for o in pos if o["mod"] == "dlm" and o["side"] > 0), sum(1 for o in pos if o["mod"] == "dlm" and o["side"] < 0),
