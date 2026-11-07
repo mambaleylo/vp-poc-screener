@@ -1158,7 +1158,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
                   "htf_enabled", "autotrade_htf", "telegram_alerts_htf", "risk_pct_htf",   # v0.99.732
                   "liq_enabled", "liq_steps",   # v0.99.766
-                  "cfl_enabled", "telegram_alerts_cfl", "autotrade_cfl", "risk_pct_cfl",   # v0.99.739, v0.99.740
+                  "cfl_enabled", "telegram_alerts_cfl", "autotrade_cfl2", "risk_pct_cfl",   # v0.99.739, v0.99.740
                   "rbs_enabled", "telegram_alerts_rbs",   # v0.99.757
                   "dlm_enabled", "autotrade_dlm2", "telegram_alerts_dlm", "risk_pct_dlm2", "dlm_binance", "dlm_more_coins", "bn_others", "bn_cross",   # v0.99.679, v0.99.684, v0.99.686 (v0.99.687: the single mode and the ladder dropped; the 4h module's own autotrade / risk keys: it starts virtual at 4% (v0.99.688), the 15m one held up to 50%)
                   "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
@@ -1245,7 +1245,7 @@ def get_settings():
         "smc_enabled": SMC_ENABLED, "autotrade_smc": AUTOTRADE_ENABLED_SMC, "telegram_alerts_smc": TELEGRAM_ALERTS_SMC, "risk_pct_smc": MODULE_RISK_PCT.get("smc"),   # v0.99.678
         "htf_enabled": HTF_ENABLED, "autotrade_htf": AUTOTRADE_ENABLED_HTF, "telegram_alerts_htf": TELEGRAM_ALERTS_HTF, "risk_pct_htf": MODULE_RISK_PCT.get("htf"),   # v0.99.732
         "liq_enabled": LIQ_ENABLED, "liq_steps": LIQ_STEPS,   # v0.99.766
-        "cfl_enabled": CFL_ENABLED, "telegram_alerts_cfl": TELEGRAM_ALERTS_CFL, "autotrade_cfl": AUTOTRADE_ENABLED_CFL, "risk_pct_cfl": MODULE_RISK_PCT.get("cfl"),   # v0.99.739, v0.99.740
+        "cfl_enabled": CFL_ENABLED, "telegram_alerts_cfl": TELEGRAM_ALERTS_CFL, "autotrade_cfl2": AUTOTRADE_ENABLED_CFL, "risk_pct_cfl": MODULE_RISK_PCT.get("cfl"),   # v0.99.739, v0.99.740
         "rbs_enabled": RBS_ENABLED, "telegram_alerts_rbs": TELEGRAM_ALERTS_RBS,   # v0.99.757
         "dlm_enabled": DLM_ENABLED, "autotrade_dlm2": AUTOTRADE_ENABLED_DLM, "telegram_alerts_dlm": TELEGRAM_ALERTS_DLM, "risk_pct_dlm2": MODULE_RISK_PCT.get("dlm"),   # v0.99.679, v0.99.687
         "dlm_binance": DLM_BINANCE,   # v0.99.684
@@ -1549,7 +1549,7 @@ def apply_settings(updates):
                    ("cas_enabled", "CAS_ENABLED"), ("autotrade_cas", "AUTOTRADE_ENABLED_CAS"), ("telegram_alerts_cas", "TELEGRAM_ALERTS_CAS"),
                    ("smc_enabled", "SMC_ENABLED"), ("autotrade_smc", "AUTOTRADE_ENABLED_SMC"), ("telegram_alerts_smc", "TELEGRAM_ALERTS_SMC"),
                    ("htf_enabled", "HTF_ENABLED"), ("autotrade_htf", "AUTOTRADE_ENABLED_HTF"), ("telegram_alerts_htf", "TELEGRAM_ALERTS_HTF"),   # v0.99.732
-                   ("cfl_enabled", "CFL_ENABLED"), ("telegram_alerts_cfl", "TELEGRAM_ALERTS_CFL"), ("autotrade_cfl", "AUTOTRADE_ENABLED_CFL"),   # v0.99.739, v0.99.740
+                   ("cfl_enabled", "CFL_ENABLED"), ("telegram_alerts_cfl", "TELEGRAM_ALERTS_CFL"), ("autotrade_cfl2", "AUTOTRADE_ENABLED_CFL"),   # v0.99.739, v0.99.740
                    ("rbs_enabled", "RBS_ENABLED"), ("telegram_alerts_rbs", "TELEGRAM_ALERTS_RBS"),   # v0.99.757
                    ("dlm_enabled", "DLM_ENABLED"), ("autotrade_dlm2", "AUTOTRADE_ENABLED_DLM"), ("telegram_alerts_dlm", "TELEGRAM_ALERTS_DLM"),
                    ("dlm_binance", "DLM_BINANCE"), ("dlm_more_coins", "DLM_MORE_COINS"), ("bn_others", "BN_OTHERS"), ("bn_cross", "BN_CROSS")):   # v0.99.625, v0.99.653, v0.99.678, v0.99.679
@@ -28669,6 +28669,9 @@ def api_boot():
     """v0.99.469 — the page reloads itself when this changes (a restart / update); v0.99.700 — the yearly expectation
     for the header (the bundle when P/R, SMC, EMA trade with ⚡ on Binance)"""
     k = ("bundle_htf" if AUTOTRADE_ENABLED_HTF else "bundle") if BN_OTHERS else "dlm"   # v0.99.735 — 📏 HTF's real trades on -> the bundle with it
+    if k != "dlm" and AUTOTRADE_ENABLED_CFL and "cfl" in BN_OTHERS_MODES:   # v0.99.776 — 🔄 Классика's real trades on -> with it too
+        k = "bundle_cfl" if k == "bundle" else "bundle_htf_cfl"
+    if k not in EXPECT_YEAR: k = k.replace("_cfl", "")
     return jsonify({"boot": _PROC_START, "version": APP_VERSION, "expect": dict(EXPECT_YEAR[k], kind=k)})
 
 
@@ -34682,7 +34685,7 @@ CFL_MODEL_VER = 2   # v0.99.741 — the close stop (a v1 file: the touch stop)
 CFL_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_cfl_state.json")
 CFL_ENABLED = os.environ.get("VP_CFL", "1") == "1"
 TELEGRAM_ALERTS_CFL = os.environ.get("VP_TG_ALERTS_CFL", "1") == "1"
-AUTOTRADE_ENABLED_CFL = os.environ.get("VP_AUTOTRADE_CFL", "0") == "1"   # v0.99.740 — the real trades: off by default (the user: "галочку авто торговли пока выключи")
+AUTOTRADE_ENABLED_CFL = os.environ.get("VP_AUTOTRADE_CFL", "1") == "1"   # v0.99.776 — on by default (the user: "по умолчанию включи авто торговлю"; the setting's key is new, autotrade_cfl2: an old saved "off" does not stay). v0.99.740 — off by default
 CFL_RISK_DEFAULT = 0.25   # % on Gate when the module's own field is empty; on Binance BN_OTHERS_RISK["cfl"]
 CFL_FNAMES = ["fam", "side", "datr", "hour", "dow", "r4", "r24", "r72", "r7d", "b24", "b7d", "b_e50", "rsi_d", "rsi_h",
               "d_e50", "d_e200", "pos30", "pos90", "pos365", "vol24", "atr_h", "oi4", "oi24", "ls_z", "tk_z", "fund",
@@ -35085,10 +35088,11 @@ def cfl_add_score(day, sc):
             del top[300:]
 
 
-def cfl_threshold(m, t):
-    """q of the bot coins' scores of the win days ending lag days before t (numpy's linear quantile on the union)"""
+def cfl_threshold(m, t, q=None):
+    """q of the bot coins' scores of the win days ending lag days before t (numpy's linear quantile on the union); v0.99.776:
+    q given — the drought rule's lower one"""
     r = m.get("rule") or {}
-    q, win, lag = float(r.get("q", 0.997)), int(r.get("win_d", 180)), int(r.get("lag_d", 14))
+    q, win, lag = float(q if q is not None else r.get("q", 0.997)), int(r.get("win_d", 180)), int(r.get("lag_d", 14))
     hi = t // 86400 - lag; lo = hi - win
     with _cfl_lock:
         days = dict(m.get("seed") or {}); days.update(_CFL["days"])
@@ -35149,6 +35153,15 @@ def cfl_scan(t_close):
         return
     r = m.get("rule") or {}
     thr = cfl_threshold(m, t_close - 3600)
+    # v0.99.776 — the drought rule (the user: "простои 2–3 месяца"; tools/winrate cfl_var.py dr14): no Классика trade for
+    # drought_d days -> the lower threshold (q drought_q) until one opens; the threshold of the 127 trained coins' scores only
+    dd_, dq_ = int(r.get("drought_d") or 0), r.get("drought_q")
+    with _cfl_lock:
+        last_in = max([int(t.get("t_in") or 0) for t in _CFL["trades"]] or [0])
+    thr2 = cfl_threshold(m, t_close - 3600, q=float(dq_)) if dd_ and dq_ else None
+    drought = thr2 is not None and (last_in == 0 or t_close - last_in >= dd_ * 86400)
+    thr_eff = thr2 if drought and thr is not None and thr2 < thr else thr
+    thr_set = set(m.get("thr_coins") or m.get("coins") or [])
     btc1 = cfl_klines("BTCUSDT", "1h", CFL_W1 + 10); btcd = cfl_klines("BTCUSDT", "1d", CFL_WD + 2)
     cands, coins, evn, errs = [], 0, 0, 0
     for bsym in m.get("coins") or []:
@@ -35174,10 +35187,11 @@ def cfl_scan(t_close):
             oi = cfl_oi(bsym); fund = cfl_funding(bsym)
             for fam, s, f in cfl_coin_events(bsym, t_close, m, h1, h4, d1, btc1, btcd, oi, fund, first):
                 sc = cfl_score(m, f); evn += 1
-                cfl_add_score((t_close - 3600) // 86400, sc)
+                if bsym in thr_set:   # v0.99.776 — the threshold of the trained coins' scores (the 83 more only traded)
+                    cfl_add_score((t_close - 3600) // 86400, sc)
                 fill = next((o for t, o in zip(h1[0], h1[1]) if t == t_close), None)
                 live = h1[4][-1] if h1[0] and h1[0][-1] == t_close else None   # the forming hour's last price
-                if (thr is not None and sc >= thr and t_close - first >= int(r.get("min_age_d", 90)) * 86400
+                if (thr_eff is not None and sc >= thr_eff and t_close - first >= int(r.get("min_age_d", 90)) * 86400
                         and (not r.get("side") or -s == int(r["side"]))):   # v0.99.740 — the trade's side (longs only: against the short signals)
                     cands.append({"bsym": bsym, "fam": CFL_FAMS[fam], "S": s, "score": round(sc, 4), "datr": round(f[2], 4), "fill": fill, "live": live})
             time.sleep(0.8)
@@ -35188,10 +35202,13 @@ def cfl_scan(t_close):
     cands.sort(key=lambda c: -c["score"])
     opened = 0
     for c in cands:
+        if c["score"] < (thr if thr is not None else -1e9) and opened:   # the drought's lower bar: only until one opens
+            continue
         if cfl_open(c, t_close, m):
             opened += 1
     with _cfl_lock:
         _CFL["scan"] = {"t": int(time.time()), "bar": t_close, "coins": coins, "events": evn, "thr": round(thr, 4) if thr is not None else None,
+                        "thr2": round(thr2, 4) if thr2 is not None else None, "drought": bool(drought),
                         "cands": len(cands), "opened": opened, "errs": errs,
                         "near": [{"symbol": _bn_gate_sym(c["bsym"])[0], "fam": c["fam"], "side": -c["S"], "score": c["score"]} for c in cands[:8]]}
         _CFL["last_bar"] = t_close
@@ -37388,9 +37405,22 @@ def bn_margin_mode(bsym):
         return "ISOLATED" if want == "CROSSED" else "CROSSED"
 
 
-def bn_heat(equity=None):
-    """$ the Binance account loses if every open position and armed ⚡ limit of the bot hits its exchange stop"""
+BN_CFL_HEAT = float(os.environ.get("VP_BN_CFL_HEAT", "0.25"))   # v0.99.776 — 🔄 Классика on its own open-risk room (tools/winrate money_cfl.py: on the common one it took ⚡'s room in the same sell-offs, the bundle's usual year -8..-18%; on its own 25% the usual year +48%)
+
+
+def bn_heat(equity=None, part="main"):
+    """$ the Binance account loses if every open position and armed ⚡ limit of the bot hits its exchange stop. v0.99.776:
+    part "main" — all but 🔄 Классика's positions (it has its own room, BN_CFL_HEAT), "cfl" — only Классика's"""
     h = 0.0
+    if part == "cfl":
+        with _bno_lock:
+            recs = [r_ for r_ in _BNO["pos"].values() if r_.get("mode") == "cfl"]
+        for rec in recs:
+            if rec.get("sl_px"):
+                h += float(rec["qty"]) * max(0.0, int(rec.get("side") or 1) * (float(rec["entry"]) - float(rec["sl_px"])))
+            elif equity:
+                h += equity * float(rec.get("risk") or 2.0) * 1.5 / 100
+        return h
     with _dlm_lock:
         trs = [t for t in _DLM["trades"] if t.get("real") and t["status"] == "OPEN" and (t["real"].get("ex") or "binance") == "binance"]
         ods = [o for o in _DLM["orders"] if o["status"] == "OPEN" and (o.get("real") or {}).get("id") and o["real"].get("ex") == "binance"]
@@ -37405,7 +37435,7 @@ def bn_heat(equity=None):
         sp = float(r.get("pre_sl_px") or 0) or (o["lv"] - o["side"] * 3.0 * (o.get("atr") or 0)) * scl
         h += q * max(0.0, o["side"] * (float(r.get("price") or o["lv"]) * scl - sp))
     with _bno_lock:
-        recs = list(_BNO["pos"].values())
+        recs = [r_ for r_ in _BNO["pos"].values() if r_.get("mode") != "cfl"]
     for rec in recs:
         if rec.get("sl_px"):
             h += float(rec["qty"]) * max(0.0, int(rec.get("side") or 1) * (float(rec["entry"]) - float(rec["sl_px"])))
@@ -37414,16 +37444,17 @@ def bn_heat(equity=None):
     return h
 
 
-def bn_heat_cap(risk_pct, equity):
+def bn_heat_cap(risk_pct, equity, mode=None):
     """cross margin: the new trade's risk % (its loss at its exchange stop) scaled so the open risk + it <= BN_HEAT_MAX
-    of the equity -> (risk %, the reason it is 0 or None)"""
+    of the equity -> (risk %, the reason it is 0 or None). v0.99.776: Классика against its own room (BN_CFL_HEAT)"""
     if not equity or equity <= 0:
         return risk_pct, None
-    h = bn_heat(equity); room = BN_HEAT_MAX * equity - h; hn = equity * risk_pct / 100
+    cap_ = BN_CFL_HEAT if mode == "cfl" else BN_HEAT_MAX
+    h = bn_heat(equity, "cfl" if mode == "cfl" else "main"); room = cap_ * equity - h; hn = equity * risk_pct / 100
     if hn <= room:
         return risk_pct, None
     if room < hn * 0.1:   # under a tenth of its risk left: waits (a crumb would be under Binance's minimum / not worth it)
-        return 0.0, f"общий риск открытых позиций уже {h / equity * 100:.0f}% счёта (потолок {BN_HEAT_MAX * 100:.0f}%) — ждёт, пока освободится"
+        return 0.0, f"{'риск открытых сделок Классики' if mode == 'cfl' else 'общий риск открытых позиций'} уже {h / equity * 100:.0f}% счёта (потолок {cap_ * 100:.0f}%) — ждёт, пока освободится"
     return round(risk_pct * room / hn, 4), None
 
 
@@ -37441,7 +37472,7 @@ def bn_size(direction, e, sl_x, cap, mmr, equity, risk, bsym, tb, mt, safety=Non
         margin, lev = margin * lev / lev2, lev2
     return margin, lev, skip
 BN_OTHERS_MODES = ("prv", "smc", "emw", "htf", "cfl")
-BN_OTHERS_RISK = {"prv": 3.75, "smc": 3.125, "emw": 3.75, "htf": 2.5, "cfl": 1.0}   # v0.99.775 — x1.25 with ⚡ 4% (money_mix.py). Was v0.99.749 — 📈 EMA 3% (money_params.py / money_stress.py: better in 125 of 144 windows, no worse than 2% even with its trades 0.35R below the list). v0.99.740 — 🔄 Классика наоборот 1% (its real trades off by default). v0.99.737 — 📏 HTF 2% (htf_lab6r.py: with the friction better in 95% of the 12-month windows, 98% since Dec 2024, the median x1.03, the worst window x0.97; less ⚡ or a higher open-risk cap — worse). v0.99.732 — 📏 HTF 1.5% (htf_money5.py: with the friction the last 12 months $129.7k -> $196.3k, better in 94% of the windows; 2% adds ~nothing). v0.99.727 — SMC 2.5% + EMA 2% (port_risk2/3.py: with the cross margin and SMC's break-even the bundle is better in every 12-month window, with and without friction); v0.99.718 — P/R 3% with cross margin (port_717*.py); v0.99.712 — EMA 1% (port_w709.py: every number better); v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
+BN_OTHERS_RISK = {"prv": 3.75, "smc": 3.125, "emw": 3.75, "htf": 2.5, "cfl": 2.0}   # v0.99.776 — 🔄 Классика 2% on its own room   # v0.99.775 — x1.25 with ⚡ 4% (money_mix.py). Was v0.99.749 — 📈 EMA 3% (money_params.py / money_stress.py: better in 125 of 144 windows, no worse than 2% even with its trades 0.35R below the list). v0.99.740 — 🔄 Классика наоборот 1% (its real trades off by default). v0.99.737 — 📏 HTF 2% (htf_lab6r.py: with the friction better in 95% of the 12-month windows, 98% since Dec 2024, the median x1.03, the worst window x0.97; less ⚡ or a higher open-risk cap — worse). v0.99.732 — 📏 HTF 1.5% (htf_money5.py: with the friction the last 12 months $129.7k -> $196.3k, better in 94% of the windows; 2% adds ~nothing). v0.99.727 — SMC 2.5% + EMA 2% (port_risk2/3.py: with the cross margin and SMC's break-even the bundle is better in every 12-month window, with and without friction); v0.99.718 — P/R 3% with cross margin (port_717*.py); v0.99.712 — EMA 1% (port_w709.py: every number better); v0.99.706 — SMC 1.5% with its q 0.993 (port_smcq.py); v0.99.699: ⚡ 4% + P/R 2 + SMC 1 + EMA 0.5
 BNO_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_bn_others.json")
 _BNO = {"pos": {}}   # Gate contract -> the Binance position this bot opened for P/R / SMC / EMA
 _bno_lock = threading.Lock()
@@ -37532,12 +37563,12 @@ def bno_open(mode, symbol, direction, entry, sl, tp, kx=1.0):
     risk = float(MODULE_RISK_PCT.get(mode) or BN_OTHERS_RISK.get(mode, 1.0)) * kx   # v0.99.700: kx — the stop sl is the emergency one
     mt = bn_margin_mode(bsym)   # v0.99.717 — cross (the open risk capped; v0.99.744: the coin's highest leverage) or isolated (the leverage by the stop)
     if mt == "CROSSED":
-        try:   # v0.99.753 — short of room: the armed ⚡ limits make way
+        try:   # v0.99.753 — short of room: the armed ⚡ limits make way (v0.99.776: not for Классика — its own room)
             eq_ = acct["equity"]
-            dlm_free_room(eq_ * risk / 100, BN_HEAT_MAX * eq_ - bn_heat(eq_), {"prv": "P/R", "smc": "🧱 SMC", "emw": "📈 EMA", "htf": "📏 HTF", "cfl": "🔄 Классика"}.get(mode, mode))
+            if mode != "cfl": dlm_free_room(eq_ * risk / 100, BN_HEAT_MAX * eq_ - bn_heat(eq_), {"prv": "P/R", "smc": "🧱 SMC", "emw": "📈 EMA", "htf": "📏 HTF", "cfl": "🔄 Классика"}.get(mode, mode))
         except Exception as e:
             log_error(f"bn others free room: {e}")
-        risk, why = bn_heat_cap(risk, acct["equity"])
+        risk, why = bn_heat_cap(risk, acct["equity"], mode)
         if why:
             return {"status": "SKIPPED", "detail": why}
     margin, lev, skip = bn_size(direction, e, slp, cap, mmr, acct["equity"], risk, bsym, tb, mt)
@@ -42945,12 +42976,12 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="prv" style="color:var(--prv);">Peak Reversal</div>
   <div class="tab" data-tab="smc" style="color:#a1887f;">🧱 SMC</div>
   <div class="tab" data-tab="emw" style="color:#7fd1ff;">📐 EMA</div>
+  <div class="tab" data-tab="cfl" style="color:#ffb74d;">🔄 Классика</div>   <!-- v0.99.776: 5th (the user: "по очереди в списке сделай его 5-м") -->
   <div class="tab" data-tab="htf" style="color:#9ccc65;">📏 HTF</div>
   <div class="tab" data-tab="zones" style="color:#4caf50;">🎯 Зоны</div>
   <div class="tab" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
   <div class="tab" data-tab="rbx" style="color:#ffb74d;">📈 Пробой</div>
   <div class="tab" data-tab="cas" style="color:#4dd0e1;">🌊 Каскад</div>
-  <div class="tab" data-tab="cfl" style="color:#ffb74d;">🔄 Классика</div>
   <div class="tab" data-tab="rbs" style="color:#ff8a65;">🚀 Пробой 4ч</div>
   <div class="tab" data-tab="hdg" style="color:#b39ddb;">🪞 Хедж</div>
   <div class="tab" data-tab="signals">Volume</div>
@@ -43149,6 +43180,23 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
+    <details class="settingsGroup" style="--mod-color:#ffb74d;"><summary class="settingsGroupTitle">🔄 Классика наоборот</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (4ч и день — 127 монет)</div>
+          <div class="sub">на закрытии каждой 4ч-свечи: сигналы 12 классических индикаторов, модель выбирает лучшие ~0.3%; сделка — лонг против сигнала на продажу по рынку на открытии следующего часа; стоп — закрытие дневной свечи (00:00 UTC) на 0.75 дневного ATR ниже входа, аварийный 1.5 ATR, тейк 4R, выход через 96 ч; не больше 20 сразу. Реальные сделки — переключатель «↳ 🔄 Классика» в автоторговле (по умолчанию выключен)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setCfl"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ 🔄 Классика в Telegram</div>
+          <div class="sub">новая виртуальная сделка (итог — переключателем «Итоги сделок»)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgCfl"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+
     <details class="settingsGroup" style="--mod-color:#9ccc65;"><summary class="settingsGroupTitle">📏 HTF-уровни</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -43299,23 +43347,6 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">на +1R закрыть четверть позиции и перенести стоп в безубыток, остаток — по тренду. Винрейт 54% вместо 33%, стопов подряд до 14 вместо 26, рост депозита при той же просадке — как без неё. Действует на новые сделки</div>
         </div>
         <label class="switch"><input type="checkbox" id="setRbxPart"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
-
-    <details class="settingsGroup" style="--mod-color:#ffb74d;"><summary class="settingsGroupTitle">🔄 Классика наоборот</summary><div class="settingsGroupBody">
-      <div class="settingRow">
-        <div>
-          <div class="label">Работа (4ч и день — 127 монет)</div>
-          <div class="sub">на закрытии каждой 4ч-свечи: сигналы 12 классических индикаторов, модель выбирает лучшие ~0.3%; сделка — лонг против сигнала на продажу по рынку на открытии следующего часа; стоп — закрытие дневной свечи (00:00 UTC) на 0.75 дневного ATR ниже входа, аварийный 1.5 ATR, тейк 4R, выход через 96 ч; не больше 20 сразу. Реальные сделки — переключатель «↳ 🔄 Классика» в автоторговле (по умолчанию выключен)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setCfl"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ 🔄 Классика в Telegram</div>
-          <div class="sub">новая виртуальная сделка (итог — переключателем «Итоги сделок»)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTgCfl"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -43549,7 +43580,7 @@ INDEX_HTML = """<!doctype html>
           <input type="number" id="setRiskPctDlm" min="0.1" max="100" step="0.05" placeholder="⚡ 4" title="⚡ Лимитки 4ч+2ч: пусто — 4% на сделку, до 20 сделок сразу; больше 10% не берётся" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSmc" min="0.1" max="100" step="0.05" placeholder="🧱 3.125" title="🧱 SMC: пусто — 2.5% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctHtf" min="0.1" max="100" step="0.05" placeholder="📏 2.5" title="📏 HTF-уровни: пусто — 2% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctCfl" min="0.1" max="100" step="0.05" placeholder="🔄 1" title="🔄 Классика наоборот: пусто — 1% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctCfl" min="0.1" max="100" step="0.05" placeholder="🔄 2" title="🔄 Классика наоборот: пусто — 1% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
         </div>
       </div>
       <div class="settingRow subRow">
@@ -46097,7 +46128,7 @@ if ('serviceWorker' in navigator) { try { navigator.serviceWorker.register('/sw.
     const r = await (await fetch('/api/boot', {cache: 'no-store'})).json(), e = r.expect;
     if (!e) return;
     const k = v => v >= 1000 ? '$' + (v / 1000).toFixed(v >= 10000 ? 0 : 1).replace('.', ',') + 'k' : '$' + v;
-    document.getElementById('hdrExpect').innerHTML = `📈 ${e.kind === 'bundle_htf' ? '⚡ + P/R + SMC + EMA + HTF' : (e.kind === 'bundle' ? '⚡ + P/R + SMC + EMA' : '⚡')} за год со $100 по истории: плохой год ~${k(e.p10)} · обычный ~${k(e.p50)} · хороший ~${k(e.p90)} · просадки ~${e.dd}%${e.last12 ? ` · последние 12 мес ~${k(e.last12)}` : ''} · вживую ждите меньше`;
+    document.getElementById('hdrExpect').innerHTML = `📈 ${e.kind === 'dlm' ? '⚡' : '⚡ + P/R + SMC + EMA' + (e.kind.includes('cfl') ? ' + Классика' : '') + (e.kind.includes('htf') ? ' + HTF' : '')} за год со $100 по истории: плохой год ~${k(e.p10)} · обычный ~${k(e.p50)} · хороший ~${k(e.p90)} · просадки ~${e.dd}%${e.last12 ? ` · последние 12 мес ~${k(e.last12)}` : ''} · вживую ждите меньше`;
   } catch (err) {}
 })();
 
@@ -48914,7 +48945,7 @@ const setInputs = {
   telegram_alerts_cfl: document.getElementById('setTgCfl'),
   rbs_enabled: document.getElementById('setRbs'),   // v0.99.757
   telegram_alerts_rbs: document.getElementById('setTgRbs'),
-  autotrade_cfl: document.getElementById('setAutotradeCfl'),   // v0.99.740
+  autotrade_cfl2: document.getElementById('setAutotradeCfl'),   // v0.99.740; v0.99.776 — a new key: on by default (an old saved "off" not kept)
   autotrade_zones_zm: document.getElementById('setAutotradeZonesZm'),
   telegram_alerts_zones_zm: document.getElementById('setTgZonesZm'),
 };

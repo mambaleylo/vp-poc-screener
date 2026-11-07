@@ -9,7 +9,7 @@ from multiprocessing import Pool
 ST = os.environ.get("LABSTORE", "/home/user/vp-lab-store")
 DATA = os.path.join(ST, "data", "1h")
 ts = lambda y, m=1, d=1: calendar.timegm((y, m, d, 0, 0, 0))
-RK = {"dlm": 4.5, "prv": 3.0, "smc": 2.5, "emx": 2.0, "htf": 2.0}
+RK = {"dlm": 4.5, "prv": 3.0, "smc": 2.5, "emx": 2.0, "htf": 2.0, "cfl": 1.0}
 BR = json.load(open(os.path.join(ST, "brackets.json")))
 AV = {f[:-7] for f in os.listdir(DATA)}
 def bn(c):   # a coin's Binance name from the bot's "X_USDT" or the Binance one
@@ -39,7 +39,7 @@ def build(pool_name):
         EV.append({"t0": x["t1h"] + 3600, "t1": x["tout"], "r": x["R"], "st": st, "sth": sth, "mod": "dlm", "sym": bn(x["coin"]), "side": x["side"],
                    "e": x["fill"], "stream": x["st"]})
     L = json.load(open("/home/user/vp-poc-screener/vp_bt_trades.json"))
-    for mod in ("prv", "smc", "emx", "htf"):
+    for mod in ("prv", "smc", "emx", "htf", "cfl"):   # v0.99.776: + 🔄 Классика
         for t in L[mod]:
             sym = bn(t["s"])
             if not sym: continue

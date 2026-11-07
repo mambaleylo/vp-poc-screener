@@ -6,7 +6,8 @@ import sys, os, json, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import money_multi as M
 from multiprocessing import Pool
-KINDS = {"dlm": {"dlm"}, "bundle": {"dlm", "prv", "smc", "emx"}, "bundle_htf": {"dlm", "prv", "smc", "emx", "htf"}}
+KINDS = {"dlm": {"dlm"}, "bundle": {"dlm", "prv", "smc", "emx"}, "bundle_htf": {"dlm", "prv", "smc", "emx", "htf"},
+         "bundle_cfl": {"dlm", "prv", "smc", "emx", "cfl"}, "bundle_htf_cfl": {"dlm", "prv", "smc", "emx", "htf", "cfl"}}   # v0.99.776: + 🔄 Классика
 W0, W1 = M.ts(2023, 2, 1), M.ts(2025, 10, 31)
 STARTS = list(range(W0, W1 + 1, 7 * 86400))
 LAST = M.ts(2025, 10, 31)   # the last 12 months the data has: Nov 2025 .. Oct 2026
