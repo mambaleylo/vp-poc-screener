@@ -28,13 +28,16 @@ if len(ARGV) > 2 and ARGV[2] == "lite":   # the user: "300к это же ппц 
            "b5": "wd=b/0.05|wdmin=20000", "b10": "wd=b/0.1|wdmin=20000", "bh10": "wd=bh/0.1|wdmin=20000",
            "h10": "wd=h/0.1|wdmin=20000", "h20": "wd=h/0.2|wdmin=20000", "f2k": "wd=f/2000|wdmin=20000", "f5k": "wd=f/5000|wdmin=50000"}
 BAL = (1000, 3000, 5000, 10000, 100000)   # the user: "ещё и 3000 и 5000"
+if len(ARGV) > 2 and ARGV[2] == "salary":   # the user: "цель — в месяц 5000$ зарабатывать": $5000 out every month from a balance
+    POL = {"none": "", "s20k": "wd=s/5000|wdmin=20000", "s30k": "wd=s/5000|wdmin=30000", "s50k": "wd=s/5000|wdmin=50000", "s100k": "wd=s/5000|wdmin=100000"}
+    BAL = (1000, 5000, 20000, 30000, 50000, 100000)
 _D = {}
 def _init(D): _D.update(D)
 def job(a):
     nm, b, k, A = a
     r = MA2.run(_D[("or", k)], _D[("ot", k)], A, A + 365 * 86400, RULE + ("|" + POL[nm] if POL[nm] else ""), 1, eq0=float(b))
     w = dict(MA2.WD_LAST) if POL[nm] else {"wd": 0.0, "tdd": r[1], "acct": r[0]}
-    return nm, b, k, A, float(r[0]), float(w.get("wd", 0.0)), float(w.get("tdd", r[1])), list(r[4])
+    return nm, b, k, A, float(r[0]), float(w.get("wd", 0.0)), float(w.get("tdd", r[1])), list(r[4]) + [w.get("m1", 0), w.get("paid", 0)]
 if __name__ == "__main__":
     base = MA2.orders(); o2 = [dict(o, xm=0.75) for o in MA2.stream_orders("wick4h_o2", "") if o["prio"] >= 1.05]
     OR = sorted(base + o2, key=lambda o: o["t"]); OT = [v for v in M.build("base") if v["mod"] in X.KINDS["bundle_htf_cfl"] - {"dlm"}]; D = {}
@@ -70,5 +73,13 @@ if __name__ == "__main__":
                  "dd90": float(np.percentile(dd, 90)), "below": float((tot < b).mean())}
             out["rules"][f"{nm}@{b}"] = o
             print(f"{nm} | ${b:,} | ${o['p50']:,.0f} | ${o['p10']:,.0f} | ${o['wd']:,.0f} | {o['dd'] * 100:.0f}% / {o['dd90'] * 100:.0f}% | {o['below'] * 100:.0f}%", flush=True)
-    json.dump(out, open(f"{M.ST}/wf/money_wd" + ("_lite" if len(ARGV) > 2 and ARGV[2] == "lite" else "") + ".json", "w"), indent=1)
+            if len(ARGV) > 2 and ARGV[2] == "salary" and nm != "none":
+                S_ = [(p[-2], p[-1]) for n_, b_, k, A, acct, wd_, tdd, p in res if n_ == nm and b_ == b]
+                paid = np.array([x[1] for x in S_]); m1 = np.array([x[0] for x in S_ if x[0]])
+                acc = np.array([acct for n_, b_, k, A, acct, wd_, tdd, p in res if n_ == nm and b_ == b])
+                o.update(paid=float(np.median(paid)), m1=float(np.median(m1)) if len(m1) else None, never=float((paid == 0).mean()),
+                         acct=float(np.median(acc)), acct10=float(np.percentile(acc, 10)))
+                print(f"   зарплата: месяцев с $5000 из 12 — медиана {o['paid']:.0f} (ни разу — {o['never'] * 100:.0f}% окон), первый месяц — {o['m1']}, "
+                      f"счёт через год — медиана ${o['acct']:,.0f}, 10% худших ${o['acct10']:,.0f}", flush=True)
+    json.dump(out, open(f"{M.ST}/wf/money_wd" + ("_" + ARGV[2] if len(ARGV) > 2 else "") + ".json", "w"), indent=1)
     print("money wd done", flush=True)
