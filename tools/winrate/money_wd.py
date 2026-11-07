@@ -2,7 +2,7 @@
 месяц не очень, то вывод замедлит рост — не выводить; предложи лучшие варианты в зависимости от баланса"):
 (1) does a great month foretell a fall? Every 30-day month of the yearly windows (no withdrawals): the month's return by
 quintile -> the next month's median, the share of a >= 30% fall of the balance within the next 3 months;
-(2) the withdrawal rules of money_arm2 (wd=…) from $1k / $10k / $100k, a year, every STEP-th weekly window, K noise runs:
+(2) the withdrawal rules of money_arm2 (wd=…) from $1k / $3k / $5k / $10k / $100k, a year, every STEP-th weekly window, K noise runs:
 the whole money (the account + withdrawn) median / the bad 10%, the withdrawn median, the whole money's drawdown, the share
 of the windows ending below the start. The bot as it trades since v0.99.778 (the header's rule).
 usage: ALLSUF=_clr money_wd.py K STEP   -> <LABSTORE>/wf/money_wd.json"""
@@ -23,7 +23,7 @@ POL = {"none": "",   # each: the wd=… rule [+ wdmin=$ nothing below the balanc
        "c100k": "wd=c/100000", "c300k": "wd=c/300000",  # the account kept at most $100k / $300k
        "tier": "wd=t/10000:0.2/100000:0.5/300000:0.8",  # above the best: 20% from $10k, 50% from $100k, 80% from $300k
        "tier2": "wd=t/30000:0.3/100000:0.5/300000:0.9|wdm0=3"}
-BAL = (1000, 10000, 100000)
+BAL = (1000, 3000, 5000, 10000, 100000)   # the user: "ещё и 3000 и 5000"
 _D = {}
 def _init(D): _D.update(D)
 def job(a):
