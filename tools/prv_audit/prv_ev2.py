@@ -8,12 +8,16 @@ ST = os.environ.get("LABSTORE", "/home/user/vp-lab-store")
 import common
 
 
+C1H = os.environ.get("PRV_C1H")   # another 1h candles folder (<SYM>.csv, e.g. tools/ema_model/data/1h: to the month's end) — the monthly retrain
+OUT = os.environ.get("PRV_OUT", ST)   # the events' root (<OUT>/prv_ev); the funding stays <LABSTORE>/data/funding
+
+
 def load(sym, tf="1h"):
-    fn = f"{ST}/data/1h/{sym}.csv.gz"
+    fn = f"{C1H}/{sym}.csv" if C1H else f"{ST}/data/1h/{sym}.csv.gz"
     if not os.path.exists(fn):
         return None
     out, last = [], None
-    for line in gzip.open(fn, "rt"):
+    for line in (open(fn) if C1H else gzip.open(fn, "rt")):
         p = line.split(",")
         t = int(float(p[0]))
         if last is not None and t <= last:
@@ -27,7 +31,7 @@ common.load = load; common.D = ST
 import nx_build
 nx_build.D = ST   # the funding: <LABSTORE>/data/funding (dl_fund2.py)
 import prv_ev as PE
-PE.load = load; PE.D = ST
+PE.load = load; PE.D = OUT; os.makedirs(f"{OUT}/prv_ev", exist_ok=True)
 
 
 def coins211():
@@ -37,7 +41,7 @@ def coins211():
     for c in g:
         b = c.replace("_USDT", "")
         for x in (b + "USDT", "1000" + b + "USDT"):
-            if os.path.exists(f"{ST}/data/1h/{x}.csv.gz"):
+            if os.path.exists(f"{C1H}/{x}.csv" if C1H else f"{ST}/data/1h/{x}.csv.gz"):
                 out.append(x); break
     return sorted(set(out))
 

@@ -1,9 +1,10 @@
 """neuro_model/dl_fund.py into the lab-store: the funding history (data.binance.vision, monthly) of the given coins
 -> <LABSTORE>/data/funding/<SYM>.csv (t, rate).  usage: dl_fund2.py [coins...] (default: P/R's 211)"""
-import os, io, sys, zipfile, urllib.request, concurrent.futures as cf
+import os, io, sys, time, zipfile, urllib.request, concurrent.futures as cf
 ST = os.environ.get("LABSTORE", "/home/user/vp-lab-store"); OUT = f"{ST}/data/funding"; os.makedirs(OUT, exist_ok=True)
 B = "https://data.binance.vision/data/futures/um/monthly/fundingRate"
-months = [f"{y}-{m:02d}" for y in range(2020, 2027) for m in range(1, 13) if f"{y}-{m:02d}" <= "2026-09"]
+FEND = os.environ.get("FUND_END", "2026-09")   # the last month (the monthly retrain: the month before; an older file gets the missing months)
+months = [f"{y}-{m:02d}" for y in range(2020, 2030) for m in range(1, 13) if f"{y}-{m:02d}" <= FEND]
 def get(sym, mo):
     for k in range(3):
         try:
@@ -17,10 +18,15 @@ def get(sym, mo):
     return []
 def coin(sym):
     fn = f"{OUT}/{sym}.csv"
-    if os.path.exists(fn): return sym, -1
-    rows = []
+    rows, need = [], months
+    if os.path.exists(fn):
+        rows = [(int(a), float(v)) for a, v in (l.split(",") for l in open(fn).read().split())]
+        last = time.strftime("%Y-%m", time.gmtime(rows[-1][0])) if rows else ""
+        need = [mo for mo in months if mo > last]
+        if not need: return sym, -1
     with cf.ThreadPoolExecutor(8) as ex:
-        for r in ex.map(lambda mo: get(sym, mo), months): rows += r
+        for r in ex.map(lambda mo: get(sym, mo), need): rows += r
+    rows = sorted(set(rows))
     rows.sort(); open(fn + ".tmp", "w").write("\n".join(f"{t},{v}" for t, v in rows)); os.replace(fn + ".tmp", fn)
     return sym, len(rows)
 if __name__ == "__main__":
