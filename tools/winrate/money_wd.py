@@ -34,6 +34,10 @@ if len(ARGV) > 2 and ARGV[2] == "best":   # the user: "найди лучшую �
            "h50_10k": "wd=h/0.5|wdmin=10000", "h70_10k": "wd=h/0.7|wdmin=10000",
            "t_a": "wd=t/3000:0.3/10000:0.5/50000:0.7", "t_b": "wd=t/5000:0.4/20000:0.6/100000:0.8", "t_c": "wd=t/2000:0.2/5000:0.4/20000:0.6"}
     BAL = (1000, 3000, 5000, 10000, 20000)
+if len(ARGV) > 2 and ARGV[2] == "combo":   # the best of "best" (30% of the new highs from $5k) + the $5000 a month from $25k
+    POL = {"none": "", "h30_5k": "wd=h/0.3|wdmin=5000", "hs30": "wd=hs/0.3/5000/25000|wdmin=5000", "hs50": "wd=hs/0.5/5000/25000|wdmin=5000",
+           "hs30_40k": "wd=hs/0.3/5000/40000|wdmin=5000"}
+    BAL = (1000, 3000, 5000, 10000, 20000)
 if len(ARGV) > 2 and ARGV[2] == "salary":   # the user: "цель — в месяц 5000$ зарабатывать": $5000 out every month from a balance
     POL = {"none": "", "s20k": "wd=s/5000|wdmin=20000", "s30k": "wd=s/5000|wdmin=30000", "s50k": "wd=s/5000|wdmin=50000", "s100k": "wd=s/5000|wdmin=100000"}
     BAL = (1000, 5000, 20000, 30000, 50000, 100000)
@@ -79,7 +83,7 @@ if __name__ == "__main__":
                  "dd90": float(np.percentile(dd, 90)), "below": float((tot < b).mean())}
             out["rules"][f"{nm}@{b}"] = o
             print(f"{nm} | ${b:,} | ${o['p50']:,.0f} | ${o['p10']:,.0f} | ${o['wd']:,.0f} | {o['dd'] * 100:.0f}% / {o['dd90'] * 100:.0f}% | {o['below'] * 100:.0f}%", flush=True)
-            if len(ARGV) > 2 and ARGV[2] == "best" and nm != "none":   # the withdrawn by the 3rd / 6th / 12th month, the account
+            if len(ARGV) > 2 and ARGV[2] in ("best", "combo") and nm != "none":   # the withdrawn by the 3rd / 6th / 12th month, the account
                 C_ = [p[-3] for n_, b_, k, A, acct, wd_, tdd, p in res if n_ == nm and b_ == b]
                 cm = lambda m: np.array([(c[m - 1] if len(c) >= m else (c[-1] if c else 0.0)) for c in C_])
                 acc = np.array([acct for n_, b_, k, A, acct, wd_, tdd, p in res if n_ == nm and b_ == b])
