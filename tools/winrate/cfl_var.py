@@ -103,6 +103,11 @@ def build(p):
         out.append({"t0": t0, "t1": int(end), "r": r, "st": st, "sth": st * hd_ / sk_, "mod": "cfl", "sym": Dd["names"][SYM[i]],
                     "side": -int(SIDE[i]), "e": fill, "stream": None, "bot": bool(BOT[i])})
     return out
+def merge(p, v):
+    """a variant on top of p: its exit settings join p's (not replace them), so "cap30+s0.5t6+ctf4" keeps all three"""
+    q = dict(p); q.update({k: x for k, x in v.items() if k != "ex"})
+    if "ex" in v: q["ex"] = {**p.get("ex", {}), **v["ex"]}
+    return q
 def idle(L):
     t = np.array(sorted(x["t0"] for x in L))
     if len(t) < 2: return 99, 999
@@ -113,7 +118,7 @@ def idle(L):
 if __name__ == "__main__":
     for nm in (ARGV or list(VARS)):
         p = dict(BASE)
-        for part in nm.split("+"): p.update(VARS[part])
+        for part in nm.split("+"): p = merge(p, VARS[part])
         L = build(p); r = np.array([x["r"] for x in L]); t = np.array([x["t0"] for x in L]); im, gap = idle(L)
         ys = " ".join(f"{Y}: {int(((t >= ts(Y)) & (t < ts(Y + 1))).sum())} {r[(t >= ts(Y)) & (t < ts(Y + 1))].mean() if ((t >= ts(Y)) & (t < ts(Y + 1))).any() else 0:+.2f}" for Y in range(2023, 2027))
         ex = ""
