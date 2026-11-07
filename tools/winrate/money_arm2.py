@@ -365,7 +365,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             if w > 0:
                 units -= w / (eq / units); cash -= w; eq -= w; WDX += w
                 WD_LAST.setdefault("m1", nwd); WD_LAST["paid"] = WD_LAST.get("paid", 0) + 1
-            hwm = max(hwm, eq); eq_m = eq
+            hwm = max(hwm, eq); eq_m = eq; WD_LAST.setdefault("cum", []).append(WDX)   # the withdrawn so far at each month-end
         if WD:
             tot_ = eq + RES + WDX; tpk = max(tpk, tot_); tdd = max(tdd, 1 - tot_ / tpk)
             WD_LAST.update(wd=WDX, tdd=tdd, acct=eq + RES)

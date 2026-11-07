@@ -28,6 +28,12 @@ if len(ARGV) > 2 and ARGV[2] == "lite":   # the user: "300к это же ппц 
            "b5": "wd=b/0.05|wdmin=20000", "b10": "wd=b/0.1|wdmin=20000", "bh10": "wd=bh/0.1|wdmin=20000",
            "h10": "wd=h/0.1|wdmin=20000", "h20": "wd=h/0.2|wdmin=20000", "f2k": "wd=f/2000|wdmin=20000", "f5k": "wd=f/5000|wdmin=50000"}
 BAL = (1000, 3000, 5000, 10000, 100000)   # the user: "ещё и 3000 и 5000"
+if len(ARGV) > 2 and ARGV[2] == "best":   # the user: "найди лучшую связку… нормально на жизнь и баланс хорошо рос… через несколько месяцев ощутить деньги"
+    POL = {"none": "", "h10_20k": "wd=h/0.1|wdmin=20000",
+           "h30_3k": "wd=h/0.3|wdmin=3000", "h50_3k": "wd=h/0.5|wdmin=3000", "h30_5k": "wd=h/0.3|wdmin=5000", "h50_5k": "wd=h/0.5|wdmin=5000",
+           "h50_10k": "wd=h/0.5|wdmin=10000", "h70_10k": "wd=h/0.7|wdmin=10000",
+           "t_a": "wd=t/3000:0.3/10000:0.5/50000:0.7", "t_b": "wd=t/5000:0.4/20000:0.6/100000:0.8", "t_c": "wd=t/2000:0.2/5000:0.4/20000:0.6"}
+    BAL = (1000, 3000, 5000, 10000, 20000)
 if len(ARGV) > 2 and ARGV[2] == "salary":   # the user: "цель — в месяц 5000$ зарабатывать": $5000 out every month from a balance
     POL = {"none": "", "s20k": "wd=s/5000|wdmin=20000", "s30k": "wd=s/5000|wdmin=30000", "s50k": "wd=s/5000|wdmin=50000", "s100k": "wd=s/5000|wdmin=100000"}
     BAL = (1000, 5000, 20000, 30000, 50000, 100000)
@@ -37,7 +43,7 @@ def job(a):
     nm, b, k, A = a
     r = MA2.run(_D[("or", k)], _D[("ot", k)], A, A + 365 * 86400, RULE + ("|" + POL[nm] if POL[nm] else ""), 1, eq0=float(b))
     w = dict(MA2.WD_LAST) if POL[nm] else {"wd": 0.0, "tdd": r[1], "acct": r[0]}
-    return nm, b, k, A, float(r[0]), float(w.get("wd", 0.0)), float(w.get("tdd", r[1])), list(r[4]) + [w.get("m1", 0), w.get("paid", 0)]
+    return nm, b, k, A, float(r[0]), float(w.get("wd", 0.0)), float(w.get("tdd", r[1])), list(r[4]) + [list(w.get("cum") or []), w.get("m1", 0), w.get("paid", 0)]
 if __name__ == "__main__":
     base = MA2.orders(); o2 = [dict(o, xm=0.75) for o in MA2.stream_orders("wick4h_o2", "") if o["prio"] >= 1.05]
     OR = sorted(base + o2, key=lambda o: o["t"]); OT = [v for v in M.build("base") if v["mod"] in X.KINDS["bundle_htf_cfl"] - {"dlm"}]; D = {}
@@ -73,6 +79,14 @@ if __name__ == "__main__":
                  "dd90": float(np.percentile(dd, 90)), "below": float((tot < b).mean())}
             out["rules"][f"{nm}@{b}"] = o
             print(f"{nm} | ${b:,} | ${o['p50']:,.0f} | ${o['p10']:,.0f} | ${o['wd']:,.0f} | {o['dd'] * 100:.0f}% / {o['dd90'] * 100:.0f}% | {o['below'] * 100:.0f}%", flush=True)
+            if len(ARGV) > 2 and ARGV[2] == "best" and nm != "none":   # the withdrawn by the 3rd / 6th / 12th month, the account
+                C_ = [p[-3] for n_, b_, k, A, acct, wd_, tdd, p in res if n_ == nm and b_ == b]
+                cm = lambda m: np.array([(c[m - 1] if len(c) >= m else (c[-1] if c else 0.0)) for c in C_])
+                acc = np.array([acct for n_, b_, k, A, acct, wd_, tdd, p in res if n_ == nm and b_ == b])
+                o.update(m3=float(np.median(cm(3))), m6=float(np.median(cm(6))), m6_25=float(np.percentile(cm(6), 25)), m12=float(np.median(cm(12))),
+                         m12_25=float(np.percentile(cm(12), 25)), acct=float(np.median(acc)), acct10=float(np.percentile(acc, 10)))
+                print(f"   выведено к 3 / 6 / 12 мес: ${o['m3']:,.0f} / ${o['m6']:,.0f} (25% хуже ${o['m6_25']:,.0f}) / ${o['m12']:,.0f} (25% хуже ${o['m12_25']:,.0f}); "
+                      f"счёт через год ${o['acct']:,.0f}, 10% худших ${o['acct10']:,.0f}", flush=True)
             if len(ARGV) > 2 and ARGV[2] == "salary" and nm != "none":
                 S_ = [(p[-2], p[-1]) for n_, b_, k, A, acct, wd_, tdd, p in res if n_ == nm and b_ == b]
                 paid = np.array([x[1] for x in S_]); m1 = np.array([x[0] for x in S_ if x[0]])
