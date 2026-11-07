@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.778"
+APP_VERSION = "0.99.779"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1158,6 +1158,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
                   "htf_enabled", "autotrade_htf", "telegram_alerts_htf", "risk_pct_htf",   # v0.99.732
                   "liq_enabled", "liq_steps",   # v0.99.766
+                  "wd_enabled", "wd_pct", "wd_min", "wd_floor", "wd_floor_bal",   # v0.99.779
                   "cfl_enabled", "telegram_alerts_cfl", "autotrade_cfl2", "risk_pct_cfl",   # v0.99.739, v0.99.740
                   "rbs_enabled", "telegram_alerts_rbs",   # v0.99.757
                   "dlm_enabled", "autotrade_dlm2", "telegram_alerts_dlm", "risk_pct_dlm2", "dlm_binance", "dlm_more_coins", "bn_others", "bn_cross",   # v0.99.679, v0.99.684, v0.99.686 (v0.99.687: the single mode and the ladder dropped; the 4h module's own autotrade / risk keys: it starts virtual at 4% (v0.99.688), the 15m one held up to 50%)
@@ -1245,6 +1246,7 @@ def get_settings():
         "smc_enabled": SMC_ENABLED, "autotrade_smc": AUTOTRADE_ENABLED_SMC, "telegram_alerts_smc": TELEGRAM_ALERTS_SMC, "risk_pct_smc": MODULE_RISK_PCT.get("smc"),   # v0.99.678
         "htf_enabled": HTF_ENABLED, "autotrade_htf": AUTOTRADE_ENABLED_HTF, "telegram_alerts_htf": TELEGRAM_ALERTS_HTF, "risk_pct_htf": MODULE_RISK_PCT.get("htf"),   # v0.99.732
         "liq_enabled": LIQ_ENABLED, "liq_steps": LIQ_STEPS,   # v0.99.766
+        "wd_enabled": WD_ENABLED, "wd_pct": WD_PCT, "wd_min": WD_MIN, "wd_floor": WD_FLOOR, "wd_floor_bal": WD_FLOOR_BAL,   # v0.99.779
         "cfl_enabled": CFL_ENABLED, "telegram_alerts_cfl": TELEGRAM_ALERTS_CFL, "autotrade_cfl2": AUTOTRADE_ENABLED_CFL, "risk_pct_cfl": MODULE_RISK_PCT.get("cfl"),   # v0.99.739, v0.99.740
         "rbs_enabled": RBS_ENABLED, "telegram_alerts_rbs": TELEGRAM_ALERTS_RBS,   # v0.99.757
         "dlm_enabled": DLM_ENABLED, "autotrade_dlm2": AUTOTRADE_ENABLED_DLM, "telegram_alerts_dlm": TELEGRAM_ALERTS_DLM, "risk_pct_dlm2": MODULE_RISK_PCT.get("dlm"),   # v0.99.679, v0.99.687
@@ -1541,6 +1543,16 @@ def apply_settings(updates):
             globals()["LIQ_STEPS"] = sp   # "" = the version's default
         except Exception as e:
             log_error(f"settings liq_steps «{sp}» not taken: {e}")
+    if "wd_enabled" in updates:   # v0.99.779 — the withdrawal advice
+        globals()["WD_ENABLED"] = bool(updates["wd_enabled"])
+    for k_, g_, lo_, hi_ in (("wd_pct", "WD_PCT", 0, 100), ("wd_min", "WD_MIN", 0, 1e9), ("wd_floor", "WD_FLOOR", 0, 1e9), ("wd_floor_bal", "WD_FLOOR_BAL", 0, 1e9)):
+        if k_ in updates and updates[k_] not in (None, ""):
+            try:
+                v_ = float(updates[k_])
+                if lo_ <= v_ <= hi_:
+                    globals()[g_] = v_
+            except Exception:
+                log_error(f"settings {k_} «{updates[k_]}» not taken")
     if "auto_update" in updates:   # v0.99.637
         globals()["AUTO_UPDATE"] = bool(updates["auto_update"])
     if "research_binance" in updates:   # v0.99.681
@@ -38652,6 +38664,157 @@ def api_dlm_adopt():
         return jsonify({"ok": False, "err": str(e)[:200]})
 
 
+# v0.99.779 — the withdrawal advice (the user: "присылать в телеграм… что лучше какую-то сумму вывести… если месяц не очень, то не
+# выводить", "не выводить, если на балансе ниже какой-то суммы, особенно в первые месяцы", "нормально на жизнь и баланс хорошо рос",
+# "цель — в месяц 5000$"; tools/winrate money_wd.py combo, "Да, эта связка"): on the 1st of every month (UTC, from 06:00) one message —
+# below WD_MIN nothing (the balance grows first); above it WD_PCT % of the gain above the high-water mark (the best month-end equity;
+# a transfer moves it: a withdrawal lowers it, a top-up raises it — neither is a gain or a loss); from WD_FLOOR_BAL at least WD_FLOOR
+# a month; at most the free balance. The lab (a year, the bundle, ~100 windows): from $5k — $217k out, the account $489k (no
+# withdrawals $1.22M); from $20k — $535k out, $1.26M ($2.56M). Advice only: the bot never withdraws (its keys have no such right).
+WD_ENABLED = os.environ.get("VP_WD", "1") == "1"
+WD_PCT = float(os.environ.get("VP_WD_PCT", "30"))
+WD_MIN = float(os.environ.get("VP_WD_MIN", "5000"))
+WD_FLOOR = float(os.environ.get("VP_WD_FLOOR", "5000"))
+WD_FLOOR_BAL = float(os.environ.get("VP_WD_FLOOR_BAL", "25000"))
+WD_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_wd_state.json")
+WD_MONTHS_RU = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
+_WDS = {"st": None, "err": None}
+_wd_lock = threading.Lock()
+
+
+def wd_state():
+    with _wd_lock:
+        if _WDS["st"] is None:
+            try:
+                with open(WD_STATE_FILE) as f:
+                    _WDS["st"] = json.load(f)
+            except Exception:
+                _WDS["st"] = {}
+        return dict(_WDS["st"])
+
+
+def wd_save(st):
+    with _wd_lock:
+        _WDS["st"] = dict(st)
+    try:
+        tmp = WD_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(st, f)
+        os.replace(tmp, WD_STATE_FILE)
+    except Exception as e:
+        log_error(f"wd save: {e}")
+
+
+def wd_transfers(rows, t0, t1, px=None):
+    """the net transfers in $ (in > 0, out < 0) of Binance's income rows in (t0, t1] (seconds)"""
+    px = px or _bn_usd_px; P = {}; out = 0.0
+    for r in rows:
+        if r[1] in BN_INC_DEP and t0 * 1000 < r[0] <= t1 * 1000:
+            if r[3] not in P:
+                P[r[3]] = px(r[3])
+            if P[r[3]]:
+                out += r[2] * P[r[3]]
+    return out
+
+
+def wd_advice(eq, free, hwm, eq_m, dep, excess=0.0, pct=None, mn=None, fl=None, flb=None):
+    """the month's advice (pure): the equity now, the free balance, the high-water mark and the month's start equity (both as
+    last month left them), the month's net transfers, last advice's part above the gain (a withdrawal of it does not lower the
+    mark — as the lab's: the mark = the best equity after the withdrawals of the gain only) -> {"w", "kind", "gain", "prof", "hwm", "next_hwm", "excess", "capped"}"""
+    pct = WD_PCT if pct is None else pct; mn = WD_MIN if mn is None else mn
+    fl = WD_FLOOR if fl is None else fl; flb = WD_FLOOR_BAL if flb is None else flb
+    hwm2 = hwm + dep + min(excess, max(0.0, -dep))   # the transfers move the mark; the floor's extra withdrawn — not
+    prof = eq - eq_m - dep; gain = max(0.0, eq - hwm2)
+    w, kind = 0.0, "below_min" if eq < mn else ("no_gain" if gain <= 0 else "pct")
+    if eq >= mn:
+        w = pct / 100.0 * gain
+        if flb and eq >= flb and w < fl:
+            w, kind = fl, "floor"
+    capped = w > max(0.0, free)
+    w = max(0.0, min(w, free))
+    w = float(int(w // 10) * 10)
+    if w <= 0 and kind in ("pct", "floor"):
+        kind = "no_free"
+    return {"w": w, "kind": kind, "gain": round(gain, 2), "prof": round(prof, 2), "hwm": round(hwm2, 2), "next_hwm": round(max(hwm2, eq), 2),
+            "excess": round(max(0.0, w - gain), 2), "capped": capped}   # the part above the whole gain: the mark stays (the lab: max(mark, eq - w))
+
+
+def wd_text(a, eq, free, month_ru):
+    usd = lambda v: "$" + f"{v:,.0f}".replace(",", " ")
+    head = (f"💰 Совет по выводу · {month_ru}\nБаланс {usd(eq)} · за месяц {'+' if a['prof'] >= 0 else '−'}{usd(abs(a['prof']))} "
+            f"(без пополнений и выводов) · максимум был {usd(a['hwm'])}\n")
+    if a["kind"] == "pct":
+        body = f"➡️ Вывести <b>{usd(a['w'])}</b> — {WD_PCT:g}% новой прибыли (сверх максимума {usd(a['gain'])})"
+    elif a["kind"] == "floor":
+        body = (f"➡️ Вывести <b>{usd(a['w'])}</b> — ваш минимум с баланса от {usd(WD_FLOOR_BAL)} "
+                f"({WD_PCT:g}% новой прибыли = {usd(WD_PCT / 100 * a['gain'])})")
+    elif a["kind"] == "below_min":
+        body = f"⏸ Не выводить — баланс ниже {usd(WD_MIN)}: пусть растёт"
+    elif a["kind"] == "no_gain":
+        body = f"⏸ Не выводить — баланс не выше прошлого максимума {usd(a['hwm'])}: новой прибыли нет"
+    else:
+        body = "⏸ Не выводить — свободных денег на счёте нет (всё в открытых позициях)"
+    tail = ""
+    if a["w"] > 0:
+        tail = f"\nСвободно на счёте {usd(free)}" + (" — совет урезан до свободных денег" if a["capped"] else "") + ". Бот сам ничего не выводит."
+    return head + body + tail
+
+
+def wd_check(now=None, force=False):
+    """once a month (the 1st, UTC, from 06:00) or on demand (force: the preview, nothing saved or sent) -> the advice dict"""
+    now = now or time.time()
+    g = time.gmtime(now); key = time.strftime("%Y-%m", g)
+    st = wd_state()
+    if not force and (not WD_ENABLED or st.get("month") == key or (st and g.tm_mday == 1 and g.tm_hour < 6)):   # the 1st from 06:00 UTC (the bot off then: later that month)
+        return None
+    if not (BINANCE_API_KEY and BINANCE_API_SECRET):
+        return None
+    acct = bnf_account(); eq, free = acct["equity"], acct["free"]
+    if not st:   # the first run: the start point, the first advice in a month
+        st = {"month": key, "t": int(now), "eq_m": eq, "hwm": eq, "excess": 0.0}
+        if not force:
+            wd_save(st)
+        return {"w": 0.0, "kind": "start", "eq": eq, "free": free}
+    rows = bn_income_sync(now)
+    dep = wd_transfers(rows, int(st.get("t") or 0), now)
+    a = wd_advice(eq, free, float(st["hwm"]), float(st["eq_m"]), dep, float(st.get("excess") or 0))
+    a.update(eq=eq, free=free, dep=round(dep, 2))
+    if force:
+        return a
+    prev = time.gmtime(now - 86400)
+    txt = wd_text(a, eq, free, f"{WD_MONTHS_RU[prev.tm_mon - 1]} {prev.tm_year}")
+    send_telegram(txt, category="wd")
+    wd_save({"month": key, "t": int(now), "eq_m": eq, "hwm": a["next_hwm"], "excess": a["excess"],
+             "last": {k: a[k] for k in ("w", "kind", "gain", "prof", "hwm")} | {"eq": round(eq, 2), "t": int(now), "text": txt}})
+    return a
+
+
+def wd_loop():
+    time.sleep(300)
+    while True:
+        heartbeat("wd_loop")
+        try:
+            wd_check()
+            _WDS["err"] = None
+        except Exception as e:
+            _WDS["err"] = str(e)[:200]
+            log_error(f"wd_loop: {e}")
+        time.sleep(600)
+
+
+@app.route("/api/wd")
+def api_wd():
+    """the withdrawal advice: the rule, the last advice, and (?now=1) what it would be now"""
+    out = {"enabled": WD_ENABLED, "pct": WD_PCT, "min": WD_MIN, "floor": WD_FLOOR, "floor_bal": WD_FLOOR_BAL, "state": wd_state(), "err": _WDS["err"],
+           "keys": bool(BINANCE_API_KEY and BINANCE_API_SECRET)}
+    if request.args.get("now") == "1" and out["keys"]:
+        try:
+            out["now"] = wd_check(force=True)
+        except Exception as e:
+            out["now_err"] = str(e)[:200]
+    return jsonify(out)
+
+
 _WIDGET = {"t": 0.0, "d": None}
 
 # v0.99.763 — the user: "а виджет отличает пополнения баланса и реальный pnl", then "да": Binance's income history
@@ -43239,6 +43402,24 @@ INDEX_HTML = """<!doctype html>
         <input type="text" id="setLiqSteps" placeholder="по умолчанию" style="width:150px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
       <div id="liqRecent" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">урезанных позиций пока не было</div>
+    </div></details>
+    <details class="settingsGroup" style="--mod-color:#81c784;"><summary class="settingsGroupTitle">💰 Совет по выводу прибыли</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Совет в Telegram 1-го числа</div>
+          <div class="sub hintx">раз в месяц — сколько лучше вывести с Binance: ниже порога ничего (баланс растёт), выше — доля новой прибыли (сверх прошлого максимума счёта; после плохого месяца — 0), с баланса от «минимума с» — не меньше «минимума». Ваши выводы и пополнения бот видит по переводам Binance и не считает их прибылью или убытком. Бот сам ничего не выводит. На истории (год, вся связка): со старта $5k выведено бы $217k, на счёте $489k (без вывода $1.22M); со старта $20k — $535k и $1.26M ($2.56M).</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setWdEnabled"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow"><div><div class="label">↳ Доля новой прибыли, %</div></div>
+        <input type="number" id="setWdPct" min="0" max="100" step="5" placeholder="30" style="width:90px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);"></div>
+      <div class="settingRow subRow"><div><div class="label">↳ Не выводить, пока баланс ниже, $</div></div>
+        <input type="number" id="setWdMin" min="0" step="500" placeholder="5000" style="width:90px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);"></div>
+      <div class="settingRow subRow"><div><div class="label">↳ Минимум в месяц, $</div></div>
+        <input type="number" id="setWdFloor" min="0" step="500" placeholder="5000" style="width:90px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);"></div>
+      <div class="settingRow subRow"><div><div class="label">↳ …с баланса от, $</div><div class="sub hintx">0 — без минимума</div></div>
+        <input type="number" id="setWdFloorBal" min="0" step="1000" placeholder="25000" style="width:90px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);"></div>
+      <div id="wdStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
     </div></details>
     <details class="settingsGroup" style="--mod-color:#b0bec5;"><summary class="settingsGroupTitle">🗓 Возраст моделей и переобучение</summary><div class="settingsGroupBody">
       <div class="sub hintx" style="padding:4px 2px;">Переобучение делают запланированные задачи в claude.ai (P/R — 3-го числа каждого месяца, остальные — 5 января; порядок — RETRAIN.md в репозитории), в бота — только после вашего «да». Если модель устарела (задача не запустилась — например, закончилась подписка), бот пишет в Telegram не чаще раза в 3 дня.</div>
@@ -48944,6 +49125,7 @@ const setInputs = {
   bn_others: document.getElementById('setBnOthers'),   // v0.99.698
   bn_cross: document.getElementById('setBnCross'),   // v0.99.717
   liq_enabled: document.getElementById('setLiqEnabled'),   // v0.99.766
+  wd_enabled: document.getElementById('setWdEnabled'),   // v0.99.779
   dlm_more_coins: document.getElementById('setDlmMoreCoins'),   // v0.99.686
   autotrade_smc: document.getElementById('setAutotradeSmc'),
   telegram_alerts_smc: document.getElementById('setTgSmc'),
@@ -48973,6 +49155,10 @@ const setValueInputs = {
   risk_pct_htf: document.getElementById('setRiskPctHtf'),   // v0.99.732
   risk_pct_cfl: document.getElementById('setRiskPctCfl'),   // v0.99.740
   liq_steps: document.getElementById('setLiqSteps'),   // v0.99.766
+  wd_pct: document.getElementById('setWdPct'),   // v0.99.779 — the withdrawal advice
+  wd_min: document.getElementById('setWdMin'),
+  wd_floor: document.getElementById('setWdFloor'),
+  wd_floor_bal: document.getElementById('setWdFloorBal'),
   zones_tp_pct: document.getElementById('setZonesTpPct'),
   zones_max_days: document.getElementById('setZonesMaxDays'),
   snr_top_n: document.getElementById('setSnrTopN'),
@@ -49010,7 +49196,7 @@ async function loadSettings() {
     applySettingsToInputs(s);
     updateHeaderButtonVisibility(s);
   } catch (e) {}
-  loadLiq(); loadModelAge();
+  loadLiq(); loadModelAge(); loadWd();
 }
 async function loadModelAge() {   // v0.99.768 — the models' age
   try {
@@ -49018,6 +49204,22 @@ async function loadModelAge() {   // v0.99.768 — the models' age
     if (!el) return;
     const dt = t => t ? new Date(t * 1000).toLocaleDateString('ru-RU') : '—';
     el.innerHTML = (d.models || []).map(x => `${x.stale ? '⚠️' : '✅'} <b>${x.name}</b> — обучена по ${dt(x.trained_to)}${x.stale ? ' · <span class="loss">устарела, переобучение не пришло</span>' : ''} · план: ${x.kind === 'month' ? 'каждый месяц' : 'раз в год'} (${x.next})`).join('<br>');
+  } catch (e) {}
+}
+async function loadWd() {   // v0.99.779 — the withdrawal advice: the last one and what it would be now
+  try {
+    const d = await (await fetch('/api/wd?now=1')).json(), el = document.getElementById('wdStatus');
+    if (!el) return;
+    const usdS = v => '$' + Math.round(v).toLocaleString('ru-RU');
+    const why = a => ({pct: `${d.pct}% новой прибыли`, floor: `минимум с баланса от ${usdS(d.floor_bal)}`, below_min: `баланс ниже ${usdS(d.min)}`,
+                       no_gain: 'баланс не выше прошлого максимума', no_free: 'свободных денег нет', start: 'первый замер — совет через месяц'})[a.kind] || a.kind;
+    const parts = [];
+    if (!d.keys) parts.push('ключи Binance не заданы — совета не будет');
+    const L = (d.state || {}).last;
+    if (L) parts.push(`последний совет ${new Date(L.t * 1000).toLocaleDateString('ru-RU')}: ${L.w > 0 ? 'вывести <b>' + usdS(L.w) + '</b>' : 'не выводить'} (${why(L)})`);
+    if (d.now) parts.push(`если бы сейчас: баланс ${usdS(d.now.eq)}${d.now.hwm !== undefined ? ', максимум ' + usdS(d.now.hwm) : ''} → ${d.now.w > 0 ? 'вывести <b>' + usdS(d.now.w) + '</b>' : 'не выводить'} (${why(d.now)})`);
+    if (d.err) parts.push(`<span class="loss">ошибка: ${d.err}</span>`);
+    el.innerHTML = parts.join('<br>') || (d.enabled ? 'совет придёт 1-го числа' : 'совет выключен');
   } catch (e) {}
 }
 async function loadLiq() {   // v0.99.766 — the liquidity cut's last cut positions
@@ -50483,6 +50685,7 @@ if __name__ == "__main__":
     threading.Thread(target=cfl_loop, daemon=True).start()   # v0.99.739 — 🔄 Классика наоборот (virtual)
     threading.Thread(target=rbs_loop, daemon=True).start()   # v0.99.757 — 🚀 Пробой 4ч (virtual)
     threading.Thread(target=dlm_loop, daemon=True).start()   # v0.99.679 — ⚡ 15m deep limits
+    threading.Thread(target=wd_loop, daemon=True).start()   # v0.99.779 — the withdrawal advice, the 1st of every month
     threading.Thread(target=model_age_loop, daemon=True).start()   # v0.99.768 — the models' age -> Telegram
     threading.Thread(target=bno_loop, daemon=True).start()   # v0.99.698 — P/R, SMC, EMA positions on Binance
     threading.Thread(target=hdg_loop, daemon=True).start()   # v0.99.628 — 🪞 hedge mirror
