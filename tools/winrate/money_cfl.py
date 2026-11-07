@@ -14,7 +14,7 @@ K = int(ARGV[0]); STEP = int(ARGV[1]); NAMES = ARGV[2:]; W = X.STARTS[::STEP]
 hk = lambda v, k: zlib.crc32(f"{k}|{v['mod']}|{v['sym']}|{v['side']}|{v['t0']}".encode()) % 100 >= 5
 def cfl_list(nm):
     if nm == "none": return [], 0.0
-    v, rk = nm.split("@")
+    v, rk = nm.split("#")[0].split("@")
     out = []
     for x in json.load(open(f"{M.ST}/wf/cfl_var_{v}.json")):
         s = M.bn(x["sym"])
@@ -24,7 +24,8 @@ _D = {}
 def _init(D): _D.update(D)
 def job(a):
     nm, k, A = a
-    return nm, k, A, MA2.run(_D[("or", k)], _D[("ot", nm, k)], A, A + 365 * 86400, RULE + f"|cfl={_D[('rk', nm)]:g}", 1)
+    ex = f"|cflheat={nm.split('#')[1]}" if "#" in nm else ""   # name@risk#X: Классика on its own room of X x the equity
+    return nm, k, A, MA2.run(_D[("or", k)], _D[("ot", nm, k)], A, A + 365 * 86400, RULE + f"|cfl={_D[('rk', nm)]:g}" + ex, 1)
 if __name__ == "__main__":
     base = MA2.orders(); o2 = [dict(o, xm=0.75) for o in MA2.stream_orders("wick4h_o2", "") if o["prio"] >= 1.05]
     OR = sorted(base + o2, key=lambda o: o["t"]); OTH = [v for v in M.build("base") if v["mod"] in X.KINDS["bundle_htf"] - {"dlm"}]; D = {}

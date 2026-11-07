@@ -257,10 +257,12 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         if VOL and btc_vol_ratio(int(v.get("t0") or v["t"] + 3600)) > VOL[0]: r *= VOL[1]
         if HMMR and (HMMR[3] == "all" or v["mod"] == "dlm") and hmm_p(int(v.get("t0") or v["t"] + 3600), HMMR[2]) > HMMR[0]: r *= HMMR[1]
         return eq * r * WF(v) * v.get("xm", 1.0)   # "xm": a per-trade risk multiplier (money_wk.py), 1 = as the bot
-    def used(): return sum(o["heat"] for o in pos) + hf * sum(o["heat"] for o in armed.values())
+    CFLH = float(kw.get("cflheat", 0))   # "cflheat=X": 🔄 Классика on its own open-risk room (X x the equity), out of the others' cap
+    def used(): return sum(o["heat"] for o in pos if not (CFLH and o["mod"] == "cfl")) + hf * sum(o["heat"] for o in armed.values())
     def sused(s): return sum(o["heat"] for o in pos if o["side"] == s) + hf * sum(a["heat"] for a in armed.values() if a["o"]["side"] == s)
     def fit(v, eq, extra=0.0):
         rd = rd_of(v, eq); hn = rd * v["sth"] / v["st"]; room = heat * eq - used() + extra
+        if CFLH and v["mod"] == "cfl": room = CFLH * eq - sum(o["heat"] for o in pos if o["mod"] == "cfl")
         if rd <= 0: return None, 0.0, room   # a zero risk (hmm=…/0): no trade
         if sh: room = min(room, sh * eq - sused(v["side"]) + extra)
         if net: room = min(room, net * eq - (sused(v["side"]) - sused(-v["side"])) + extra)
