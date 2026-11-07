@@ -7,7 +7,7 @@ changed per variant ("a+b" combines):
   q (the threshold), win (its window, days), drought=D/q2 (no trade for D days -> the threshold q2 until one), side (0 both,
   -1 shorts), famq (a threshold per indicator family), coins "all" (+ the 83 check coins, never trained on)
 -> per variant: trades, R, WR, idle months, the longest pause; <LABSTORE>/wf/cfl_var_<name>.json in the money's format.
-usage (tools/winrate, after run_cfl_repro.sh): python3 cfl_var.py [names…]"""
+usage (tools/winrate, after run_cfl_repro.sh): python3 cfl_var.py [names…]   (run_cflvar.sh: under the watchdog)"""
 import os, sys, json, numpy as np
 ARGV = sys.argv[1:]
 exec(open("cfl_lab3.py").read().rsplit('if __name__ == "__main__":', 1)[0])
@@ -18,6 +18,7 @@ VARS = {
     "q995": dict(q=0.995), "q99": dict(q=0.99), "q98": dict(q=0.98),
     "win30": dict(win=30), "win60": dict(win=60), "win90": dict(win=90),
     "dr14": dict(drought=(14, 0.99)), "dr21": dict(drought=(21, 0.99)), "dr10_98": dict(drought=(10, 0.98)),
+    "dr7_98": dict(drought=(7, 0.98)), "dr10_97": dict(drought=(10, 0.97)), "dr14_98": dict(drought=(14, 0.98)),
     "both": dict(side=0), "famq": dict(famq=True), "c210": dict(coins="all"),
 }
 TH = {}
