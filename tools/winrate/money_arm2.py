@@ -352,6 +352,9 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             if k_ == "p" and prof > 0: w = float(WD[1]) * prof
             elif k_ == "g" and eq_m > 0 and prof >= float(WD[1]) * eq_m: w = float(WD[2]) * prof
             elif k_ == "c" and eq > float(WD[1]): w = eq - float(WD[1])
+            elif k_ == "b" and prof > 0: w = float(WD[1]) * eq   # "wd=b/F": F of the balance after a month in profit
+            elif k_ == "bh" and eq > hwm: w = float(WD[1]) * eq   # "wd=bh/F": F of the balance at a new best month-end
+            elif k_ == "f" and prof > 0: w = min(float(WD[1]), prof)   # "wd=f/$": a fixed sum after a month in profit (at most its profit)
             elif k_ in ("h", "t") and eq > hwm:
                 if k_ == "h": f_ = float(WD[1])
                 else: f_ = max([0.0] + [float(x.split(":")[1]) for x in WD[1:] if eq >= float(x.split(":")[0])])

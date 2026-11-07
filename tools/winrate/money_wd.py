@@ -23,6 +23,10 @@ POL = {"none": "",   # each: the wd=… rule [+ wdmin=$ nothing below the balanc
        "c100k": "wd=c/100000", "c300k": "wd=c/300000",  # the account kept at most $100k / $300k
        "tier": "wd=t/10000:0.2/100000:0.5/300000:0.8",  # above the best: 20% from $10k, 50% from $100k, 80% from $300k
        "tier2": "wd=t/30000:0.3/100000:0.5/300000:0.9|wdm0=3"}
+if len(ARGV) > 2 and ARGV[2] == "lite":   # the user: "300к это же ппц как много… если имея 20к вывести скажем 2000"
+    POL = {"none": "", "c300k": "wd=c/300000",
+           "b5": "wd=b/0.05|wdmin=20000", "b10": "wd=b/0.1|wdmin=20000", "bh10": "wd=bh/0.1|wdmin=20000",
+           "h10": "wd=h/0.1|wdmin=20000", "h20": "wd=h/0.2|wdmin=20000", "f2k": "wd=f/2000|wdmin=20000", "f5k": "wd=f/5000|wdmin=50000"}
 BAL = (1000, 3000, 5000, 10000, 100000)   # the user: "ещё и 3000 и 5000"
 _D = {}
 def _init(D): _D.update(D)
@@ -66,5 +70,5 @@ if __name__ == "__main__":
                  "dd90": float(np.percentile(dd, 90)), "below": float((tot < b).mean())}
             out["rules"][f"{nm}@{b}"] = o
             print(f"{nm} | ${b:,} | ${o['p50']:,.0f} | ${o['p10']:,.0f} | ${o['wd']:,.0f} | {o['dd'] * 100:.0f}% / {o['dd90'] * 100:.0f}% | {o['below'] * 100:.0f}%", flush=True)
-    json.dump(out, open(f"{M.ST}/wf/money_wd.json", "w"), indent=1)
+    json.dump(out, open(f"{M.ST}/wf/money_wd" + ("_lite" if len(ARGV) > 2 and ARGV[2] == "lite" else "") + ".json", "w"), indent=1)
     print("money wd done", flush=True)
