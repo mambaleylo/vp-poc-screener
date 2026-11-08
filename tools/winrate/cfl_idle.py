@@ -32,7 +32,7 @@ R = {}
 for en, ex in EXS.items():
     for way in (-1, 1):
         R[(en, way)] = np.array([walk_dir(i, ex, way) for i in cq]); print("готово", en, way, flush=True)
-A = T[cq] < ts(2025)   # (2022-07 .. 2024 vs 2025–26 with CFL_FROM=2022-07); fam = FAM[cq]; sd = SIDE[cq]
+A = T[cq] < ts(2025); fam = FAM[cq]; sd = SIDE[cq]   # A: 2023–24 (from 2022-07 with CFL_FROM) vs 2025–26
 out = {"n_quiet": int(len(cq)), "groups": []}
 print("семейство | сигнал | как | выход | 2023–24: n, R, WR | 2025–26: n, R, WR", flush=True)
 for f in sorted(set(fam)):
