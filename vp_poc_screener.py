@@ -28676,8 +28676,11 @@ _PROC_START = time.time()
 EXPECT_YEAR = {"dlm": {"p10": 775, "p50": 3482, "p90": 19239, "dd": 74, "last12": 19149},
                "bundle": {"p10": 6379, "p50": 57220, "p90": 248014, "dd": 77, "last12": 114069},   # v0.99.778 (money_hdr2.py): every exit but a take a market fill
                "bundle_htf": {"p10": 13119, "p50": 57174, "p90": 219282, "dd": 77, "last12": 128725},
-               "bundle_cfl": {"p10": 17474, "p50": 78457, "p90": 449995, "dd": 80, "last12": 453184},
-               "bundle_htf_cfl": {"p10": 27061, "p50": 109665, "p90": 489657, "dd": 80, "last12": 506607}}
+               # v0.99.781 (money_hdr2.py; the usual year kept at v0.99.778's: the re-count says $119.3k / $141.2k, but on the windows from
+               # 2025 — never in the filters' choice — the new rule's usual year is 8% under the old one's; the bad year, the drawdown, the
+               # good year and the last 12 months held better there too, so they are the re-count's)
+               "bundle_cfl": {"p10": 33092, "p50": 78457, "p90": 523632, "dd": 77, "last12": 544669},
+               "bundle_htf_cfl": {"p10": 31537, "p50": 109665, "p90": 513530, "dd": 77, "last12": 603185}}
 
 
 @app.route("/api/boot")
