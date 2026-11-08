@@ -162,7 +162,7 @@ with sync_playwright() as pw:
     pg.screenshot(path="ui_cfl.png", full_page=True)
     sw = pg.evaluate("(() => { const e = document.getElementById('setAutotradeCfl'), r = document.getElementById('setRiskPctCfl'); return [!!e, e && e.checked, !!r, r && r.placeholder]; })()")
     b.close()
-tab_ok = ("Классика наоборот" in txt and "против: Боллинджер 4ч" in txt and "Последний скан" in txt and "только лонги" in txt and "+1.41R" in txt and "закрытие 4ч-свечи" in txt
+tab_ok = ("Классика наоборот" in txt and "против: Боллинджер 4ч" in txt and "Последний скан" in txt and "только лонги" in txt and "+2.06R" in txt and "закрытие 4ч-свечи" in txt
           and nrow > 10 and not errs and sw == [True, True, True, "🔄 2"])   # v0.99.776: on by default, 2%
 print("(4) вкладка:", tab_ok, "строк бэктеста", nrow, "переключатель", sw, errs[:2])
 ok &= tab_ok
@@ -184,8 +184,8 @@ tr = mk(1.002); ok5 &= len(calls) == 1 and tr["real"] is True
 a, k = calls[-1]
 ok5 &= a[0] == "cfl" and a[2] == "LONG" and abs(a[3] - p["e"] * 1.002) < 1e-12 and a[4] == tr["hs"] and a[5] == tr["tp"] and k["extra"]["kx"] == 2.0
 ok5 &= abs(k["risk_pct_override"] - V.CFL_RISK_DEFAULT * 2.0) < 1e-12 and abs((tr["entry"] - tr["hs"]) / (tr["entry"] - tr["sl"]) - 2.0) < 1e-9 and tr["ch"] == 4
-ok5 &= abs((tr["tp"] - tr["entry"]) / (tr["entry"] - tr["sl"]) - 6.0) < 1e-9 and tr["hold"] == 96
-tr = mk(1.06); ok5 &= len(calls) == 1 and tr.get("late") and not tr["real"]   # 6% away with a 2% stop (0.5 x 4%, v0.99.777): > 1R
+ok5 &= abs((tr["tp"] - tr["entry"]) / (tr["entry"] - tr["sl"]) - 8.0) < 1e-9 and tr["hold"] == 96
+tr = mk(1.06); ok5 &= len(calls) == 1 and tr.get("late") and not tr["real"]   # 6% away with a 1.6% stop (0.4 x 4%, v0.99.781): > 1R
 tr = mk(1.0, late=True); ok5 &= len(calls) == 1 and tr.get("rt") and not tr["real"]   # an old close: the record only
 V.AUTOTRADE_ENABLED_CFL = False
 print("(5) реальные сделки: по умолчанию вкл (v0.99.776), выключено — нет сделки, при вкл — вызов с тем же стопом/тейком, поздние и старые — нет:", bool(ok5), len(calls))

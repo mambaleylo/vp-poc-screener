@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.780"
+APP_VERSION = "0.99.781"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -35181,6 +35181,19 @@ def cfl_coin_events(bsym, t_close, m, h1, h4, d1, btc1, btcd, oi, fund, first):
     return out
 
 
+def cfl_flt_ok(r, f):
+    """v0.99.781 — the rule's filters on the signal's own features (tools/winrate cfl_filt.py: the bars from 2023–24's trades only,
+    each lifting 2025–26 too): [name, "<" | ">", bar] by CFL_FNAMES; a missing / NaN value fails, as in the lab"""
+    for nm, op, x in r.get("flt") or []:
+        try:
+            v = float(f[CFL_FNAMES.index(nm)])
+        except (ValueError, IndexError, TypeError):
+            return False
+        if not math.isfinite(v) or not ((v < float(x)) if op == "<" else (v > float(x))):
+            return False
+    return True
+
+
 def cfl_scan(t_close):
     """at a 4h close (00:00 also the daily): every bot coin's classic events of that close -> scored, the rolling threshold,
     the ones above it opened (virtual) against the signal at the next hour's open"""
@@ -35228,7 +35241,7 @@ def cfl_scan(t_close):
                 fill = next((o for t, o in zip(h1[0], h1[1]) if t == t_close), None)
                 live = h1[4][-1] if h1[0] and h1[0][-1] == t_close else None   # the forming hour's last price
                 if (thr_eff is not None and sc >= thr_eff and t_close - first >= int(r.get("min_age_d", 90)) * 86400
-                        and (not r.get("side") or -s == int(r["side"]))):   # v0.99.740 — the trade's side (longs only: against the short signals)
+                        and (not r.get("side") or -s == int(r["side"])) and cfl_flt_ok(r, f)):   # v0.99.740 — the trade's side (longs only: against the short signals); v0.99.781 — the filters
                     cands.append({"bsym": bsym, "fam": CFL_FAMS[fam], "S": s, "score": round(sc, 4), "datr": round(f[2], 4), "fill": fill, "live": live})
             time.sleep(0.8)
         except Exception as e:
@@ -37446,7 +37459,7 @@ def bn_margin_mode(bsym):
         return "ISOLATED" if want == "CROSSED" else "CROSSED"
 
 
-BN_CFL_HEAT = float(os.environ.get("VP_BN_CFL_HEAT", "0.35"))   # v0.99.777 — 35% (money_cfl.py, run_cfl5.sh: with the stop 0.5 dATR at the 4h close and the take 6R the usual year $115k vs $69.6k on 25%, 6 of 6 paired runs). v0.99.776 — 🔄 Классика on its own open-risk room (tools/winrate money_cfl.py: on the common one it took ⚡'s room in the same sell-offs, the bundle's usual year -8..-18%; on its own 25% the usual year +48%)
+BN_CFL_HEAT = float(os.environ.get("VP_BN_CFL_HEAT", "0.45"))   # v0.99.781 — 45% (money_cfl.py, run_cfl10.sh: with the filters, the stop 0.4 / take 8R the usual year $151.5k vs $110.8k, the bad $31.3k vs $27.0k, 6 of 6). v0.99.777 — 35% (money_cfl.py, run_cfl5.sh: with the stop 0.5 dATR at the 4h close and the take 6R the usual year $115k vs $69.6k on 25%, 6 of 6 paired runs). v0.99.776 — 🔄 Классика on its own open-risk room (tools/winrate money_cfl.py: on the common one it took ⚡'s room in the same sell-offs, the bundle's usual year -8..-18%; on its own 25% the usual year +48%)
 
 
 def bn_heat(equity=None, part="main"):
@@ -43376,7 +43389,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">Работа (4ч и день — 127 монет)</div>
-          <div class="sub">на закрытии каждой 4ч-свечи: сигналы 12 классических индикаторов, модель выбирает лучшие ~0.3%; сделка — лонг против сигнала на продажу по рынку на открытии следующего часа; стоп — закрытие 4ч-свечи на 0.5 дневного ATR ниже входа, аварийный 1 ATR, тейк 6R, выход через 96 ч; не больше 30 сразу. Реальные сделки — переключатель «↳ 🔄 Классика» в автоторговле (по умолчанию включён)</div>
+          <div class="sub">на закрытии каждой 4ч-свечи: сигналы 12 классических индикаторов, модель выбирает лучшие ~0.3%; сделка — лонг против сигнала на продажу по рынку на открытии следующего часа; стоп — закрытие 4ч-свечи на 0.4 дневного ATR ниже входа, аварийный 0.8 ATR, тейк 8R, выход через 96 ч; не больше 30 сразу; не берёт сигнал у вершины 90-дневного диапазона, при слишком тихом часе и далеко над EMA50. Реальные сделки — переключатель «↳ 🔄 Классика» в автоторговле (по умолчанию включён)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setCfl"><span class="switchSlider"></span></label>
       </div>
@@ -47623,7 +47636,7 @@ async function refreshCfl() {   // v0.99.739 — 🔄 Классика наоб�
       <div class="zsub">Проверка на истории 127 монет — каждый год модель его не видела. Результат на сделку:</div>
       ${zBars(Object.keys(ys).sort().map(y => { const x = ys[y]; return {label: y, sub: `${x.n} сделок · WR ${x.wr}% · итог ${x.sum > 0 ? '+' : ''}${Math.round(x.sum)}R`, v: x.avg, hi: y === '2026'}; }), v => sgR(+(+v).toFixed(2)))}
       <div class="zstrip"><span>в среднем <b>${sgR(avg == null ? null : +avg.toFixed(2))}</b></span><span>WR <b>${rs.wr || '—'}%</b></span><span>на ${rs.check_coins || 84} чужих монетах <b>${rs.check && rs.check.avg != null ? sgR(rs.check.avg) : '—'}</b></span></div>
-      <div class="zsub">Стоп — ${rule.stop_close_h ? `<b>закрытие ${rule.stop_close_h >= 24 ? 'дневной свечи (00:00 UTC)' : rule.stop_close_h + 'ч-свечи'}</b> на ${rule.stop_datr} дневного ATR ниже входа, аварийный — <b>${+(rule.stop_datr * rule.hard_x).toFixed(2)} ATR</b> касанием` : `<b>${rule.stop_datr || 1} дневной ATR</b> от входа`}, тейк — <b>${rule.take_r || 3} риска</b>, через ${rule.hold_h || 72} ч выход. Не больше ${rule.side_cap || 12} сделок ${rule.side ? 'сразу' : 'в одну сторону'}, по монете${rule.side ? '' : ' и стороне'} — одна. Монеты моложе ${rule.min_age_d || 90} дней не берутся.</div>`;
+      <div class="zsub">Стоп — ${rule.stop_close_h ? `<b>закрытие ${rule.stop_close_h >= 24 ? 'дневной свечи (00:00 UTC)' : rule.stop_close_h + 'ч-свечи'}</b> на ${rule.stop_datr} дневного ATR ниже входа, аварийный — <b>${+(rule.stop_datr * rule.hard_x).toFixed(2)} ATR</b> касанием` : `<b>${rule.stop_datr || 1} дневной ATR</b> от входа`}, тейк — <b>${rule.take_r || 3} риска</b>, через ${rule.hold_h || 72} ч выход. Не больше ${rule.side_cap || 12} сделок ${rule.side ? 'сразу' : 'в одну сторону'}, по монете${rule.side ? '' : ' и стороне'} — одна. Монеты моложе ${rule.min_age_d || 90} дней не берутся.${(rule.flt || []).length ? ' Фильтры (v0.99.781): ' + rule.flt.map(f => ({pos90: 'цена не у вершины 90-дневного диапазона', atr_h: 'час не слишком тихий', d_e50: 'не далеко над EMA50'})[f[0]] || f.join(' ')).join(', ') + '.' : ''}</div>`;
   }
   h += card(`🔄 Классика наоборот ${pill}`, top);
   const sc = d.scan, near = (sc && sc.near) || [];
