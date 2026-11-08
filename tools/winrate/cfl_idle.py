@@ -16,7 +16,7 @@ def quiet(t):   # no open trade at t and the last entry >= 14 days before
     k = np.searchsorted(E0, t, side="right") - 1
     if k >= 0 and t - E0[k] < 14 * 86400: return False
     return not any(a <= t < b for a, b in SPANS[max(0, k - 40):k + 1])
-c = np.where(np.isfinite(SC) & (T >= ts(2023)) & (T < ts(2026, 10)))[0]
+c = np.where(np.isfinite(SC) & (T >= CFL_FROM) & (T < ts(2026, 10)))[0]
 c = c[np.array([T[i] - FIRST[SYM[i]] >= 90 * 86400 for i in c], bool)]
 Q = np.array([quiet(int(T[i])) for i in c], bool); cq = c[Q]
 print(f"событий 2023–26: {len(c)}, в тишину {len(cq)} ({Q.mean() * 100:.0f}%)", flush=True)
@@ -32,7 +32,7 @@ R = {}
 for en, ex in EXS.items():
     for way in (-1, 1):
         R[(en, way)] = np.array([walk_dir(i, ex, way) for i in cq]); print("готово", en, way, flush=True)
-A = T[cq] < ts(2025); fam = FAM[cq]; sd = SIDE[cq]
+A = T[cq] < ts(2025)   # (2022-07 .. 2024 vs 2025–26 with CFL_FROM=2022-07); fam = FAM[cq]; sd = SIDE[cq]
 out = {"n_quiet": int(len(cq)), "groups": []}
 print("семейство | сигнал | как | выход | 2023–24: n, R, WR | 2025–26: n, R, WR", flush=True)
 for f in sorted(set(fam)):
@@ -53,6 +53,7 @@ r = R[("t6", -1)]; s_ = SC[cq]; qs = np.quantile(s_[A], np.linspace(0.1, 0.9, 9)
 print("оценка модели (против, тейк 6R) по децилям: 2023–24", [round(float(r[(d == k) & A].mean()), 2) for k in range(10)], "| 2025–26", [round(float(r[(d == k) & ~A].mean()), 2) for k in range(10)], flush=True)
 r = R[("t6", 1)]
 print("то же, по сигналу:                         2023–24", [round(float(r[(d == k) & A].mean()), 2) for k in range(10)], "| 2025–26", [round(float(r[(d == k) & ~A].mean()), 2) for k in range(10)], flush=True)
-json.dump(out, open(f"{ST}/wf/cfl_idle.json", "w"))
-np.savez(f"{ST}/wf/cfl_idle_R.npz", idx=cq, **{f"{k[0]}_{k[1]}": v for k, v in R.items()})
+TAG = os.environ.get("CFL_IDLE_TAG", "")
+json.dump(out, open(f"{ST}/wf/cfl_idle{TAG}.json", "w"))
+np.savez(f"{ST}/wf/cfl_idle_R{TAG}.npz", idx=cq, **{f"{k[0]}_{k[1]}": v for k, v in R.items()})
 print("cfl idle done", flush=True)

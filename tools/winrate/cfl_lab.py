@@ -23,9 +23,10 @@ for fn in sorted(glob.glob("ev3/*.npz")) + (sorted(glob.glob(f"{CFL_X}/*.npz")) 
 J, DA = np.concatenate(J).astype(np.int64), np.concatenate(DA)
 SC = np.load(os.environ.get("CFL_SC") or "fc_red_sc.npz", allow_pickle=True)["SC"]
 mk = BOT & (T >= ts(2021)) & np.isfinite(SC); tt, ss = T[mk], SC[mk]; o = np.argsort(tt); tt, ss = tt[o], ss[o]
+CFL_FROM = ts(*map(int, os.environ.get("CFL_FROM", "2023-01").split("-")))   # the lab's first trade (2022-07: the quiet module's history)
 def thr_days(q, win=180):
     out = {}
-    for d in range(ts(2023) // 86400 - 1, ts(2026, 10) // 86400 + 1):
+    for d in range(CFL_FROM // 86400 - 1, ts(2026, 10) // 86400 + 1):
         hi = (d - 14) * 86400; lo = hi - win * 86400; a, b = np.searchsorted(tt, lo), np.searchsorted(tt, hi)
         out[d] = float(np.quantile(ss[a:b], q)) if b - a >= 300 else np.inf
     return out

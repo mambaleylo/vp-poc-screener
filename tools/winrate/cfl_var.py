@@ -64,7 +64,7 @@ def thr_fam(q, win):
     out = {}
     for f in sorted(set(FAM)):
         m = BOT & (T >= ts(2021)) & np.isfinite(SC) & (FAM == f); t_, s_ = T[m], SC[m]; o = np.argsort(t_); t_, s_ = t_[o], s_[o]
-        for d in range(ts(2023) // 86400 - 1, ts(2026, 10) // 86400 + 1):
+        for d in range(CFL_FROM // 86400 - 1, ts(2026, 10) // 86400 + 1):
             hi = (d - 14) * 86400; lo = hi - win * 86400; a, b = np.searchsorted(t_, lo), np.searchsorted(t_, hi)
             out[(f, d)] = float(np.quantile(s_[a:b], q)) if b - a >= 100 else np.inf
     FT[(q, win)] = out; return out
@@ -82,7 +82,7 @@ def outcome(i, ex=None):
             RC[key] = (float(r), int(kk), int(Tb[jE]), float(O[jE])) if r == r else None   # a limit not filled: none
     return RC[key]
 def build(p):
-    base_ok = np.isfinite(SC) & (T >= ts(2023)) & (T < ts(2026, 10)) & ((BOT) if p["coins"] == "bot" else True)
+    base_ok = np.isfinite(SC) & (T >= CFL_FROM) & (T < ts(2026, 10)) & ((BOT) if p["coins"] == "bot" else True)
     if p["side"]: base_ok &= (-SIDE == p["side"])
     c = np.where(base_ok)[0]
     c = c[np.array([T[i] - FIRST[SYM[i]] >= 90 * 86400 for i in c], bool)]
