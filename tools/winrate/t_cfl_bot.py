@@ -110,7 +110,7 @@ if RESEARCH:
     import calendar
     for day in (calendar.timegm((2026, 10, 1, 0, 0, 0)), calendar.timegm((2026, 10, 10, 0, 0, 0)), calendar.timegm((2026, 10, 20, 0, 0, 0))):
         hi = (day // 86400 - 14) * 86400; lo = hi - 180 * 86400
-        ex = float(np.quantile(ss[np.searchsorted(tt, lo):np.searchsorted(tt, hi)], 0.997)); mine = V.cfl_threshold(m, day)
+        ex = float(np.quantile(ss[np.searchsorted(tt, lo):np.searchsorted(tt, hi)], float(m["rule"].get("q", 0.997)))); mine = V.cfl_threshold(m, day)   # v0.99.781: the rule's q (0.995), was a fixed 0.997
         diffs.append(abs(ex - mine) if mine is not None else 9)
     print("(2) порог из семени против точного:", [round(x, 8) for x in diffs])
     # v0.99.776: the research's events re-made on the gap-filled candles (fill_gaps.py) — the same events (the counts equal the
