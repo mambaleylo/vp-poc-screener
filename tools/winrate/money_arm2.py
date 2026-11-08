@@ -269,10 +269,15 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
         if HMMR and (HMMR[3] == "all" or v["mod"] == "dlm") and hmm_p(int(v.get("t0") or v["t"] + 3600), HMMR[2]) > HMMR[0]: r *= HMMR[1]
         return eq * r * WF(v) * v.get("xm", 1.0)   # "xm": a per-trade risk multiplier (money_wk.py), 1 = as the bot
     CFLH = float(kw.get("cflheat", 0))   # "cflheat=X": 🔄 Классика on its own open-risk room (X x the equity), out of the others' cap
+    # "cflgive=q": Классика's unused room lent to the others while it is quiet (none of its trades open, its last entry >= 14 days
+    # ago); "cflgive=a": whenever none of its trades is open (the user: "отдавать лимит Классики связке в тишину — проверяй")
+    GIVE = kw.get("cflgive", ""); LCFL = [A - 15 * 86400]; h_now = [A]
     def used(): return sum(o["heat"] for o in pos if not (CFLH and o["mod"] == "cfl")) + hf * sum(o["heat"] for o in armed.values())
     def sused(s): return sum(o["heat"] for o in pos if o["side"] == s) + hf * sum(a["heat"] for a in armed.values() if a["o"]["side"] == s)
     def fit(v, eq, extra=0.0):
         rd = rd_of(v, eq); hn = rd * v["sth"] / v["st"]; room = heat * eq - used() + extra
+        if GIVE and CFLH and v["mod"] != "cfl" and not any(o["mod"] == "cfl" for o in pos) and (GIVE == "a" or h_now[0] - LCFL[0] >= 14 * 86400):
+            room += CFLH * eq
         if CFLH and v["mod"] == "cfl": room = CFLH * eq - sum(o["heat"] for o in pos if o["mod"] == "cfl")
         if rd <= 0: return None, 0.0, room   # a zero risk (hmm=…/0): no trade
         if sh: room = min(room, sh * eq - sused(v["side"]) + extra)
@@ -307,6 +312,7 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
             if notional < minn: return None, hn, room
         return {"rd": rd, "heat": rd * v["sth"] / v["st"], "mg": mg, "notional": notional, "imp": imp}, hn, room
     for h in range(A, B, 3600):
+        h_now[0] = h
         for o in [o for o in pos if o["t1"] <= h]:
             if FUSE and o["mod"] == "dlm": closed_dlm.append((o["t1"], o["side"], o["r"]))
             nm_ = o["mkt"] if "mkt" in o else 1 + (o["r"] < 0)   # the market fills: ⚡ its exit unless a take; the others the entry + a stop
@@ -408,7 +414,9 @@ def run(OR, OT, A, B, rule, seed, cap=14.0, heat=0.95, rk=MP.rk(emx=3.0), eq0=10
                     if (sh or net) and a["o"]["side"] != v["side"]: continue   # the other side's limit frees nothing of this side
                     del armed[k2]; freed += hf * a["heat"]
                 s_, hn, room = fit(v, eq)
-            if s_: pos.append(dict(v, **s_))
+            if s_:
+                pos.append(dict(v, **s_))
+                if v["mod"] == "cfl": LCFL[0] = h
         while io < len(OR) and OR[io]["t"] <= h:
             act.append(OR[io]); io += 1
         act = [o for o in act if o["until"] > h and id(o) not in done]

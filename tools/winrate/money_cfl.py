@@ -30,7 +30,8 @@ _D = {}
 def _init(D): _D.update(D)
 def job(a):
     nm, k, A = a
-    ex = f"|cflheat={nm.split('#')[1]}" if "#" in nm else ""   # name@risk#X: Классика on its own room of X x the equity
+    ex = f"|cflheat={nm.split('#')[1].split('%')[0]}" if "#" in nm else ""   # name@risk#X: Классика on its own room of X x the equity
+    if "%" in nm: ex += "|" + nm.split("%", 1)[1]   # name@risk#X%k=v: one more rule switch (e.g. cflgive=q)
     return nm, k, A, MA2.run(_D[("or", k)], _D[("ot", nm, k)], A, A + 365 * 86400, RULE + f"|cfl={_D[('rk', nm)]:g}" + ex, 1)
 if __name__ == "__main__":
     base = MA2.orders(); o2 = [dict(o, xm=0.75) for o in MA2.stream_orders("wick4h_o2", "") if o["prio"] >= 1.05]
