@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.781"
+APP_VERSION = "0.99.782"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3282,6 +3282,8 @@ _ERR_CAUSES = (   # (markers, explanation, advice) — first match wins
     (("ORDER_NOT_FOUND",), "ордер уже не существует (исполнен или отменён)", ""),
     (("POSITION_EMPTY", "POSITION_NOT_FOUND"), "позиции уже нет на бирже", ""),
     (("400 Client Error",), "биржа отклонила запрос как неверный (400)", ""),
+    (("model refresh:",), "модель обновлена из репозитория — это не ошибка, просто событие", ""),   # v0.99.782
+    (("GitHub не ответил",), "GitHub временно не ответил на проверку обновления — бот повторит сам через 10 мин", ""),   # v0.99.782 — was «необычная ошибка»
     (("500 Server Error", "502 ", "503 ", "504 ", "Bad Gateway", "Service Unavailable"), "сбой на стороне биржи — обычно временный", ""),
     (("Read timed out", "ReadTimeout", "timed out", "Timeout"), "биржа не ответила вовремя (таймаут)", "обычно временно; если часто — проверь интернет"),
     (("ConnectionError", "Max retries", "NameResolution", "Connection reset", "Connection aborted", "RemoteDisconnected", "network error"), "нет связи с биржей или интернетом", "проверь интернет на телефоне"),
@@ -3335,6 +3337,8 @@ def _errors_with_ru(errs):
                 e = {**e, "ru": error_to_russian(e.get("msg", ""))}
             except Exception:
                 pass
+        if isinstance(e, dict) and not e.get("lvl"):   # v0.99.782 — the level of the lines logged before it existed
+            e = {**e, "lvl": log_level(e.get("msg", ""))}
         out.append(e)
     return out
 
@@ -3349,6 +3353,27 @@ def _russian_error_prefix(text):
 _BN_ERRORS = deque(maxlen=400)
 
 
+# v0.99.782 — the user: "нужно разграничить предупреждения и ошибки, а то красная выглядит как ошибка, по факту нет и пугает": every
+# logged line gets a level — "info" (a normal event the bot reports: a model taken, a close at the time / the close stop), "warn"
+# (a passing outage the bot retries by itself: the network, a timeout, a 5xx / 429, GitHub not answering, a slow coin skipped),
+# "error" (the rest: something to look at). The header's chip is red only for errors.
+_LVL_INFO = (re.compile(r"^model refresh: .*taken"), re.compile(r"^\w+ (close stop|time exit) \w+: "), re.compile(r"^liquidity cut \S+: no hourly turnover"))
+_LVL_WARN = ("Read timed out", "ReadTimeout", "timed out", "Timeout", "ConnectionError", "Connection broken", "Connection aborted", "Connection reset",
+             "Failed to establish a new connection", "Max retries", "NameResolution", "RemoteDisconnected", "network error", "нет связи",
+             "500 Server Error", "502 ", "503 ", "504 ", "(502)", "(503)", "(504)", "Bad Gateway", "Service Unavailable", "Too Many Requests",
+             "TOO_MANY_REQUESTS", "RATE_LIMIT", "429 Client Error", "GitHub не ответил", "JSONDecodeError", "Expecting value", "— skipping",
+             "restored from")
+
+
+def log_level(text):
+    t = str(text)
+    if any(rx.search(t) for rx in _LVL_INFO):
+        return "info"
+    if any(mk in t for mk in _LVL_WARN) and not any(mk in t for mk in ("SL placement ALSO failed", "breakeven SL failed")):
+        return "warn"
+    return "error"
+
+
 def log_error(msg):
     text = str(msg)[:500]
     try:
@@ -3357,7 +3382,7 @@ def log_error(msg):
         ru = None
     print("[ERR]", text)
     with state_lock:
-        STATE["errors"].append({"t": time.time(), "msg": text[:550], "ru": ru})
+        STATE["errors"].append({"t": time.time(), "msg": text[:550], "ru": ru, "lvl": log_level(text)})
         if "binance" in text.lower():   # v0.99.726 — kept longer for the lab upload (the 30 above roll over in minutes)
             _BN_ERRORS.append({"t": int(time.time()), "msg": text[:400]})
     if any(marker in text for marker in _NETWORK_ERROR_MARKERS):
@@ -42891,6 +42916,7 @@ INDEX_HTML = """<!doctype html>
   #globalErrorsBox > summary, #riskAutotuneBox > summary { display:inline-flex; align-items:center; gap:5px; height:22px; padding:0 8px; border-radius:999px; font-size:var(--fs-xs); font-weight:600; background:var(--ctl); border:1px solid var(--line-2); color:var(--tx-2); }
   #globalErrorsBox > summary.loss { background:var(--neg-bg); color:var(--neg); border-color:rgba(248,113,113,.35); }
   #globalErrorsBox[open], #riskAutotuneBox[open] { flex-basis:100%; }
+  .warnTxt { color:#ffb74d; }   /* v0.99.782 — a warning, not an error */
   #globalErrorsList, #riskAutotuneLog { background:var(--inset); border:1px solid var(--line); border-radius:var(--r-sm); padding:8px 10px; }
 
   /* ---------- tabs ---------- */
@@ -43169,7 +43195,7 @@ INDEX_HTML = """<!doctype html>
     <span id="healthPill"></span>
     <span id="btPill"></span>
     <details id="globalErrorsBox" style="display:none;">
-      <summary class="loss">⚠ Ошибки <span id="globalErrorsCount">0</span></summary>
+      <summary id="globalErrorsSum" class="loss">⚠ Ошибки <span id="globalErrorsCount">0</span></summary>
       <div id="globalErrorsList" class="dim" style="margin-top:6px;font-size:var(--fs-sm);max-height:300px;overflow-y:auto;"></div>
     </details>
     <details id="riskAutotuneBox" style="display:none;">
@@ -48742,7 +48768,15 @@ async function refreshGlobalErrors() {
     const r = await fetch('/api/errors');
     const data = await r.json();
     const errs = data.errors || [];
-    document.getElementById('globalErrorsCount').textContent = errs.length;
+    // v0.99.782 — the chip by the worst level: red «Ошибки» only for real errors, amber «Предупреждения» for passing outages, grey «События»
+    const nE = errs.filter(e => (e.lvl || 'error') === 'error').length, nW = errs.filter(e => e.lvl === 'warn').length, nI = errs.filter(e => e.lvl === 'info').length;
+    const sum = document.getElementById('globalErrorsSum');
+    if (sum) {
+      sum.className = nE ? 'loss' : (nW ? 'warnTxt' : 'dim');
+      sum.innerHTML = nE ? `⚠ Ошибки <span id="globalErrorsCount">${nE}</span>` + (nW + nI ? ` <span class="dim" style="font-size:var(--fs-xs);">+ ${nW + nI} не ошибки</span>` : '')
+                         : (nW ? `⚠ Предупреждения <span id="globalErrorsCount">${nW}</span>` + (nI ? ` <span class="dim" style="font-size:var(--fs-xs);">+ ${nI} событ.</span>` : '')
+                               : `ℹ События <span id="globalErrorsCount">${nI}</span>`);
+    }
     document.getElementById('globalErrorsBox').style.display = errs.length ? '' : 'none';   // v0.99.387 — chip only when there are errors
     document.getElementById('globalErrorsList').innerHTML = errs.length
       ? errs.slice().reverse().map(errRowHtml).join('')
@@ -50050,8 +50084,9 @@ function filterCoinLineHtml(nf, sym) {
 function errRowHtml(e) {
   const esc = x => String(x || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
   const urgent = /ВРУЧНУЮ|СРОЧНО|ПРОВЕРЬ СТОП/.test(e.ru || '');
-  return `<div style="padding:4px 0;border-bottom:1px solid var(--line);">
-    <div${urgent ? ' class="loss"' : ''}>${fmtTime(e.t)} — ${esc(e.ru || e.msg)}</div>
+  const lv = e.lvl || 'error', tag = {error: '<span class="loss">● ошибка</span>', warn: '<span class="warnTxt">● предупреждение</span>', info: '<span class="dim">● событие</span>'}[lv] || '';   // v0.99.782
+  return `<div style="padding:4px 0;border-bottom:1px solid var(--line);${lv === 'info' ? 'opacity:.75;' : ''}">
+    <div${urgent ? ' class="loss"' : ''}>${tag} ${fmtTime(e.t)} — ${esc(e.ru || e.msg)}</div>
     ${e.ru ? `<div class="dim" style="font-size:var(--fs-xs);word-break:break-word;">${esc(e.msg)}</div>` : ''}
   </div>`;
 }
