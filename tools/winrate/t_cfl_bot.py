@@ -108,6 +108,7 @@ if RESEARCH:
     tt, ss = T[mk], TV.model_score(m["models"], Fz); o = np.argsort(tt); tt, ss = tt[o], ss[o]
     diffs = []
     import calendar
+    V._CFL["days"] = {}   # v0.99.781: (1)'s events put their scores into the live store, a few per October day — those partial days replaced the seed's whole ones (0.10 at q 0.995); the check is the seed's
     for day in (calendar.timegm((2026, 10, 1, 0, 0, 0)), calendar.timegm((2026, 10, 10, 0, 0, 0)), calendar.timegm((2026, 10, 20, 0, 0, 0))):
         hi = (day // 86400 - 14) * 86400; lo = hi - 180 * 86400
         ex = float(np.quantile(ss[np.searchsorted(tt, lo):np.searchsorted(tt, hi)], float(m["rule"].get("q", 0.997)))); mine = V.cfl_threshold(m, day)   # v0.99.781: the rule's q (0.995), was a fixed 0.997
