@@ -6,14 +6,22 @@ sys.argv = ["x"]
 from numba import njit
 import lv_engine as LE, ev3_engine as E3
 from lv_wf import load_dir, ts
-Dd = load_dir("ev3", E3.FNAMES); T, SIDE, SYM, BOT = Dd["T"], Dd["SIDE"], Dd["SYM"], Dd["BOT"]; FAM = Dd["F"][:, 0].astype(int)
+import os
+Dd = load_dir("ev3", E3.FNAMES)
+CFL_X = os.environ.get("CFL_X")   # more coins' events in their own folder (cfl_more.sh: the 100 more), appended after ev3's — the old indices stay
+if CFL_X:
+    Dx = load_dir(CFL_X, E3.FNAMES); n_ = len(Dd["names"])
+    for k_ in ("T", "BOT", "SIDE", "F"): Dd[k_] = np.concatenate([Dd[k_], Dx[k_]])
+    Dd["SYM"] = np.concatenate([Dd["SYM"], Dx["SYM"] + n_]); Dd["R"] = np.concatenate([Dd["R"], Dx["R"]], axis=1)
+    Dd["K"] = np.concatenate([Dd["K"], Dx["K"]], axis=1); Dd["names"] = Dd["names"] + Dx["names"]
+T, SIDE, SYM, BOT = Dd["T"], Dd["SIDE"], Dd["SYM"], Dd["BOT"]; FAM = Dd["F"][:, 0].astype(int)
 J, DA = [], []
-for fn in sorted(glob.glob("ev3/*.npz")):
+for fn in sorted(glob.glob("ev3/*.npz")) + (sorted(glob.glob(f"{CFL_X}/*.npz")) if CFL_X else []):
     z = np.load(fn)
     if len(z["t"]) == 0: continue
     J.append(z["j"]); DA.append(z["datr"])
 J, DA = np.concatenate(J).astype(np.int64), np.concatenate(DA)
-SC = np.load("fc_red_sc.npz", allow_pickle=True)["SC"]
+SC = np.load(os.environ.get("CFL_SC") or "fc_red_sc.npz", allow_pickle=True)["SC"]
 mk = BOT & (T >= ts(2021)) & np.isfinite(SC); tt, ss = T[mk], SC[mk]; o = np.argsort(tt); tt, ss = tt[o], ss[o]
 def thr_days(q, win=180):
     out = {}

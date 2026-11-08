@@ -10,7 +10,7 @@ exec(src)
 if __name__ == "__main__":
     import multiprocessing as mp, json
     sp = json.load(open(os.path.join(HERE, "..", "winrate", "lv", "split.json")))
-    syms = sorted(set(sp["bot"] + sp["check"] + ["BTCUSDT", "ETHUSDT"]))
+    syms = sys.argv[1:] or sorted(set(sp["bot"] + sp["check"] + ["BTCUSDT", "ETHUSDT"]))   # or the coins given
     with mp.Pool(6) as p:
         for s, n in p.imap_unordered(coin, syms):
             print(s, n, flush=True)
