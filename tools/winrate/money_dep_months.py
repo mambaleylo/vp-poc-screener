@@ -22,7 +22,7 @@ def job(a):
     return k, A, MA2.run(_D[("or", k)], _D[("ot", k)], A, A + 365 * 86400, RULE, 1, eq0=S0)
 if __name__ == "__main__":
     base = MA2.orders(); o2 = [dict(o, xm=0.75) for o in MA2.stream_orders("wick4h_o2", "") if o["prio"] >= 1.05]
-    OR = sorted(base + o2, key=lambda o: o["t"]); OT = [v for v in M.build("base") if v["mod"] in X.KINDS["bundle_htf_cfl"] - {"dlm"}]; D = {}
+    OR = sorted(base + o2, key=lambda o: o["t"]); OT = [] if os.environ.get("DEP_ONLY_DLM") == "1" else [v for v in M.build("base") if v["mod"] in X.KINDS["bundle_htf_cfl"] - {"dlm"}]; D = {}   # DEP_ONLY_DLM=1: ⚡ alone (the user: "чисто лимитки")
     for k in range(K):
         rng = np.random.default_rng(300 + k); D[("or", k)] = [o for o in OR if rng.random() >= 0.05]
         D[("ot", k)] = [v for v in OT if zlib.crc32(f"{k}|{v['mod']}|{v['sym']}|{v['side']}|{v['t0']}".encode()) % 100 >= 5]
@@ -46,5 +46,5 @@ if __name__ == "__main__":
         out.append(row)
         print(f"{row['start']} | ${row['m3']:,.0f} | ${row['m6']:,.0f} | ${row['low']:,.0f} | ${row['year']:,.0f} | {dd * 100:.0f}% | "
               f"{('мес ' + str(first)) if first else 'нет'} | {row['n3k']} | {row['profit']}", flush=True)
-    json.dump(out, open(f"{M.ST}/wf/money_dep_months" + ("" if (S0, ND) == (100.0, 6) else f"_{S0:g}_{ND}") + ".json", "w"), indent=1)
+    json.dump(out, open(f"{M.ST}/wf/money_dep_months" + ("" if (S0, ND) == (100.0, 6) else f"_{S0:g}_{ND}") + ("_dlm" if os.environ.get("DEP_ONLY_DLM") == "1" else "") + ".json", "w"), indent=1)
     print("dep months done", flush=True)
