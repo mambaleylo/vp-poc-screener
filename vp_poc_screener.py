@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.784"
+APP_VERSION = "0.99.785"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1160,6 +1160,8 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "liq_enabled", "liq_steps",   # v0.99.766
                   "wd_enabled", "wd_pct", "wd_min", "wd_floor", "wd_floor_bal",   # v0.99.779
                   "watch_enabled",   # v0.99.784
+                  "backup_enabled",   # v0.99.785
+                  "report_enabled",   # v0.99.785
                   "cfl_enabled", "telegram_alerts_cfl", "autotrade_cfl2", "risk_pct_cfl",   # v0.99.739, v0.99.740
                   "rbs_enabled", "telegram_alerts_rbs",   # v0.99.757
                   "dlm_enabled", "autotrade_dlm2", "telegram_alerts_dlm", "risk_pct_dlm2", "dlm_binance", "dlm_more_coins", "bn_others", "bn_cross",   # v0.99.679, v0.99.684, v0.99.686 (v0.99.687: the single mode and the ladder dropped; the 4h module's own autotrade / risk keys: it starts virtual at 4% (v0.99.688), the 15m one held up to 50%)
@@ -1249,6 +1251,8 @@ def get_settings():
         "liq_enabled": LIQ_ENABLED, "liq_steps": LIQ_STEPS,   # v0.99.766
         "wd_enabled": WD_ENABLED, "wd_pct": WD_PCT, "wd_min": WD_MIN, "wd_floor": WD_FLOOR, "wd_floor_bal": WD_FLOOR_BAL,   # v0.99.779
         "watch_enabled": WATCH_ENABLED,   # v0.99.784
+        "backup_enabled": BACKUP_ENABLED,   # v0.99.785
+        "report_enabled": REPORT_ENABLED,   # v0.99.785
         "cfl_enabled": CFL_ENABLED, "telegram_alerts_cfl": TELEGRAM_ALERTS_CFL, "autotrade_cfl2": AUTOTRADE_ENABLED_CFL, "risk_pct_cfl": MODULE_RISK_PCT.get("cfl"),   # v0.99.739, v0.99.740
         "rbs_enabled": RBS_ENABLED, "telegram_alerts_rbs": TELEGRAM_ALERTS_RBS,   # v0.99.757
         "dlm_enabled": DLM_ENABLED, "autotrade_dlm2": AUTOTRADE_ENABLED_DLM, "telegram_alerts_dlm": TELEGRAM_ALERTS_DLM, "risk_pct_dlm2": MODULE_RISK_PCT.get("dlm"),   # v0.99.679, v0.99.687
@@ -1545,6 +1549,10 @@ def apply_settings(updates):
             globals()["LIQ_STEPS"] = sp   # "" = the version's default
         except Exception as e:
             log_error(f"settings liq_steps «{sp}» not taken: {e}")
+    if "report_enabled" in updates:   # v0.99.785 — the month's plan vs fact
+        globals()["REPORT_ENABLED"] = bool(updates["report_enabled"])
+    if "backup_enabled" in updates:   # v0.99.785 — the daily backup
+        globals()["BACKUP_ENABLED"] = bool(updates["backup_enabled"])
     if "watch_enabled" in updates:   # v0.99.784 — the live-vs-backtest watchdog
         globals()["WATCH_ENABLED"] = bool(updates["watch_enabled"])
     if "wd_enabled" in updates:   # v0.99.779 — the withdrawal advice
@@ -38864,6 +38872,12 @@ def wd_loop():
         except Exception as e:
             _WDS["err"] = str(e)[:200]
             log_error(f"wd_loop: {e}")
+        try:   # v0.99.785 — the month's plan vs fact, right after the advice
+            report_check()
+            _RPT["err"] = None
+        except Exception as e:
+            _RPT["err"] = str(e)[:200]
+            log_error(f"report: {e}")
         time.sleep(600)
 
 
@@ -39064,6 +39078,316 @@ def api_watch():
     except Exception as e:
         return jsonify({"enabled": WATCH_ENABLED, "err": str(e)[:200]})
     return jsonify({"enabled": WATCH_ENABLED, "mods": mods, "err": _WATCH["err"], "min_n": WATCH_MIN_N})
+
+
+# v0.99.785 — the daily backup (the user picked it: "резервная копия"): once a day (from 01:00 UTC = 04:00 Moscow) the bot's state
+# files — every module's trades, the settings, the watchdog's / the withdrawal advice's state, Binance's income history — zipped
+# and sent as a document to the user's own Telegram chat (private; never the public repo). Never a key: the credential / login
+# files are not taken, and a file holding any of the secrets' values (Binance, Telegram, GitHub, the modules' and the login's) is
+# left out too. Restore: unzip into the bot's folder with the bot stopped.
+BACKUP_ENABLED = os.environ.get("VP_BACKUP", "1") == "1"
+BACKUP_HOUR_UTC = 1
+BACKUP_MAX_BYTES = 45 * 1024 * 1024   # Telegram's bots take up to 50 MB
+_BACKUP_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKUP_LAST_FILE = os.path.join(_BACKUP_DIR, "vp_backup_last.json")
+_BACKUP_EXTRA = ("vp_poc_settings.json", "vp_bn_income.json", "vp_bn_others.json", "vp_model_age.json", "vp_wd_state.json", "vp_watch_state.json")
+_BACKUP_DENY = ("credential", "auth", "tg_user", "token", "secret", "key")
+_BK = {"err": None}
+
+
+def _backup_secrets():
+    """every secret's value the bot knows: the settings' keys / tokens and every string in the credential / login files"""
+    out = {BINANCE_API_KEY, BINANCE_API_SECRET, TELEGRAM_BOT_TOKEN}
+    try:
+        out.add(github_token() or "")
+    except Exception:
+        pass
+    def walk(x):
+        if isinstance(x, dict):
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+        elif isinstance(x, str):
+            out.add(x)
+    for fn in os.listdir(_BACKUP_DIR):
+        if fn.startswith("vp_") and fn.endswith(".json") and any(d in fn for d in ("credential", "auth")):
+            try:
+                with open(os.path.join(_BACKUP_DIR, fn)) as f:
+                    walk(json.load(f))
+            except Exception:
+                pass
+    return {x for x in out if isinstance(x, str) and len(x) >= 12}
+
+
+def backup_files():
+    """the files to back up: the modules' state, the settings and the extra state files; never a credential / login file"""
+    names = sorted({fn for fn in os.listdir(_BACKUP_DIR) if fn.startswith("vp_") and fn.endswith("_state.json")} | set(_BACKUP_EXTRA))
+    return [fn for fn in names if os.path.isfile(os.path.join(_BACKUP_DIR, fn)) and not any(d in fn.lower() for d in _BACKUP_DENY)]
+
+
+def backup_zip():
+    """-> (the zip's bytes, the files taken, the files left out with the reason)"""
+    import zipfile
+    sec = _backup_secrets(); buf = io.BytesIO(); took, skipped = [], []
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for fn in backup_files():
+            try:
+                with open(os.path.join(_BACKUP_DIR, fn), "rb") as f:
+                    raw = f.read()
+            except Exception as e:
+                skipped.append((fn, f"не прочитан: {e}")); continue
+            txt = raw.decode("utf-8", "ignore")
+            if any(x in txt for x in sec):
+                skipped.append((fn, "в нём ключ или токен")); continue
+            z.writestr(fn, raw); took.append(fn)
+    data = buf.getvalue()
+    return data, took, skipped
+
+
+def backup_send(now=None):
+    """the zip to the user's Telegram chat -> {"ok", "files", "size", "skipped"} (or the error)"""
+    now = now or time.time()
+    if not (TELEGRAM_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        return {"ok": False, "err": "Telegram не настроен"}
+    data, took, skipped = backup_zip()
+    if len(data) > BACKUP_MAX_BYTES:
+        return {"ok": False, "err": f"архив {len(data) // 1048576} МБ — больше лимита Telegram"}
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))   # the UTC day: the same clock as the 01:00 UTC start
+    nf = len(took); w = "файл" if nf % 10 == 1 and nf % 100 != 11 else ("файла" if 2 <= nf % 10 <= 4 and not 12 <= nf % 100 <= 14 else "файлов")
+    cap = (f"💾 Резервная копия бота · {time.strftime('%d.%m.%Y', time.localtime(now))} · {nf} {w}, {max(1, len(data) // 1024)} КБ\n"
+           f"Сделки модулей, настройки, сторож, совет по выводу. Ключей и паролей внутри нет."
+           + (f"\nНе вошли: " + ", ".join(f"{a} ({b})" for a, b in skipped) if skipped else "")
+           + "\nВосстановить: остановить бота, распаковать архив в его папку, запустить.")
+    err = None
+    for attempt in range(3):
+        try:
+            r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
+                              data={"chat_id": TELEGRAM_CHAT_ID, "caption": cap[:1000]},
+                              files={"document": (f"vp_backup_{day}.zip", data, "application/zip")}, timeout=120)
+            if r.ok:
+                out = {"ok": True, "t": int(now), "day": day, "files": len(took), "size": len(data), "skipped": skipped}
+                try:
+                    with open(BACKUP_LAST_FILE + ".tmp", "w") as f:
+                        json.dump(out, f)
+                    os.replace(BACKUP_LAST_FILE + ".tmp", BACKUP_LAST_FILE)
+                except Exception as e:
+                    log_error(f"backup state: {e}")
+                return out
+            err = f"Telegram HTTP {r.status_code}"
+        except Exception as e:
+            err = str(e)[:200]
+        time.sleep(10)
+    return {"ok": False, "err": err}
+
+
+def backup_last():
+    try:
+        with open(BACKUP_LAST_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def backup_check(now=None):
+    """once a day from 01:00 UTC (the bot off then: when it is back) -> the result, or None (not due)"""
+    now = now or time.time()
+    g = time.gmtime(now); last = backup_last() or {}
+    if not BACKUP_ENABLED or g.tm_hour < BACKUP_HOUR_UTC or last.get("day") == time.strftime("%Y-%m-%d", g):
+        return None
+    r = backup_send(now)
+    if not r.get("ok"):
+        log_error(f"резервная копия не отправлена: {r.get('err')}")
+    return r
+
+
+def backup_loop():
+    time.sleep(420)
+    while True:
+        heartbeat("backup_loop")
+        try:
+            backup_check()
+            _BK["err"] = None
+        except Exception as e:
+            _BK["err"] = str(e)[:200]
+            log_error(f"backup_loop: {e}")
+        time.sleep(1800)
+
+
+@app.route("/api/backup", methods=["GET", "POST"])
+def api_backup():
+    """GET: the last backup and what goes in; POST: send one now"""
+    if request.method == "POST":
+        r = backup_send()
+        return jsonify(r)
+    return jsonify({"enabled": BACKUP_ENABLED, "last": backup_last(), "files": backup_files(), "err": _BK["err"],
+                    "tg": bool(TELEGRAM_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)})
+
+
+# v0.99.785 — the month's plan vs fact (the user picked it): on the 1st (from 06:00 UTC, with the withdrawal advice) one message on
+# the month before: the money on Binance from its income history (the trades' realized PnL, the commissions, the funding, the
+# transfers apart), split by module — each income row given to the module's real trade on that coin at that time; and each
+# module's R (its closed trades, virtual ones too, under its current model) against its backtest's months: the average month
+# and the usual range (the 10% .. 90% of the months from 2023) -> "в пределах" / "ниже обычного" / "выше обычного".
+REPORT_ENABLED = os.environ.get("VP_REPORT", "1") == "1"
+REPORT_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_report_state.json")
+_RPT = {"err": None}
+
+
+def report_month_range(now):
+    """the month before `now` (UTC) -> (start, end, "октябрь 2026", "2026-10")"""
+    g = time.gmtime(now); y, m = (g.tm_year, g.tm_mon - 1) if g.tm_mon > 1 else (g.tm_year - 1, 12)
+    t0 = calendar.timegm((y, m, 1, 0, 0, 0)); t1 = calendar.timegm((g.tm_year, g.tm_mon, 1, 0, 0, 0))
+    return t0, t1, f"{WD_MONTHS_RU[m - 1]} {y}", f"{y}-{m:02d}"
+
+
+def report_plan(bt):
+    """a module's backtest -> its months from 2023 (every month, the empty ones too): the R's mean, 10% / 90%, trades a month"""
+    L = [t for t in bt if t.get("r") is not None and int(t.get("x") or t["t"]) >= 1672531200]
+    if len(L) < 30:
+        return None
+    S = {}; N = {}
+    for t in L:
+        g = time.gmtime(int(t.get("x") or t["t"])); k = (g.tm_year, g.tm_mon); S[k] = S.get(k, 0.0) + float(t["r"]); N[k] = N.get(k, 0) + 1
+    k0, k1 = min(S), max(S); ks = []; y, m = k0
+    while (y, m) <= k1:
+        ks.append((y, m)); y, m = (y, m + 1) if m < 12 else (y + 1, 1)
+    v = sorted(S.get(k, 0.0) for k in ks); n = len(v)
+    q = lambda p: v[min(n - 1, max(0, int(round(p * (n - 1)))))]
+    return {"mean": sum(v) / n, "p10": q(0.1), "p90": q(0.9), "n_month": sum(N.values()) / n, "months": n}
+
+
+def _report_bsyms(sym):
+    base = str(sym or "").replace("_USDT", "").replace("USDT", "")
+    return {base + "USDT", "1000" + base + "USDT"}
+
+
+def report_money(rows, t0, t1, mods):
+    """Binance's income rows of [t0, t1) -> the totals and each module's part: a row on a coin given to the module whose real
+    trade on that coin was open then (from its entry less an hour to its exit plus 8 h: the last funding / commission)"""
+    spans = []
+    for key, trades in mods.items():
+        for t in trades:
+            if not t.get("real"):
+                continue
+            a = float(t.get("t_in") or t.get("hour") or 0) - 3600; b = float(t.get("t_out") or time.time()) + 8 * 3600
+            for bs in _report_bsyms(t.get("bsym") or t.get("symbol")):
+                spans.append((bs, a, b, key))
+    tot = {"pnl": 0.0, "fee": 0.0, "fund": 0.0, "dep": 0.0, "other": 0.0}; per = {}
+    for r in rows:
+        ts = r[0] / 1000.0
+        if not (t0 <= ts < t1) or r[3] not in BN_INC_USD:
+            continue
+        kind, amt = r[1], float(r[2])
+        if kind in BN_INC_DEP:
+            tot["dep"] += amt; continue
+        col = "pnl" if kind == "REALIZED_PNL" else ("fee" if kind == "COMMISSION" else ("fund" if kind == "FUNDING_FEE" else "other"))
+        tot[col] += amt
+        sym = (r[4].split("|") + ["", "", ""])[2]
+        who = next((k for bs, a, b, k in spans if bs == sym and a <= ts <= b), None) or "other"
+        d = per.setdefault(who, {"pnl": 0.0, "fee": 0.0, "fund": 0.0, "other": 0.0}); d[col] += amt
+    tot["net"] = tot["pnl"] + tot["fee"] + tot["fund"] + tot["other"]
+    for d in per.values():
+        d["net"] = d["pnl"] + d["fee"] + d["fund"] + d["other"]
+    return tot, per
+
+
+def report_build(now=None):
+    """the month before: every module's fact vs plan and the money -> dict"""
+    now = now or time.time(); t0, t1, month_ru, key_m = report_month_range(now)
+    btd = bt_trades() or {}; mods = {}; trades_all = {}
+    for key, name, store, lock, ver, flag in _WATCH_MODS:
+        if not globals().get(flag):
+            continue
+        S, L, V = globals()[store], globals()[lock], globals()[ver]
+        with L:
+            trades = list(S.get("trades") or [])
+        trades_all[key] = [t for t in trades if t.get("real")]
+        plan = report_plan(btd.get(key) or [])
+        fin = [t for t in trades if t.get("status") == "CLOSED" and t.get("r") is not None and t.get("rv") == V and t0 <= float(t.get("t_out") or 0) < t1]
+        sr = sum(float(t["r"]) for t in fin); real = [t for t in fin if t.get("real")]
+        rr = [float(t["real"]["r_real"]) for t in real if isinstance(t.get("real"), dict) and t["real"].get("r_real") is not None]
+        verdict = None
+        if plan:
+            verdict = "low" if sr < plan["p10"] else ("high" if sr > plan["p90"] else "ok")
+        mods[key] = {"name": name, "n": len(fin), "r": round(sr, 2), "n_real": len(real), "r_real": round(sum(rr), 2) if rr else None,
+                     "plan": {k: round(v, 2) for k, v in plan.items()} if plan else None, "verdict": verdict}
+    money = None
+    if BINANCE_API_KEY and BINANCE_API_SECRET:
+        tot, per = report_money(bn_income_sync(now), t0, t1, trades_all)
+        money = {"tot": {k: round(v, 2) for k, v in tot.items()}, "per": {k: {c: round(v, 2) for c, v in d.items()} for k, d in per.items()}}
+    return {"month": key_m, "month_ru": month_ru, "mods": mods, "money": money}
+
+
+def report_text(rep):
+    usd = lambda v: ("+" if v >= 0 else "−") + "$" + f"{abs(v):,.0f}".replace(",", " ")
+    L = [f"📊 Итоги · {rep['month_ru']} · план и факт"]
+    m = rep.get("money")
+    if m:
+        t = m["tot"]
+        L.append(f"Binance за месяц: <b>{usd(t['net'])}</b> = сделки {usd(t['pnl'])}, комиссии {usd(t['fee'])}, фандинг {usd(t['fund'])}"
+                 + (f", прочее {usd(t['other'])}" if abs(t["other"]) >= 1 else "")
+                 + (f" · пополнения / выводы {usd(t['dep'])} (не прибыль)" if abs(t["dep"]) >= 1 else ""))
+    L.append("По модулям (R — в рисках сделки; план — средний месяц бэктеста, в скобках обычный разброс):")
+    mark = {"ok": "✅ в пределах", "low": "⚠️ ниже обычного", "high": "🚀 выше обычного", None: "— бэктеста нет"}
+    for k, x in rep["mods"].items():
+        p = x["plan"]
+        line = f"{x['name']}: {x['n']} сделок, <b>{x['r']:+.1f}R</b>"
+        if p:
+            line += f" · план {p['mean']:+.1f}R ({p['p10']:+.0f}…{p['p90']:+.0f}), ~{p['n_month']:.0f} сделок · {mark[x['verdict']]}"
+        if x["n_real"]:
+            line += f" · на Binance {x['n_real']}" + (f" ({x['r_real']:+.1f}R)" if x["r_real"] is not None else "")
+        if m and k in m["per"]:
+            line += f", {usd(m['per'][k]['net'])}"
+        L.append("• " + line)
+    if m and "other" in m["per"] and abs(m["per"]["other"]["net"]) >= 1:
+        L.append(f"• не из сделок бота (ручные или до истории): {usd(m['per']['other']['net'])}")
+    low = [x["name"] for x in rep["mods"].values() if x["verdict"] == "low"]
+    L.append(("Ниже обычного: " + ", ".join(low) + " — один месяц ещё ничего не значит, сторож следит за всей серией."
+              if low else "Все модули в пределах обычного для своего бэктеста.") + " Бот ничего не менял.")
+    return "\n".join(L)
+
+
+def report_check(now=None, force=False):
+    """once a month (the 1st from 06:00 UTC, or later that month) -> the report, or None; force: the preview, nothing sent / saved"""
+    now = now or time.time(); g = time.gmtime(now)
+    try:
+        with open(REPORT_STATE_FILE) as f:
+            st = json.load(f)
+    except Exception:
+        st = {}
+    key = time.strftime("%Y-%m", g)
+    if not force and (not REPORT_ENABLED or st.get("month") == key or (g.tm_mday == 1 and g.tm_hour < 6)):
+        return None
+    rep = report_build(now)
+    if force:
+        return rep
+    send_telegram(report_text(rep), category="report")
+    try:
+        with open(REPORT_STATE_FILE + ".tmp", "w") as f:
+            json.dump({"month": key, "t": int(now), "last": rep}, f)
+        os.replace(REPORT_STATE_FILE + ".tmp", REPORT_STATE_FILE)
+    except Exception as e:
+        log_error(f"report state: {e}")
+    return rep
+
+
+@app.route("/api/report")
+def api_report():
+    """the month's plan vs fact: the last one sent and (?now=1) the last month's computed now"""
+    try:
+        with open(REPORT_STATE_FILE) as f:
+            st = json.load(f)
+    except Exception:
+        st = {}
+    out = {"enabled": REPORT_ENABLED, "last": st.get("last"), "t": st.get("t"), "err": _RPT["err"]}
+    if request.args.get("now") == "1":
+        try:
+            r = report_check(force=True); out["now"] = r; out["text"] = report_text(r)
+        except Exception as e:
+            out["now_err"] = str(e)[:200]
+    return jsonify(out)
 
 
 _WIDGET = {"t": 0.0, "d": None}
@@ -43672,6 +43996,14 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow subRow"><div><div class="label">↳ …с баланса от, $</div><div class="sub hintx">0 — без минимума</div></div>
         <input type="number" id="setWdFloorBal" min="0" step="1000" placeholder="25000" style="width:90px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);"></div>
       <div id="wdStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">📊 Итоги месяца: план и факт</div>
+          <div class="sub hintx">1-го числа вместе с советом — итоги прошлого месяца: деньги на Binance (сделки, комиссии, фандинг; по модулям) и результат каждого модуля в R против его бэктеста — средний месяц и обычный разброс. Только сообщение, бот ничего не меняет.</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setReportEnabled"><span class="switchSlider"></span></label>
+      </div>
+      <div id="reportStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;white-space:pre-line;">—</div>
     </div></details>
     <details class="settingsGroup" style="--mod-color:#ffb74d;"><summary class="settingsGroupTitle">🛡 Сторож: живые сделки против бэктеста</summary><div class="settingsGroupBody">
       <div class="settingRow">
@@ -43682,6 +44014,18 @@ INDEX_HTML = """<!doctype html>
         <label class="switch"><input type="checkbox" id="setWatchEnabled"><span class="switchSlider"></span></label>
       </div>
       <div id="watchStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
+    </div></details>
+    <details class="settingsGroup" style="--mod-color:#90caf9;"><summary class="settingsGroupTitle">💾 Резервная копия</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Раз в сутки — архив в Telegram</div>
+          <div class="sub hintx">в 04:00 по Москве бот присылает вам в Telegram архив своего состояния: сделки всех модулей, настройки, сторож, совет по выводу, история начислений Binance. Ключей и паролей в архиве нет никогда (файлы с ними не берутся, а файл, где случайно оказался ключ, пропускается). Восстановить: остановить бота, распаковать архив в его папку, запустить.</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setBackupEnabled"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow"><div><div class="label">↳ Отправить копию сейчас</div></div>
+        <button type="button" id="backupNowBtn" onclick="backupNow()">Отправить</button></div>
+      <div id="backupStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
     </div></details>
     <details class="settingsGroup" style="--mod-color:#b0bec5;"><summary class="settingsGroupTitle">🗓 Возраст моделей и переобучение</summary><div class="settingsGroupBody">
       <div class="sub hintx" style="padding:4px 2px;">P/R переобучается сама 3-го числа каждого месяца на машине GitHub (GitHub Actions, не зависит от подписки): новая модель попадает в бота, только если прошла все проверки, иначе остаётся старая. Остальные модели — запланированная задача в claude.ai 5 января, в бота — только после вашего «да» (порядок — RETRAIN.md в репозитории). Если модель устарела (задача не запустилась — например, закончилась подписка), бот пишет в Telegram не чаще раза в 3 дня.</div>
@@ -49408,6 +49752,8 @@ const setInputs = {
   liq_enabled: document.getElementById('setLiqEnabled'),   // v0.99.766
   wd_enabled: document.getElementById('setWdEnabled'),   // v0.99.779
   watch_enabled: document.getElementById('setWatchEnabled'),   // v0.99.784
+  backup_enabled: document.getElementById('setBackupEnabled'),   // v0.99.785
+  report_enabled: document.getElementById('setReportEnabled'),   // v0.99.785
   dlm_more_coins: document.getElementById('setDlmMoreCoins'),   // v0.99.686
   autotrade_smc: document.getElementById('setAutotradeSmc'),
   telegram_alerts_smc: document.getElementById('setTgSmc'),
@@ -49478,7 +49824,7 @@ async function loadSettings() {
     applySettingsToInputs(s);
     updateHeaderButtonVisibility(s);
   } catch (e) {}
-  loadLiq(); loadModelAge(); loadWd(); loadWatch();
+  loadLiq(); loadModelAge(); loadWd(); loadWatch(); loadBackup(); loadReport();
 }
 async function loadModelAge() {   // v0.99.768 — the models' age
   try {
@@ -49521,6 +49867,35 @@ async function loadWatch() {   // v0.99.784 — the watchdog: every module's liv
       return `${(m.warn || []).length ? '⚠️' : '✅'} <b>${m.name}</b> — с ${day}: ${m.n} сделок${m.n < d.min_n ? ' (судить рано: нужно ' + d.min_n + ')' : ''}, ${avg}<br><span style="opacity:.8">${rest}</span>${w}`;
     }).join('<br><br>') + (d.enabled ? '' : '<br><br>предупреждения выключены');
   } catch (e) {}
+}
+async function loadReport() {   // v0.99.785 — the month's plan vs fact: last month's, computed now
+  try {
+    const d = await (await fetch('/api/report?now=1')).json(), el = document.getElementById('reportStatus');
+    if (!el) return;
+    el.innerHTML = d.text ? 'если бы сейчас:\\n' + d.text : (d.now_err ? `<span class="loss">ошибка: ${d.now_err}</span>` : '—');
+  } catch (e) {}
+}
+async function loadBackup() {   // v0.99.785 — the daily backup: the last one and what goes in
+  try {
+    const d = await (await fetch('/api/backup')).json(), el = document.getElementById('backupStatus');
+    if (!el) return;
+    const L = d.last, parts = [];
+    if (!d.tg) parts.push('<span class="loss">Telegram не настроен — копии не уходят</span>');
+    const fw = n => n % 10 === 1 && n % 100 !== 11 ? 'файл' : (n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'файла' : 'файлов');
+    parts.push(L ? `последняя: ${new Date(L.t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'})} · ${L.files} ${fw(L.files)}, ${Math.max(1, Math.round(L.size / 1024))} КБ` : 'копий ещё не было');
+    parts.push(`в архиве: ${(d.files || []).length} ${fw((d.files || []).length)}`);
+    if (d.err) parts.push(`<span class="loss">ошибка: ${d.err}</span>`);
+    el.innerHTML = parts.join(' · ');
+  } catch (e) {}
+}
+async function backupNow() {
+  const b = document.getElementById('backupNowBtn'), el = document.getElementById('backupStatus');
+  if (b) b.disabled = true;
+  try {
+    const r = await (await fetch('/api/backup', {method: 'POST'})).json();
+    if (el) el.innerHTML = r.ok ? `отправлено: ${r.files} ${r.files % 10 === 1 && r.files % 100 !== 11 ? 'файл' : (r.files % 10 >= 2 && r.files % 10 <= 4 && (r.files % 100 < 12 || r.files % 100 > 14) ? 'файла' : 'файлов')}, ${Math.max(1, Math.round(r.size / 1024))} КБ` : `<span class="loss">не отправлено: ${r.err}</span>`;
+  } catch (e) { if (el) el.textContent = 'не отправлено: нет связи с ботом'; }
+  if (b) b.disabled = false;
 }
 async function loadLiq() {   // v0.99.766 — the liquidity cut's last cut positions
   try {
@@ -50988,6 +51363,7 @@ if __name__ == "__main__":
     threading.Thread(target=dlm_loop, daemon=True).start()   # v0.99.679 — ⚡ 15m deep limits
     threading.Thread(target=wd_loop, daemon=True).start()   # v0.99.779 — the withdrawal advice, the 1st of every month
     threading.Thread(target=watch_loop, daemon=True).start()   # v0.99.784 — live trades vs the backtest: warnings only
+    threading.Thread(target=backup_loop, daemon=True).start()   # v0.99.785 — the daily backup to the user's Telegram
     threading.Thread(target=model_age_loop, daemon=True).start()   # v0.99.768 — the models' age -> Telegram
     threading.Thread(target=bno_loop, daemon=True).start()   # v0.99.698 — P/R, SMC, EMA positions on Binance
     threading.Thread(target=hdg_loop, daemon=True).start()   # v0.99.628 — 🪞 hedge mirror

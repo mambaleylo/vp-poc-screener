@@ -33,3 +33,7 @@ vp_wd_state.json
 vp_wd_state.json.tmp
 vp_watch_state.json
 vp_watch_state.json.tmp
+vp_backup_last.json
+vp_backup_last.json.tmp
+vp_report_state.json
+vp_report_state.json.tmp
