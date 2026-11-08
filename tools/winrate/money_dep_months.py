@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 ARGV, sys.argv = sys.argv[1:], sys.argv[:1]
 import money_arm2 as MA2, money_multi as M, money_expect as X
 from multiprocessing import Pool
+GOAL = float(os.environ.get("GOAL", "3000"))   # the month's target $ (the user: "теперь 2000$")
 S0 = float(os.environ.get("DEP_S0", "100")); ND = int(os.environ.get("DEP_N", "6"))   # the user: "старт с 200 и 5 раз по 100"
 RULE = f"Bn|arm=0.6|oth=1|dis=1.0|heat=1.0|cap=125|slip=1|liq=4:0.5/8:0.25/12:0|path=1|dep=100/30/{ND}|dlm=4|prv=3.75|smc=3.125|emx=3.75|htf=2.5|cfl=2|cflheat=0.45"
 K = int(ARGV[0]) if ARGV else 4
@@ -28,7 +29,7 @@ if __name__ == "__main__":
     with Pool(4, initializer=_init, initargs=(D,)) as Pl:
         res = Pl.map(job, [(k, A) for k in range(K) for A in S], chunksize=2)
     R = {(k, A): r for k, A, r in res}; out = []
-    print("старт | через 3 мес | через 6 мес | худшая точка | через год | просадка | первый месяц с +$3000 | месяцев с +$3000", flush=True)
+    print(f"старт | через 3 мес | через 6 мес | худшая точка | через год | просадка | первый месяц с +${GOAL:,.0f} | месяцев с +${GOAL:,.0f}", flush=True)
     for A in S:
         paths = []
         for k in range(K):
@@ -38,10 +39,10 @@ if __name__ == "__main__":
         for m in range(12):
             prev = S0 if m == 0 else P[m - 1] + (100.0 if 1 <= m <= ND else 0.0)   # the month's start: the last end + the top-up made then
             prof.append(P[m] - prev)
-        prof = np.array(prof); first = next((m + 1 for m in range(12) if prof[m] >= 3000), None)
+        prof = np.array(prof); first = next((m + 1 for m in range(12) if prof[m] >= GOAL), None)
         e = np.median([R[(k, A)][0] for k in range(K)]); dd = np.median([R[(k, A)][1] for k in range(K)])
         row = {"start": time.strftime("%Y-%m", time.gmtime(A)), "m3": float(P[2]), "m6": float(P[5]), "low": float(min([S0] + list(P))),
-               "year": float(e), "dd": float(dd), "first3k": first, "n3k": int((prof >= 3000).sum()), "profit": [round(float(x)) for x in prof]}
+               "year": float(e), "dd": float(dd), "first3k": first, "n3k": int((prof >= GOAL).sum()), "profit": [round(float(x)) for x in prof]}
         out.append(row)
         print(f"{row['start']} | ${row['m3']:,.0f} | ${row['m6']:,.0f} | ${row['low']:,.0f} | ${row['year']:,.0f} | {dd * 100:.0f}% | "
               f"{('мес ' + str(first)) if first else 'нет'} | {row['n3k']} | {row['profit']}", flush=True)
