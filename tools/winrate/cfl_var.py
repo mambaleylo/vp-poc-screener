@@ -48,6 +48,10 @@ VARS = {
     "btcup": dict(flt=("b_e50", 1)), "btcdn": dict(flt=("b_e50", -1)), "e200up": dict(flt=("d_e200", 1)), "e200dn": dict(flt=("d_e200", -1)),
     "fundneg": dict(flt=("fund", -1)),
     "xtop": dict(xm="top"), "xdr": dict(xm="dr"),
+    # round 8 — cfl_filt.py's filters (the bars from 2023–24's trades only, each lifting both 2023–24 and 2025–26)
+    "fpos90": dict(flt=("pos90", "<", 0.7536)), "fatrh": dict(flt=("atr_h", ">", 0.2207)), "fde50": dict(flt=("d_e50", "<", 0.7366)),
+    "fpos365": dict(flt=("pos365", "<", 0.9344)), "fdatr": dict(flt=("datr", "<", 8.469)), "fb7d": dict(flt=("b7d", ">", -19.27)),
+    "fdow": dict(flt=("dow", ">", 0.5)), "fema": dict(flt=("ema_near", ">", 0.0509)),
 }
 TH = {}
 def thr(q, win):
@@ -121,8 +125,11 @@ def build(p):
     return out
 def merge(p, v):
     """a variant on top of p: its exit settings join p's (not replace them), so "cap30+s0.5t6+ctf4" keeps all three"""
-    q = dict(p); q.update({k: x for k, x in v.items() if k != "ex"})
+    q = dict(p); q.update({k: x for k, x in v.items() if k not in ("ex", "flt")})
     if "ex" in v: q["ex"] = {**p.get("ex", {}), **v["ex"]}
+    if "flt" in v:   # the filters add up
+        L_ = lambda f: [] if not f else ([f] if isinstance(f[0], str) else list(f))
+        q["flt"] = L_(p.get("flt")) + L_(v["flt"])
     return q
 def idle(L):
     t = np.array(sorted(x["t0"] for x in L))
