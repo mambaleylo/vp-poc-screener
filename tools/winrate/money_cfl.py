@@ -11,6 +11,8 @@ import money_arm2 as MA2, money_multi as M, money_expect as X
 from multiprocessing import Pool
 RULE = "Bn|arm=0.6|oth=1|dis=1.0|heat=1.0|cap=125|slip=1|liq=4:0.5/8:0.25/12:0|path=1|dlm=4|prv=3.75|smc=3.125|emx=3.75|htf=2.5"
 K = int(ARGV[0]); STEP = int(ARGV[1]); NAMES = ARGV[2:]; W = X.STARTS[::STEP]
+if os.environ.get("MC_FROM"):   # only the windows starting from this date (an out-of-sample check: "2025-01")
+    import calendar; y_, m_ = map(int, os.environ["MC_FROM"].split("-")); W = [A for A in W if A >= calendar.timegm((y_, m_, 1, 0, 0, 0))]
 hk = lambda v, k: zlib.crc32(f"{k}|{v['mod']}|{v['sym']}|{v['side']}|{v['t0']}".encode()) % 100 >= 5
 def cfl_list(nm):
     if nm == "none": return [], 0.0
@@ -54,5 +56,5 @@ if __name__ == "__main__":
              "p50_runs": [int(x) for x in p50], "dd_runs": [int(round(x * 100)) for x in dd], "l12_runs": [int(x) for x in l12]}
         out[nm] = o
         print(f"{nm} | ${o['p10']:,} | ${o['p50']:,} | ${o['p90']:,} | {o['dd']}% | {o['dd90']}% | ${o['last12']:,} | {o['m6_below']}% | {o['p50_runs']} {o['dd_runs']}", flush=True)
-    json.dump(out, open(f"{M.ST}/wf/money_cfl.json", "w"), indent=1)
+    json.dump(out, open(f"{M.ST}/wf/money_cfl" + os.environ.get("MC_TAG", "") + ".json", "w"), indent=1)
     print("money cfl done", flush=True)
