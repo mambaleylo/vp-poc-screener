@@ -35,6 +35,7 @@ def walk(O, H, L, C, i, s, stop, take, hold):
             return (take * risk - e * 0.001 - e * 0.0003 * (b - i) / 24) / risk, b - i
     return (s * (C[n] - e) - e * 0.001 - e * 0.0003 * (n - i) / 24) / risk, n - i
 GRID = dict(D=(2.0, 3.0, 4.0), W=(0.3, 0.5), O=(0.0, 2.0, 4.0), V=(2.0, 4.0), T=(1.5, 2.5, 4.0), H=(12, 24, 48))
+SIDES = [int(x) for x in os.environ.get("CASC_SIDES", "1,-1").split(",")]   # 1: the longs after a flush only, -1: the shorts after a squeeze
 EV = []   # (t, coin, side, D, W, Opct, Vx, i)
 DATA = {}
 for sym in COINS:
@@ -55,7 +56,7 @@ res = []
 for D, W, Op, Vx, Tk, Hh in itertools.product(*GRID.values()):
     busy = {}; ra, rb = [], []
     for t, sym, s, dd, ww, oo, vv, i in EV:
-        if dd < D or ww < W or vv < Vx or not (oo >= Op if Op > 0 else True): continue
+        if s not in SIDES or dd < D or ww < W or vv < Vx or not (oo >= Op if Op > 0 else True): continue
         if busy.get((sym, s), 0) > t: continue
         T, O, H, L, C, V, oi, atr = DATA[sym]; a = atr[i - 1]
         stop = (L[i] - 0.2 * a) if s > 0 else (H[i] + 0.2 * a)
@@ -72,5 +73,5 @@ print("топ-15 по 2023–24 (D ATR, тень W, падение OI %, объ�
 for x in res[:15]: print(f"D{x['D']} W{x['W']} OI-{x['O']}% V{x['V']}x T{x['T']} H{x['H']} | {x['a']} | {x['b']}", flush=True)
 cor = np.corrcoef([x["a"][1] for x in res], [x["b"][1] for x in res])[0, 1] if len(res) > 2 else float("nan")
 print(f"связь R 2023–24 и 2025–26 по конфигурациям: {cor:.2f}", flush=True)
-json.dump(res, open(f"{ST}/wf/cascade.json", "w"))
+json.dump(res, open(f"{ST}/wf/cascade" + os.environ.get("CASC_SIDES", "").replace(",", "_").replace("-", "m") + ".json", "w"))
 print("cascade done", flush=True)
