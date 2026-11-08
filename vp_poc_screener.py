@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.783"
+APP_VERSION = "0.99.784"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1159,6 +1159,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "htf_enabled", "autotrade_htf", "telegram_alerts_htf", "risk_pct_htf",   # v0.99.732
                   "liq_enabled", "liq_steps",   # v0.99.766
                   "wd_enabled", "wd_pct", "wd_min", "wd_floor", "wd_floor_bal",   # v0.99.779
+                  "watch_enabled",   # v0.99.784
                   "cfl_enabled", "telegram_alerts_cfl", "autotrade_cfl2", "risk_pct_cfl",   # v0.99.739, v0.99.740
                   "rbs_enabled", "telegram_alerts_rbs",   # v0.99.757
                   "dlm_enabled", "autotrade_dlm2", "telegram_alerts_dlm", "risk_pct_dlm2", "dlm_binance", "dlm_more_coins", "bn_others", "bn_cross",   # v0.99.679, v0.99.684, v0.99.686 (v0.99.687: the single mode and the ladder dropped; the 4h module's own autotrade / risk keys: it starts virtual at 4% (v0.99.688), the 15m one held up to 50%)
@@ -1247,6 +1248,7 @@ def get_settings():
         "htf_enabled": HTF_ENABLED, "autotrade_htf": AUTOTRADE_ENABLED_HTF, "telegram_alerts_htf": TELEGRAM_ALERTS_HTF, "risk_pct_htf": MODULE_RISK_PCT.get("htf"),   # v0.99.732
         "liq_enabled": LIQ_ENABLED, "liq_steps": LIQ_STEPS,   # v0.99.766
         "wd_enabled": WD_ENABLED, "wd_pct": WD_PCT, "wd_min": WD_MIN, "wd_floor": WD_FLOOR, "wd_floor_bal": WD_FLOOR_BAL,   # v0.99.779
+        "watch_enabled": WATCH_ENABLED,   # v0.99.784
         "cfl_enabled": CFL_ENABLED, "telegram_alerts_cfl": TELEGRAM_ALERTS_CFL, "autotrade_cfl2": AUTOTRADE_ENABLED_CFL, "risk_pct_cfl": MODULE_RISK_PCT.get("cfl"),   # v0.99.739, v0.99.740
         "rbs_enabled": RBS_ENABLED, "telegram_alerts_rbs": TELEGRAM_ALERTS_RBS,   # v0.99.757
         "dlm_enabled": DLM_ENABLED, "autotrade_dlm2": AUTOTRADE_ENABLED_DLM, "telegram_alerts_dlm": TELEGRAM_ALERTS_DLM, "risk_pct_dlm2": MODULE_RISK_PCT.get("dlm"),   # v0.99.679, v0.99.687
@@ -1543,6 +1545,8 @@ def apply_settings(updates):
             globals()["LIQ_STEPS"] = sp   # "" = the version's default
         except Exception as e:
             log_error(f"settings liq_steps «{sp}» not taken: {e}")
+    if "watch_enabled" in updates:   # v0.99.784 — the live-vs-backtest watchdog
+        globals()["WATCH_ENABLED"] = bool(updates["watch_enabled"])
     if "wd_enabled" in updates:   # v0.99.779 — the withdrawal advice
         globals()["WD_ENABLED"] = bool(updates["wd_enabled"])
     for k_, g_, lo_, hi_ in (("wd_pct", "WD_PCT", 0, 100), ("wd_min", "WD_MIN", 0, 1e9), ("wd_floor", "WD_FLOOR", 0, 1e9), ("wd_floor_bal", "WD_FLOOR_BAL", 0, 1e9)):
@@ -3362,7 +3366,7 @@ _LVL_WARN = ("Read timed out", "ReadTimeout", "timed out", "Timeout", "Connectio
              "Failed to establish a new connection", "Max retries", "NameResolution", "RemoteDisconnected", "network error", "нет связи",
              "500 Server Error", "502 ", "503 ", "504 ", "(502)", "(503)", "(504)", "Bad Gateway", "Service Unavailable", "Too Many Requests",
              "TOO_MANY_REQUESTS", "RATE_LIMIT", "429 Client Error", "GitHub не ответил", "JSONDecodeError", "Expecting value", "— skipping",
-             "restored from")
+             "restored from", "сторож: ")   # v0.99.784 — the watchdog's notes: a warning, not an error
 
 
 def log_level(text):
@@ -38876,6 +38880,192 @@ def api_wd():
     return jsonify(out)
 
 
+# v0.99.784 — the live-vs-backtest watchdog (the user: "давай, только автоматом не отключать, только предупреждать обратить
+# внимание"): every 30 min each bundle module's live trades (virtual ones too) under its current model / rule against its own
+# backtest list (vp_bt_trades.json). A warning only when the live trades leave what the whole backtest history ever showed:
+# the average R below the backtest's mean minus 1.64 standard errors (n >= 20: worse than bad luck, ~1 in 20 by chance), a
+# losing streak or a drawdown in R beyond the backtest's worst, longer without a new trade than the backtest's longest pause,
+# ⚡'s real Binance fills worse than the plan by 0.1R on average (20+). The comparison starts when the module's model / rule
+# changes (a retrain, a new rule — the old trades are another rule). Telegram once when a warning appears, a reminder every
+# 7 days while it stays, "снова в норме" when all clear; the app's log as a warning. The bot never stops or changes anything.
+WATCH_ENABLED = os.environ.get("VP_WATCH", "1") == "1"
+WATCH_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_watch_state.json")
+WATCH_MIN_N = 20
+WATCH_REMIND_SEC = 7 * 86400
+WATCH_SLIP = -0.10
+_WATCH_MODS = (("dlm", "⚡ Лимитки", "_DLM", "_dlm_lock", "DLM_MODEL_VER", "DLM_ENABLED"),
+               ("prv", "P/R", "_PRX", "_prx_lock", "PRX_MODEL_VER", "PRV_ENABLED"),
+               ("emx", "📐 EMA", "_EMX", "_emx_lock", "EMX_MODEL_VER", "EMW_ENABLED"),
+               ("smc", "🧱 SMC", "_SMC", "_smc_lock", "SMC_MODEL_VER", "SMC_ENABLED"),
+               ("htf", "📏 HTF", "_HTF", "_htf_lock", "HTF_MODEL_VER", "HTF_ENABLED"),
+               ("cfl", "🔄 Классика", "_CFL", "_cfl_lock", "CFL_MODEL_VER", "CFL_ENABLED"))
+_WATCH = {"st": None, "err": None, "bt": {}}
+_watch_lock = threading.Lock()
+
+
+def watch_state():
+    with _watch_lock:
+        if _WATCH["st"] is None:
+            try:
+                with open(WATCH_STATE_FILE) as f:
+                    _WATCH["st"] = json.load(f)
+            except Exception:
+                _WATCH["st"] = {}
+        return json.loads(json.dumps(_WATCH["st"]))
+
+
+def watch_save(st):
+    with _watch_lock:
+        _WATCH["st"] = json.loads(json.dumps(st))
+    try:
+        tmp = WATCH_STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(st, f)
+        os.replace(tmp, WATCH_STATE_FILE)
+    except Exception as e:
+        log_error(f"watch save: {e}")
+
+
+def _watch_fp(m):
+    """the model's / rule's fingerprint: its scalars and small lists (not the trees) — a retrain or a new rule changes it"""
+    def red(x, depth=0):
+        if isinstance(x, dict):
+            return {k: red(v, depth + 1) for k, v in sorted(x.items()) if depth < 4}
+        if isinstance(x, (list, tuple)):
+            return [red(v, depth + 1) for v in x] if len(x) <= 64 else len(x)
+        return x if isinstance(x, (int, float, str, bool)) or x is None else str(x)
+    keep = {k: m.get(k) for k in ("ver", "trained_to", "rule", "q", "thr", "streams", "side_cap", "flt", "research_thr")}
+    return hashlib.sha1(json.dumps(red(keep), sort_keys=True, default=str).encode()).hexdigest()[:12]
+
+
+def watch_bt_stats(bt):
+    """a module's backtest list -> its mean / spread of R, win rate, the worst losing streak and drawdown in R (by the exit
+    time), the longest pause between entries (from 2023, the research years)"""
+    L = [t for t in bt if t.get("r") is not None]
+    if len(L) < 30:
+        return None
+    r = [float(t["r"]) for t in L]; n = len(r); mu = sum(r) / n; sd = (sum((x - mu) ** 2 for x in r) / n) ** 0.5
+    cum = peak = dd = 0.0; st = mx = 0
+    for t in sorted(L, key=lambda t: t.get("x") or t["t"]):
+        cum += float(t["r"]); peak = max(peak, cum); dd = max(dd, peak - cum)
+        st = st + 1 if float(t["r"]) < 0 else 0; mx = max(mx, st)
+    ts = sorted(int(t["t"]) for t in L if int(t["t"]) >= 1672531200)
+    gap = max((b - a for a, b in zip(ts, ts[1:])), default=0)
+    return {"n": n, "mu": mu, "sd": sd, "wr": 100.0 * sum(1 for x in r if x > 0) / n, "dd": dd, "streak": mx, "gap": gap}
+
+
+def watch_eval(bs, closed, entries, since, now, slip=None):
+    """pure: bs — the backtest's stats; closed — the live closed trades [(exit time, R)] since `since`; entries — their entry
+    times (open ones too); slip — ⚡'s real fills minus the plan, R -> (the live figures, {key: the warning's text})"""
+    closed = sorted(closed); rs = [r for _, r in closed]; n = len(rs)
+    cum = peak = dd = 0.0; st = 0
+    for r in rs:
+        cum += r; peak = max(peak, cum); dd = peak - cum
+        st = st + 1 if r < 0 else 0
+    last = max([since] + list(entries)); pause = max(0.0, now - max(last, _PROC_START))
+    met = {"n": n, "avg": round(sum(rs) / n, 3) if n else None, "wr": round(100.0 * sum(1 for r in rs if r > 0) / n) if n else None,
+           "dd": round(dd, 2), "streak": st, "pause_d": round(pause / 86400, 1), "since": int(since),
+           "bt": {"mu": round(bs["mu"], 3), "wr": round(bs["wr"]), "dd": round(bs["dd"], 1), "streak": bs["streak"], "gap_d": round(bs["gap"] / 86400, 1)}}
+    W = {}
+    if n >= WATCH_MIN_N:
+        lo = bs["mu"] - 1.64 * bs["sd"] / n ** 0.5; met["lo"] = round(lo, 3)
+        if met["avg"] < lo:
+            W["avg"] = (f"средний результат {met['avg']:+.2f}R за {n} сделок, в бэктесте {bs['mu']:+.2f}R — ниже {lo:+.2f}R, "
+                        f"то есть хуже, чем бывает от простого невезения (случайно так бывает ~1 раз из 20)")
+    if st > bs["streak"]:
+        W["streak"] = f"{st} убытков подряд — в бэктесте за всю историю не больше {bs['streak']}"
+    if dd > bs["dd"] and dd > 0:
+        W["dd"] = f"просадка {dd:.1f}R от лучшей точки — в бэктесте не глубже {bs['dd']:.1f}R"
+    if bs["gap"] > 0 and pause > bs["gap"]:
+        W["pause"] = f"{pause / 86400:.0f} дн. без новых сделок — в бэктесте самая длинная пауза {bs['gap'] / 86400:.0f} дн."
+    if slip and len(slip) >= WATCH_MIN_N:
+        a = sum(slip) / len(slip); met["slip"] = {"n": len(slip), "avg": round(a, 3)}
+        if a <= WATCH_SLIP:
+            W["slip"] = f"реальные исполнения на Binance хуже плана в среднем на {abs(a):.2f}R ({len(slip)} сделок)"
+    return met, W
+
+
+def _watch_tin(t):
+    return float(t.get("t_in") or t.get("hour") or 0)
+
+
+def watch_check(now=None, send=True):
+    """every module: its figures and warnings; send — Telegram / the log and the state saved (the loop), else a preview"""
+    now = now or time.time()
+    st = watch_state(); mods = st.setdefault("mods", {}); out = {}
+    btd = bt_trades() or {}
+    for key, name, store, lock, ver, flag in _WATCH_MODS:
+        if not globals().get(flag):
+            continue
+        S, L, V = globals()[store], globals()[lock], globals()[ver]
+        with L:
+            trades = list(S.get("trades") or []); model = S.get("model")
+        if not model:
+            continue
+        bs = watch_bt_stats(btd.get(key) or [])
+        if not bs:
+            continue
+        fp = _watch_fp(model); ms = mods.setdefault(key, {})
+        if ms.get("fp") != fp:   # a new model / rule: the comparison starts over
+            ms.clear(); ms.update({"fp": fp, "since": int(now), "warn": {}})
+        since = float(ms["since"])
+        mine = [t for t in trades if t.get("rv") == V and _watch_tin(t) >= since]
+        closed = [(float(t.get("t_out") or _watch_tin(t)), float(t["r"])) for t in mine if t.get("status") == "CLOSED" and t.get("r") is not None]
+        slip = [float(t["real"]["r_real"]) - float(t["r"]) for t in mine if t.get("status") == "CLOSED" and t.get("r") is not None
+                and (t.get("real") or {}).get("r_real") is not None] if key == "dlm" else None
+        met, W = watch_eval(bs, closed, [_watch_tin(t) for t in mine], since, now, slip)
+        met.update(name=name, warn=list(W.values()))
+        out[key] = met
+        if not send:
+            continue
+        prev = ms.get("warn") or {}
+        new = [k for k in W if k not in prev]; due = [k for k in W if k in prev and now - prev[k] >= WATCH_REMIND_SEC]
+        if new or due:
+            day = time.strftime("%d.%m.%Y", time.localtime(since))
+            txt = (f"⚠️ Сторож · {name} — обратите внимание\n" + "\n".join("• " + W[k] for k in W)
+                   + f"\nЖивые сделки с {day}: {met['n']}" + (f", в среднем {met['avg']:+.2f}R, прибыльных {met['wr']}%" if met["n"] else "")
+                   + f" · в бэктесте {bs['mu']:+.2f}R, {round(bs['wr'])}%"
+                   + ("\n(напоминание: держится неделю)" if due and not new else "")
+                   + "\nБот ничего не отключал и не менял — решать вам.")
+            send_telegram(txt, category="watch")
+            log_error(f"сторож: {name} — " + "; ".join(W[k] for k in (new or due)))
+            ms["warn"] = {k: now for k in W}
+        elif prev and not W:
+            send_telegram(f"✅ Сторож · {name}: снова в норме — живые сделки опять в пределах бэктеста"
+                          + (f" ({met['n']} сделок, в среднем {met['avg']:+.2f}R)" if met["n"] else ""), category="watch")
+            ms["warn"] = {}
+        else:
+            ms["warn"] = {k: prev[k] for k in W if k in prev}
+        ms["last"] = {k: met[k] for k in ("n", "avg", "wr", "dd", "streak", "pause_d")} | {"t": int(now), "warn": list(W)}
+    if send:
+        watch_save(st)
+    return out
+
+
+def watch_loop():
+    time.sleep(600)
+    while True:
+        heartbeat("watch_loop")
+        try:
+            if WATCH_ENABLED:
+                watch_check()
+            _WATCH["err"] = None
+        except Exception as e:
+            _WATCH["err"] = str(e)[:200]
+            log_error(f"watch_loop: {e}")
+        time.sleep(1800)
+
+
+@app.route("/api/watch")
+def api_watch():
+    """the watchdog: every module's live figures against its backtest (computed now, nothing sent)"""
+    try:
+        mods = watch_check(send=False)
+    except Exception as e:
+        return jsonify({"enabled": WATCH_ENABLED, "err": str(e)[:200]})
+    return jsonify({"enabled": WATCH_ENABLED, "mods": mods, "err": _WATCH["err"], "min_n": WATCH_MIN_N})
+
+
 _WIDGET = {"t": 0.0, "d": None}
 
 # v0.99.763 — the user: "а виджет отличает пополнения баланса и реальный pnl", then "да": Binance's income history
@@ -43482,6 +43672,16 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow subRow"><div><div class="label">↳ …с баланса от, $</div><div class="sub hintx">0 — без минимума</div></div>
         <input type="number" id="setWdFloorBal" min="0" step="1000" placeholder="25000" style="width:90px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);"></div>
       <div id="wdStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
+    </div></details>
+    <details class="settingsGroup" style="--mod-color:#ffb74d;"><summary class="settingsGroupTitle">🛡 Сторож: живые сделки против бэктеста</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Предупреждать в Telegram</div>
+          <div class="sub hintx">раз в 30 минут живые сделки каждого модуля (и виртуальные) сравниваются с его бэктестом — с момента последней смены модели или правила. Сообщение, только если модуль вышел за то, что бэктест видел за всю историю: средний результат ниже нижней границы (от 20 сделок), серия убытков или просадка глубже худших, пауза без сделок дольше самой длинной, у ⚡ реальные исполнения хуже плана на 0.1R. Напоминание раз в неделю, пока держится, и «снова в норме», когда прошло. Бот сам ничего не отключает — только предупреждает.</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setWatchEnabled"><span class="switchSlider"></span></label>
+      </div>
+      <div id="watchStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
     </div></details>
     <details class="settingsGroup" style="--mod-color:#b0bec5;"><summary class="settingsGroupTitle">🗓 Возраст моделей и переобучение</summary><div class="settingsGroupBody">
       <div class="sub hintx" style="padding:4px 2px;">P/R переобучается сама 3-го числа каждого месяца на машине GitHub (GitHub Actions, не зависит от подписки): новая модель попадает в бота, только если прошла все проверки, иначе остаётся старая. Остальные модели — запланированная задача в claude.ai 5 января, в бота — только после вашего «да» (порядок — RETRAIN.md в репозитории). Если модель устарела (задача не запустилась — например, закончилась подписка), бот пишет в Telegram не чаще раза в 3 дня.</div>
@@ -49207,6 +49407,7 @@ const setInputs = {
   bn_cross: document.getElementById('setBnCross'),   // v0.99.717
   liq_enabled: document.getElementById('setLiqEnabled'),   // v0.99.766
   wd_enabled: document.getElementById('setWdEnabled'),   // v0.99.779
+  watch_enabled: document.getElementById('setWatchEnabled'),   // v0.99.784
   dlm_more_coins: document.getElementById('setDlmMoreCoins'),   // v0.99.686
   autotrade_smc: document.getElementById('setAutotradeSmc'),
   telegram_alerts_smc: document.getElementById('setTgSmc'),
@@ -49277,7 +49478,7 @@ async function loadSettings() {
     applySettingsToInputs(s);
     updateHeaderButtonVisibility(s);
   } catch (e) {}
-  loadLiq(); loadModelAge(); loadWd();
+  loadLiq(); loadModelAge(); loadWd(); loadWatch();
 }
 async function loadModelAge() {   // v0.99.768 — the models' age
   try {
@@ -49301,6 +49502,24 @@ async function loadWd() {   // v0.99.779 — the withdrawal advice: the last one
     if (d.now) parts.push(`если бы сейчас: баланс ${usdS(d.now.eq)}${d.now.hwm !== undefined ? ', максимум ' + usdS(d.now.hwm) : ''} → ${d.now.w > 0 ? 'вывести <b>' + usdS(d.now.w) + '</b>' : 'не выводить'} (${why(d.now)})`);
     if (d.err) parts.push(`<span class="loss">ошибка: ${d.err}</span>`);
     el.innerHTML = parts.join('<br>') || (d.enabled ? 'совет придёт 1-го числа' : 'совет выключен');
+  } catch (e) {}
+}
+async function loadWatch() {   // v0.99.784 — the watchdog: every module's live trades against its backtest
+  try {
+    const d = await (await fetch('/api/watch')).json(), el = document.getElementById('watchStatus');
+    if (!el) return;
+    if (d.err) { el.innerHTML = `<span class="loss">ошибка: ${d.err}</span>`; return; }
+    const mods = Object.values(d.mods || {});
+    if (!mods.length) { el.textContent = 'модули ещё загружаются'; return; }
+    const f = (v, p) => v === null || v === undefined ? '—' : (v > 0 ? '+' : '') + v.toFixed(p === undefined ? 2 : p);
+    el.innerHTML = mods.map(m => {
+      const day = new Date(m.since * 1000).toLocaleDateString('ru-RU');
+      const avg = m.n ? `в среднем <b>${f(m.avg)}R</b> (бэктест ${f(m.bt.mu)}R${m.lo !== undefined ? ', граница ' + f(m.lo) + 'R' : ''}), прибыльных ${m.wr}% (${m.bt.wr}%)` : 'сделок пока нет';
+      const rest = `серия убытков ${m.streak} (худшая ${m.bt.streak}) · просадка ${m.dd}R (${m.bt.dd}R) · без новых сделок ${m.pause_d} дн. (${m.bt.gap_d})`
+        + (m.slip ? ` · исполнения ${f(m.slip.avg)}R к плану` : '');
+      const w = (m.warn || []).length ? '<br>' + m.warn.map(x => `<span class="warnTxt">⚠ ${x}</span>`).join('<br>') : '';
+      return `${(m.warn || []).length ? '⚠️' : '✅'} <b>${m.name}</b> — с ${day}: ${m.n} сделок${m.n < d.min_n ? ' (судить рано: нужно ' + d.min_n + ')' : ''}, ${avg}<br><span style="opacity:.8">${rest}</span>${w}`;
+    }).join('<br><br>') + (d.enabled ? '' : '<br><br>предупреждения выключены');
   } catch (e) {}
 }
 async function loadLiq() {   // v0.99.766 — the liquidity cut's last cut positions
@@ -50768,6 +50987,7 @@ if __name__ == "__main__":
     threading.Thread(target=rbs_loop, daemon=True).start()   # v0.99.757 — 🚀 Пробой 4ч (virtual)
     threading.Thread(target=dlm_loop, daemon=True).start()   # v0.99.679 — ⚡ 15m deep limits
     threading.Thread(target=wd_loop, daemon=True).start()   # v0.99.779 — the withdrawal advice, the 1st of every month
+    threading.Thread(target=watch_loop, daemon=True).start()   # v0.99.784 — live trades vs the backtest: warnings only
     threading.Thread(target=model_age_loop, daemon=True).start()   # v0.99.768 — the models' age -> Telegram
     threading.Thread(target=bno_loop, daemon=True).start()   # v0.99.698 — P/R, SMC, EMA positions on Binance
     threading.Thread(target=hdg_loop, daemon=True).start()   # v0.99.628 — 🪞 hedge mirror
