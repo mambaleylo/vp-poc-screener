@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.782"
+APP_VERSION = "0.99.783"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -48939,6 +48939,16 @@ document.querySelectorAll('.settingRow').forEach(row => {
     return null;
   };
   const scrollable = el => el.scrollWidth > el.clientWidth;
+  // v0.99.783 — the user: "подними блоки сейчас и сделки вверх первыми под шапку, всё равно к ним всегда скролю": on every module's tab
+  // the «🔎 Сейчас / Последний час / Этот час» and «📈 Сделки» cards go first (their own order kept), the description, the history and
+  // the backtest below
+  function liftNow(el) {
+    const root = el.querySelector(':scope > .fx-zpanel') || el;
+    const ttl = c => (c.classList && c.classList.contains('zcard') && ((c.querySelector(':scope > .zh') || {}).textContent || '').trim()) || '';
+    const kids = [...root.children];
+    const top = kids.filter(c => /^(🔎|🎯 На прицеле)/.test(ttl(c))).concat(kids.filter(c => /^📈 Сделки/.test(ttl(c))));   // «now» first, then the trades
+    for (let i = top.length - 1; i >= 0; i--) root.insertBefore(top[i], root.firstChild);
+  }
   function set(el, html) {
     if (el._vpHtml === html) return;
     const oldD = [...el.querySelectorAll('details')];
@@ -48953,6 +48963,7 @@ document.querySelectorAll('.settingRow').forEach(row => {
     const anchor = findAnchor(el);
     const sx = window.scrollX, sy = window.scrollY;
     desc.set.call(el, html);
+    liftNow(el);   // v0.99.783
     el._vpHtml = html;
     const newD = [...el.querySelectorAll('details')];
     keyed(newD).forEach((k, i) => {
