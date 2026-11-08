@@ -83,8 +83,9 @@ def build(p):
     c = np.where(base_ok)[0]
     c = c[np.array([T[i] - FIRST[SYM[i]] >= 90 * 86400 for i in c], bool)]
     if p["tfs"]: c = c[np.array([E3.FAMS[int(FAM[i])].endswith("_" + p["tfs"]) for i in c], bool)]
-    if p.get("flt"):   # round 6: the event's own feature's sign (the bot has it: CFL_FNAMES)
-        fi = E3.FNAMES.index(p["flt"][0]); c = c[(Dd["F"][c, fi] * p["flt"][1]) > 0]
+    for f_ in ([p["flt"]] if p.get("flt") and isinstance(p["flt"][0], str) else (p.get("flt") or [])):   # round 6: the event's own feature (the bot has it: CFL_FNAMES)
+        v_ = Dd["F"][c, E3.FNAMES.index(f_[0])]   # (name, +1/-1): its sign; (name, ">"/"<", x): a bar; "hour"/"dow" too
+        c = c[(v_ * f_[1]) > 0] if len(f_) == 2 else c[(v_ > f_[2]) if f_[1] == ">" else (v_ < f_[2])]
     day = (T[c] // 86400).astype(np.int64)
     if p["famq"]:
         ft = thr_fam(p["q"], p["win"]); th1 = np.array([ft.get((int(FAM[i]), int(d_)), np.inf) for i, d_ in zip(c, day)])
@@ -112,7 +113,7 @@ def build(p):
         sk_, hd_ = p["ex"].get("sk", P_DEP["sk"]), p["ex"].get("hard", P_DEP["hard"])
         st = max(0.002, sk_ * float(DA[i]) / 100)
         out.append({"t0": t0, "t1": int(end), "r": r, "st": st, "sth": st * hd_ / sk_, "mod": "cfl", "sym": Dd["names"][SYM[i]],
-                    "side": -int(SIDE[i]), "e": fill, "stream": None, "bot": bool(BOT[i])})
+                    "side": -int(SIDE[i]), "e": fill, "stream": None, "bot": bool(BOT[i]), "i": int(i)})
         if p.get("xm") == "top":   # the strongest (over the q 0.999 bar of the same window) at 1.5x the risk
             out[-1]["xm"] = 1.5 if SC[i] >= thr(0.999, p["win"]).get(int(T[i] // 86400), np.inf) else 1.0
         elif p.get("xm") == "dr":   # the drought's own (under the main bar) at half the risk
