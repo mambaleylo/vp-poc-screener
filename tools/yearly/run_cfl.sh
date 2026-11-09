@@ -7,8 +7,9 @@ HERE=$(cd "$(dirname "$0")" && pwd); WR="$HERE/../winrate"; ROOT=$(cd "$HERE/../
 export PYTHONPATH="$WR:$WR/../new_ind:$WR/../zones_model:$WR/../neuro_model:$WR/../adaptation" ALLSUF=_clr
 mkdir -p "$OUT"; cd "$WR"
 rm -rf ev3; SECONDS=0
-python3 ../new_ind/ev3_engine.py > "$OUT/cfl_ev3.log" 2>&1
-python3 -c "import sys, types; sys.modules['nx_h'] = types.SimpleNamespace(pain=None); sys.argv = ['fc_red.py']; exec(open('fc_red.py').read())" > "$OUT/cfl_red.log" 2>&1
+step() { local log=$1; shift; "$@" > "$log" 2>&1 || { echo "ОШИБКА шага ($*):"; tail -40 "$log"; exit 1; }; }
+step "$OUT/cfl_ev3.log" python3 ../new_ind/ev3_engine.py
+step "$OUT/cfl_red.log" python3 -c "import sys, types; sys.modules['nx_h'] = types.SimpleNamespace(pain=None); sys.argv = ['fc_red.py']; exec(open('fc_red.py').read())"
 echo "события и метка: ${SECONDS}s"
 set +e
 python3 "$HERE/yearly_cfl.py"; rc=$?
