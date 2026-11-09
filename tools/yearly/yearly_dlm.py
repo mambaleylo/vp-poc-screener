@@ -1,10 +1,11 @@
 """The yearly fallback — ⚡ the 4h streams (wick4h, the shifted wick4h_o2): the deployed recipe (dlm_lab_export.py LABEL=feat — it IS
 the deployed model, RETRAIN.md): LightGBM on the bot's own order features of the train coins' filled orders (the 127's 2 of 3), 10
 seeds x the 28 / 33 features, the stored label R clipped +-1.5, on everything closed 3 days before the data's end; the threshold =
-q 0.99 of the last 12 months' orders scored by the ensemble trained before them (out of sample); the shifted stream's x1.05 (v0.99.766).
+q 0.99 of the last 12 months' orders scored by the ensemble trained before them (out of sample); the shifted stream's x1.05 (v0.99.766);
+the fallback keeps the deployed threshold's quantile level (wick4h's sits a little under 0.99).
 The 2h stream (close2h: its own restored engine) stays — the main way retrains it. Run in tools/winrate after dlm_build.py on the data
 to the year's end (LABSTORE/feat/<stream>). Checks per stream: (A) the deployed ensemble reproduced at its own end (the scores'
-correlation on 600 orders >= 0.95), its threshold within 15%; (B) newer data (>= MIN_DAYS_DLM, 60, after it); (D) not broken —
+correlation on 600 orders >= 0.95), its threshold's level among the out-of-sample scores within 0.95 .. 0.999; (B) newer data (>= MIN_DAYS_DLM, 60, after it); (D) not broken —
 finite, correlation with the old on the last 90 days >= 0.2, the top 1% above the average label, the threshold within x0.5 .. x2.
 Both streams must pass, else nothing is written. -> <out>/vp_dlm_model.json, <out>/dlm_report.json
 usage: YEAR=2027 OUT=dir python3 ../yearly/yearly_dlm.py"""
@@ -47,27 +48,28 @@ for S in out["streams"]:
         return [(X_, lgb.LGBMRegressor(random_state=sd, **pr).fit(D["F"][m][:, :X_], y[m])) for X_ in (28, 33) for sd in range(NS)]
     def score(E, idx):
         return np.mean([m.predict(D["F"][idx][:, :X_]) for X_, m in E], axis=0)
-    def thr_of(end):   # q 0.99 of the last 12 months' orders by the ensemble trained before them
+    def oos(end):   # the last 12 months' orders scored by the ensemble trained before them (out of sample)
         cut = end - 365 * 86400; old = ens(D["tout"] < cut - 3 * 86400); ref = np.flatnonzero((D["t"] >= cut) & (D["tout"] <= end))
-        return float(np.quantile(score(old, ref), 0.99)) * MULT[st], old
+        return score(old, ref)
     # (A) the deployed ensemble reproduced at its own end
     end0 = int(S.get("trained_to") or MJ["trained_to"]) + 3 * 86400
     m0 = D["tout"] <= end0; E0 = ens(D["tout"] < end0 - 3 * 86400)
     smp = np.flatnonzero(m0 & (D["t"] >= end0 - 365 * 86400)); smp = smp[::max(1, len(smp) // 600)][:600]
     a = score(E0, smp); b = TV.model_score(S["models"], D["F"][smp].astype(float)); cor = float(np.corrcoef(a, b)[0, 1])
-    t0r, _ = thr_of(end0); t0d = float(S["thr"])
-    print(f"(A) {st}: воспроизведение на старом конце {time.strftime('%Y-%m-%d', time.gmtime(end0))}: корреляция {cor:.4f} ({len(smp)} заявок); порог бота {t0d:.4f}, пересобранный {t0r:.4f}; {time.time() - t0:.0f}s", flush=True)
-    rep["checks"].setdefault("A", {})[st] = {"corr": round(cor, 4), "thr_deployed": t0d, "thr_rebuilt": t0r}
-    if cor < 0.95 or abs(t0r - t0d) > 0.15 * abs(t0d):
-        done(False, f"{st}: нынешняя модель не воспроизвелась (корреляция {cor:.3f}, порог {t0r:.4f} против {t0d:.4f})")
+    # the deployed threshold's own level among the out-of-sample scores (the recipe says q 0.99; wick4h's 0.4437 of v0.99.759 sits a
+    # little lower — the trees reproduce exactly, its source is not in the notes): the new model's threshold at the same level, so
+    # the fallback never changes how often ⚡ trades on its own
+    s0 = oos(end0); t0d = float(S["thr"]); qe = float(np.mean(s0 < t0d / MULT[st])); t0r = float(np.quantile(s0, 0.99)) * MULT[st]
+    print(f"(A) {st}: воспроизведение на старом конце {time.strftime('%Y-%m-%d', time.gmtime(end0))}: корреляция {cor:.4f} ({len(smp)} заявок); порог бота {t0d:.4f} = квантиль {qe:.4f} честных оценок (рецепт q 0.99 дал бы {t0r:.4f}); {time.time() - t0:.0f}s", flush=True)
+    rep["checks"].setdefault("A", {})[st] = {"corr": round(cor, 4), "thr_deployed": t0d, "q_level": round(qe, 4), "thr_q99": t0r}
+    if cor < 0.95 or not 0.95 <= qe <= 0.999:
+        done(False, f"{st}: нынешняя модель не воспроизвелась (корреляция {cor:.3f}, порог бота на квантиле {qe:.4f})")
     # (B) newer data
-    end1 = int(D["tout"].max())
-    if os.environ.get("CUT_AT"):
-        end1 = int(time.mktime(time.strptime(os.environ["CUT_AT"], "%Y-%m-%d")) - time.timezone)
+    end1 = int(D["tout"].max())   # always the data's end (a rehearsal's CUT_AT is for the models cut a year back; ⚡'s end in September)
     rep["checks"].setdefault("B", {})[st] = {"end": end1, "old_end": end0}
     if end1 - end0 < int(os.environ.get("MIN_DAYS_DLM", "60")) * 86400:
         done(False, f"{st}: нет новых данных (меньше 60 дней после нынешней модели)")
-    E1 = ens(D["tout"] < end1 - 3 * 86400); t1, _ = thr_of(end1)
+    E1 = ens(D["tout"] < end1 - 3 * 86400); t1 = float(np.quantile(oos(end1), qe)) * MULT[st]
     models = [export(m.booster_, [f"f{i}" for i in range(X_)])["trees"] for X_, m in E1]
     # (D) not broken
     w = np.flatnonzero((D["t"] >= end1 - 90 * 86400) & (D["tout"] <= end1))
@@ -79,7 +81,11 @@ for S in out["streams"]:
     rep["checks"].setdefault("D", {})[st] = {"corr_old_new": round(cor2, 4), "top1_lift": round(lift, 4), "finite": fin, "thr_new": t1, "thr_ratio": round(rt, 3)}
     if not (fin and cor2 >= 0.2 and lift > 0 and 0.5 <= rt <= 2.0):
         done(False, f"{st}: новая модель похожа на сломанную (конечные {fin}, корреляция {cor2:.2f}, выигрыш {lift:+.3f}, порог ×{rt:.2f})")
-    S["models"] = models; S["thr"] = round(t1, 6); S["trained_to"] = int(end1 - 3 * 86400)
+    S["models"] = models; S["trained_to"] = int(end1 - 3 * 86400)
+    if "thr_base" in S:   # the shifted stream: the export's threshold and the bot's x1.05 (t_dlm_o2 checks thr == thr_base x 1.05)
+        S["thr_base"] = round(t1 / MULT[st], 6); S["thr"] = round(S["thr_base"] * MULT[st], 6)
+    else:
+        S["thr"] = round(t1, 6)
 out["retrained"] = {"by": "yearly fallback (GitHub Actions)", "t": int(time.time()), "streams": list(MULT)}
 json.dump(out, open(os.path.join(OUT, "vp_dlm_model.json"), "w"), separators=(",", ":"))
 done(True, "потоки 4ч и 4ч со сдвигом переобучены по " + time.strftime("%d.%m.%Y", time.gmtime(end1 - 3 * 86400))
