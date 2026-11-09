@@ -6,6 +6,7 @@ import os, sys, glob, json, shutil, tempfile, importlib.util
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 TMP = tempfile.mkdtemp(prefix="vpbot_")
+import atexit; atexit.register(shutil.rmtree, TMP, True)   # the copy removed when the test ends (306 of them, 60 MB each, once filled the disk)
 shutil.copy(os.path.join(REPO, "vp_poc_screener.py"), TMP)
 for fn in glob.glob(os.path.join(REPO, "vp_*_model.json")) + [os.path.join(REPO, "vp_bt_trades.json"), os.path.join(REPO, ".gitignore")]:
     if os.path.exists(fn):
