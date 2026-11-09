@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.789"
+APP_VERSION = "0.99.790"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28728,7 +28728,9 @@ def api_boot():
     if k != "dlm" and AUTOTRADE_ENABLED_CFL and "cfl" in BN_OTHERS_MODES:   # v0.99.776 — 🔄 Классика's real trades on -> with it too
         k = "bundle_cfl" if k == "bundle" else "bundle_htf_cfl"
     if k not in EXPECT_YEAR: k = k.replace("_cfl", "")
-    if request.args.get("vis") == "visible": _PAGE_SEEN["t"] = time.time()   # v0.99.789 — /happ: is the bot's page back on screen
+    v = request.args.get("vis")   # v0.99.789/790 — /happ: did Happ cover the bot's page, is the page back on screen
+    if v == "visible": _PAGE_SEEN["t"] = time.time()
+    elif v == "went_hidden": _PAGE_SEEN["hid"] = time.time()
     return jsonify({"boot": _PROC_START, "version": APP_VERSION, "expect": dict(EXPECT_YEAR[k], kind=k)})
 
 
@@ -28981,9 +28983,10 @@ BOT_COMMANDS_HELP = ("Команды бота:\n/ping — на связи ли �
                      "/restart — перезапустить\n/status — версия, время работы, зоны и сделки\n"
                      "/happ <ссылка подписки> — обновить подписку в Happ на телефоне бота (потом бот вернёт свою страницу)\n"
                      "/help — эта подсказка")
-_PAGE_SEEN = {"t": 0.0}   # v0.99.789 — when the bot's page last said it is on screen (/api/boot?vis=visible)
+_PAGE_SEEN = {"t": 0.0, "hid": 0.0}   # v0.99.789 — when the bot's page last said it is on screen / went off it (/api/boot?vis=…)
 HAPP_BACK_S = 25          # Happ's time to fetch the subscription before the bot's page comes back over it
 HAPP_SEEN_S = 20          # then: the page must say it is on screen within this
+HAPP_COVER_S = 10         # v0.99.790 — the page on screen before: it must say it went off screen (Happ over it) within this
 
 
 def _happ_am(run, link):
@@ -29028,7 +29031,17 @@ def happ_open(arg, run=None, spawn=None, sleep=None, push=None):
         return f"⚠️ Не получилось открыть ссылку в Happ.\nОтвет Android: {tail}\n\n{fix}"
     page = f"http://127.0.0.1:{int(os.environ.get('VP_PORT', 8080))}/"
 
+    page_on = time.time() - _PAGE_SEEN["t"] < 70   # the page pings every 20 s while on screen
+    t_open = time.time()
+
     def back():
+        if page_on:   # v0.99.790 — the user's test: from the background Android silently drops the launch (am says "Starting")
+            sleep(HAPP_COVER_S)
+            if _PAGE_SEEN["hid"] < t_open:
+                push("⚠️ Happ не открылся: Android не даёт Termux открывать окна из фона — страница бота так и осталась на экране, "
+                     "подписка не обновлена.\nСнять запрет можно только на самом телефоне бота: Настройки → Приложения → Termux → "
+                     "«Поверх других приложений» → разрешить (один раз). До тех пор подписку обновляет сам Happ (его автообновление).")
+                return
         sleep(HAPP_BACK_S)
         t0 = time.time(); ok2, out2 = _happ_am(run, page)
         sleep(HAPP_SEEN_S)
@@ -29038,8 +29051,11 @@ def happ_open(arg, run=None, spawn=None, sleep=None, push=None):
             push("⚠️ Страница бота не вернулась на экран после Happ" + ("" if ok2 else f" (ответ Android: {out2[-300:]})")
                  + f".\n{fix}\nТорговля от этого не зависит — бот работает в Termux.")
     spawn(back)
-    return (f"✅ Ссылка подписки открыта в Happ на телефоне бота — Happ обновляет подписку.\nОтвет Android: {tail}\n\n"
-            f"Через {HAPP_BACK_S} с бот вернёт свою страницу и напишет, получилось ли. Сообщение со ссылкой лучше удалить из чата.")
+    return (f"Ссылка подписки отправлена в Happ на телефоне бота.\nОтвет Android: {tail}\n\n"
+            + (f"Через {HAPP_COVER_S} с бот напишет, открылся ли Happ; если да — через {HAPP_BACK_S} с вернёт свою страницу. "
+               if page_on else f"Через {HAPP_BACK_S} с бот попробует вернуть свою страницу (сейчас её нет на экране — открылся ли Happ, "
+               "бот не узнает). ")
+            + "Сообщение со ссылкой лучше удалить из чата.")
 
 
 def bot_command(txt, msg_t=None):
@@ -51349,7 +51365,10 @@ document.addEventListener('touchend', _ssAutoFullscreen, {capture: true});
 // fullscreen switched it off); the bot hears the page is on screen again (/api/boot?vis=visible)
 let _ssHiddenOn = false, _ssOffFsT = 0;
 document.addEventListener('visibilitychange', async () => {
-  if (document.visibilityState === 'hidden') _ssHiddenOn = _ssActive || (Date.now() - _ssOffFsT < 3000);
+  if (document.visibilityState === 'hidden') {
+    _ssHiddenOn = _ssActive || (Date.now() - _ssOffFsT < 3000);
+    try { fetch('/api/boot?vis=went_hidden', {cache: 'no-store', keepalive: true}).catch(() => {}); } catch (e) {}
+  }
   if (document.visibilityState === 'visible') {
     try { fetch('/api/boot?vis=visible', {cache: 'no-store'}).catch(() => {}); } catch (e) {}
     if (_ssHiddenOn && !_ssActive) { _ssHiddenOn = false; toggleScreensaver(); }
