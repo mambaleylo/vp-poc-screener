@@ -2,8 +2,9 @@
 seeds 0 / 1, on the bot coins' ev3 events from 2021 to the cut, the flipped label of fc_red.py) with the cut as a parameter.
 Run in tools/winrate after ev3_engine.py and fc_red.py on the data to the year's end. Checks (all must hold, else nothing is
 written and the reason is reported):
-  (A) the deployed model reproduced at ITS cut: the scores' correlation on the year after it >= 0.93, the top 0.3% picks shared
-      >= 65% (the recipe's own level: 0.95 / 76%, HANDOFF);
+  (A) the deployed model reproduced at ITS cut: the scores' correlation on the year after it >= 0.90, the top 0.3% picks shared
+      >= 60% (the recipe's own level: 0.948 / 76% here, 0.937 / 73% on GitHub's runner with October's data and newer libraries;
+      a broken recipe — other features / label — lands far lower);
   (B) new data: the new cut at least 300 days after the deployed one;
   (D) sanity (a broken model, not a changed one — see the step): the scores finite, the correlation with the old >= 0.2 (the
       past yearly retrains: 0.37–0.43), the new model's top 1% above its last training year's average label.
@@ -41,9 +42,9 @@ cut0 = int(M0["trained_to"]); te = np.flatnonzero(MASK & BOT & (T >= cut0 + 14 *
 _, f0, n0 = fit(cut0)
 a = f0(F[te]); b = TV.model_score(M0["models"], F[te].astype(float))
 cor = float(np.corrcoef(a, b)[0, 1]); A_, B_ = a > np.quantile(a, 0.997), b > np.quantile(b, 0.997); share = float((A_ & B_).sum() / max(1, B_.sum()))
-rep["checks"]["A"] = {"corr": round(cor, 4), "top03_shared": round(share, 3), "events": int(len(te)), "need": [0.93, 0.65]}
+rep["checks"]["A"] = {"corr": round(cor, 4), "top03_shared": round(share, 3), "events": int(len(te)), "need": [0.90, 0.60]}
 print(f"(A) воспроизведение на старом срезе: корреляция {cor:.4f}, общих в верхних 0.3% {share * 100:.0f}% ({len(te)} событий)", flush=True)
-if not (cor >= 0.93 and share >= 0.65):
+if not (cor >= 0.90 and share >= 0.60):
     done(False, f"нынешняя модель не воспроизвелась (корреляция {cor:.3f}, общих {share * 100:.0f}%) — переобучать рецептом нельзя")
 # (B) new data
 CUT = ts(YEAR) - 14 * 86400; last = int(T.max())

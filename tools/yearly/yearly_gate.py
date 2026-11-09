@@ -22,7 +22,7 @@ def trained(fn):
 
 
 def gate(st, now):
-    g = time.gmtime(now); year = g.tm_year   # the run's year: the data to 31 December of year - 1
+    g = time.gmtime(now); year = int(os.environ.get("YEAR") or g.tm_year)   # the run's year (a manual run may give it): the data to 31 December of year - 1
     need = calendar.timegm((year - 1, 12, 10, 0, 0, 0))   # the recipes cut 14 days before the end: 18 December -> trained
     old = {k: trained(fn) for k, fn in MODELS.items()}
     if all(v >= need for v in old.values()):

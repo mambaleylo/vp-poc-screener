@@ -52,7 +52,7 @@ jobs:
           YEAR="${{ github.event.inputs.year }}"; [ -n "$YEAR" ] || YEAR=$(date -u +%Y)
           echo "year=$YEAR" >> "$GITHUB_OUTPUT"; echo "end=$((YEAR - 1))-12" >> "$GITHUB_OUTPUT"
           git fetch -q origin yearly-status 2>/dev/null && git show origin/yearly-status:status.json > /tmp/status.json 2>/dev/null || echo "{}" > /tmp/status.json
-          set +e; WHY=$(python3 tools/yearly/yearly_gate.py /tmp/status.json); RC=$?; set -e
+          set +e; WHY=$(YEAR=$YEAR python3 tools/yearly/yearly_gate.py /tmp/status.json); RC=$?; set -e
           echo "$WHY"; echo "why=$WHY" >> "$GITHUB_OUTPUT"
           if [ $RC -eq 0 ] || [ "${{ github.event.inputs.force }}" = "true" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; else echo "run=false" >> "$GITHUB_OUTPUT"; fi
   cfl:

@@ -18,9 +18,10 @@ set -e
 cp "$ROOT/vp_cfl_model.json" "$OUT/vp_cfl_model.old.json"; cp "$OUT/vp_cfl_model.json" "$ROOT/vp_cfl_model.json"
 fails=""
 for t in t_cfl_v4 t_cfl_bot t_cfl_flt t_cfl_cd; do
-  out=$(python3 -c "import sys, types; sys.modules['nx_h'] = types.SimpleNamespace(pain=None); sys.argv=['$t.py']; exec(compile(open('$t.py').read(), '$t.py', 'exec'), {'__file__': '$WR/$t.py', '__name__': '__main__'})" 2>&1 | grep -E "^FAIL|ALL OK|FAILED|$t (OK|FAIL)" | tail -3)
+  python3 -c "import sys, types; sys.modules['nx_h'] = types.SimpleNamespace(pain=None); sys.argv=['$t.py']; exec(compile(open('$t.py').read(), '$t.py', 'exec'), {'__file__': '$WR/$t.py', '__name__': '__main__'})" > "$OUT/$t.log" 2>&1 || true
+  out=$(grep -E "^FAIL|ALL OK|FAILED|$t (OK|FAIL)" "$OUT/$t.log" | tail -3)
   echo "$t: $out"
-  echo "$out" | grep -qE "ALL OK|$t OK" && ! echo "$out" | grep -qE "^FAIL|FAILED" || fails="$fails $t"
+  if echo "$out" | grep -qE "ALL OK|$t OK" && ! echo "$out" | grep -qE "^FAIL|FAILED"; then :; else fails="$fails $t"; echo "--- $t, хвост:"; grep -vE "^\[ERR\]|^127\.0|GET /|Warning" "$OUT/$t.log" | tail -25; fi
 done
 cp "$OUT/vp_cfl_model.old.json" "$ROOT/vp_cfl_model.json"   # the checkout's file back: the finish job decides
 python3 - "$OUT/cfl_report.json" "$fails" <<'P'
