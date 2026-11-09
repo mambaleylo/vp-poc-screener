@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.788"
+APP_VERSION = "0.99.789"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28978,7 +28978,46 @@ def bot_zones_text(coin):
 
 BOT_COMMANDS_HELP = ("Команды бота:\n/ping — на связи ли бот (нет ответа — нет связи)\n/zones BTC — все зоны монеты и что с ними\n/update — скачать новую версию с GitHub и перезапустить\n"
                      "/restart — перезапустить\n/status — версия, время работы, зоны и сделки\n"
+                     "/happ — открыть Happ на телефоне бота; /happ <ссылка подписки> — добавить / обновить её в Happ\n"
                      "/help — эта подсказка")
+HAPP_PKG = "com.happproxy"
+
+
+def happ_open(arg, run=None):
+    """v0.99.789 — the user (Tailscale unreachable: the phone's VPN slot is Happ's, its subscription stale): "/happ" brings Happ up on
+    the bot's phone (a launch may refresh the subscription — Happ's "update on start"); "/happ <https://…>" opens happ://add/<url>
+    (the import deeplink VPN panels give), "/happ happ://…" a Happ link as is. Only Happ's own links: never an arbitrary command.
+    The link is not kept or logged (the app's log goes to the public lab export) and is masked in the reply. Android blocks a
+    launch from the background unless Termux may draw over other apps. -> the reply"""
+    import shutil, subprocess
+    run = run or subprocess.run
+    arg = (arg or "").strip()
+    if arg and arg.lower().startswith(("http://", "https://")):
+        link, what = "happ://add/" + arg, "добавить подписку в Happ"
+    elif arg and arg.lower().startswith("happ://"):
+        link, what = arg, "открыть ссылку Happ"
+    elif arg:
+        return "Не понял ссылку. /happ — открыть Happ; /happ https://… — ссылка подписки; /happ happ://… — ссылка Happ."
+    else:
+        link, what = None, "открыть Happ"
+    if not shutil.which("am"):
+        return "⚠️ Команда «am» не найдена — бот запущен не в Termux на Android."
+    cmd = (["am", "start", "-a", "android.intent.action.VIEW", "-d", link] if link
+           else ["am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-p", HAPP_PKG])
+    try:
+        r = run(cmd, capture_output=True, text=True, timeout=25)
+        out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+    except Exception as e:
+        out, r = f"{type(e).__name__}: {e}", None
+    if arg:
+        out = out.replace(arg, "<ссылка>").replace(link or "", "<ссылка>")
+    bad = (r is None or r.returncode != 0 or any(x in out for x in ("Error", "Exception", "not started", "denied", "Permission")))
+    tail = out[-600:] if out else "(Android ничего не ответил)"
+    if bad:
+        return (f"⚠️ Не получилось {what}.\nОтвет Android: {tail}\n\nЕсли Android не даёт открывать окна из фона: на телефоне бота "
+                f"Настройки → Приложения → Termux → «Поверх других приложений» → разрешить (один раз).")
+    return (f"✅ Команда «{what}» отправлена Android.\nОтвет: {tail}\n\nПроверьте через пару минут: подключается ли Tailscale / приходит ли /ping."
+            + ("\nСообщение со ссылкой подписки лучше удалить из чата." if arg.lower().startswith(("http", "happ")) else ""))
 
 
 def bot_command(txt, msg_t=None):
@@ -28994,6 +29033,8 @@ def bot_command(txt, msg_t=None):
         tg_outbox_push(BOT_COMMANDS_HELP)
     elif cmd == "/status":
         tg_outbox_push(bot_status_text())
+    elif cmd == "/happ":   # v0.99.789 — Happ on the bot's phone (its subscription refreshed from afar)
+        tg_outbox_push(happ_open(txt.strip()[len(txt.strip().split()[0]):].strip()))
     elif cmd == "/restart":
         tg_outbox_push(f"🔄 Перезапускаю (v{APP_VERSION})…")
         zones_save()
