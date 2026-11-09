@@ -15,7 +15,7 @@ for k, (nm, fn) in NAMES.items():
     if k not in DONE:
         rows.append((nm, "—", "рецепт ещё не перенесён в запасной вариант — модель прежняя")); continue
     if not os.path.exists(rp):
-        rows.append((nm, "❌", "шаг сломался (нет отчёта) — модель прежняя")); continue
+        rows.append((nm, "❌", "нет отчёта (шаг не запускался или сломался) — модель прежняя")); continue
     r = json.load(open(rp))
     if r.get("ok") and os.path.exists(os.path.join(adir, fn)):
         shutil.copy(os.path.join(adir, fn), os.path.join(ROOT, fn)); acc.append(nm)
