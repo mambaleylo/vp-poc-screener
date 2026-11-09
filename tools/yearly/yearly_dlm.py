@@ -89,4 +89,4 @@ for S in out["streams"]:
 out["retrained"] = {"by": "yearly fallback (GitHub Actions)", "t": int(time.time()), "streams": list(MULT)}
 json.dump(out, open(os.path.join(OUT, "vp_dlm_model.json"), "w"), separators=(",", ":"))
 done(True, "потоки 4ч и 4ч со сдвигом переобучены по " + time.strftime("%d.%m.%Y", time.gmtime(end1 - 3 * 86400))
-     + "; поток 2ч прежний; пороги " + ", ".join(f"{s} {rep['checks']['A'][s]['thr_deployed']:.3f} → {rep['checks']['D'][s]['thr_new']:.3f}" for s in MULT))
+     + "; пороги " + ", ".join(f"{s} {rep['checks']['A'][s]['thr_deployed']:.3f} → {rep['checks']['D'][s]['thr_new']:.3f}" for s in MULT))

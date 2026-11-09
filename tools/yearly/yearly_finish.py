@@ -4,9 +4,10 @@ report (markdown, Russian; its first line — the summary) on stdout. usage: yea
 import os, sys, json, time, shutil
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.join(HERE, "..", "..")
 ARTS, WHY = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
-NAMES = {"cfl": ("🔄 Классика", "vp_cfl_model.json"), "dlm": ("⚡ Лимитки", "vp_dlm_model.json"), "smc": ("🧱 SMC", "vp_smc_model.json"),
-         "htf": ("📏 HTF", "vp_htf_model.json"), "ema": ("📐 EMA", "vp_ema_model.json")}
-DONE = ("cfl", "smc", "htf", "ema", "dlm")   # the models whose recipe the fallback runs (the rest: not moved here yet — they stay)
+NAMES = {"cfl": ("🔄 Классика", "vp_cfl_model.json"), "dlm": ("⚡ Лимитки 4ч", "vp_dlm_model.json"), "smc": ("🧱 SMC", "vp_smc_model.json"),
+         "htf": ("📏 HTF", "vp_htf_model.json"), "ema": ("📐 EMA", "vp_ema_model.json"),
+         "dlm2h": ("⚡ Лимитки 2ч", "vp_dlm_model.json")}   # after "dlm": its file carries the 4h streams of that step when they were accepted
+DONE = ("cfl", "smc", "htf", "ema", "dlm", "dlm2h")   # the models whose recipe the fallback runs (the rest: not moved here yet — they stay)
 rows, acc = [], []
 for k, (nm, fn) in NAMES.items():
     import glob
