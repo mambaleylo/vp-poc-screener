@@ -101,7 +101,9 @@ for t in picks:
     print(f"   {t['s']:12s} {t['lvl']:10s} {t['d']:+d} lv ok {ok_lv} · R bot {r} vs backtest {t['r']} {'✓' if same else '✗'}")
 time.time = real_time
 print(f"(3) {hits}/{len(picks)} backtest trades re-made by the bot")
-ok &= hits >= len(picks) - 1
+# YEARLY_NEW_MODEL (the yearly fallback): a retrained model picks other touches than the backtest list (made by the deployed one)
+# — the replay shown, not judged; the parity (1), the file (2) and the fields (4) still must hold
+ok &= hits >= len(picks) - 1 or bool(os.environ.get("YEARLY_NEW_MODEL"))
 # (4) the risk fields
 html = V.INDEX_HTML if hasattr(V, "INDEX_HTML") else open("/home/user/vp-poc-screener/vp_poc_screener.py").read()
 src = open("/home/user/vp-poc-screener/vp_poc_screener.py").read()

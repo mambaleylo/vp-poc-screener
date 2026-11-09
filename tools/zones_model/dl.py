@@ -5,11 +5,13 @@ COMP RUNE SAND MANA AXS GALA APE CHZ ENJ IMX FTM GRT ALGO XLM VET EOS XTZ THETA 
 1000PEPE 1000SHIB 1000FLOKI 1000BONK WIF ORDI TON JUP PYTH ENA ONDO RNDR RENDER FET AR TAO NOT PENDLE DYDX GMX BLUR JASMY ROSE ZIL 1INCH
 SUSHI YFI LRC ZRX KSM ANKR CELO RSR TRB ENS MASK ARPA STORJ WOO C98 PEOPLE GMT ID MAGIC CFX ACH SSV XAI ALT MANTA STRK DYM BOME ETHFI
 KAS AEVO W BB IO ZK POPCAT NEIRO EIGEN HMSTR CATI TURBO MEW BRETT""".split()
+if os.environ.get("DL_COINS"):   # a file of Binance symbols (e.g. tools/yearly/coins83.txt: the 83 ⚡ coins beyond the 127)
+    COINS = [c[:-4] if c.endswith("USDT") else c for c in open(os.environ["DL_COINS"]).read().split()]
 TF = sys.argv[1] if len(sys.argv) > 1 else "1h"
 OUT = f"data/{TF}"
 os.makedirs(OUT, exist_ok=True)
 END = os.environ.get("END", "2026-09")   # the last month (a month without its monthly archive yet -> its daily files)
-months = [f"{y}-{m:02d}" for y in range(2020, 2027) for m in range(1, 13) if f"{y}-{m:02d}" <= END]
+months = [f"{y}-{m:02d}" for y in range(2020, int(END[:4]) + 1) for m in range(1, 13) if f"{y}-{m:02d}" <= END]
 BD = B.replace("/monthly/", "/daily/")
 def get(sym, mo):
     rows = get1(f"{B}/{sym}/{TF}/{sym}-{TF}-{mo}.zip")
