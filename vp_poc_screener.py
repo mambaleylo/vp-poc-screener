@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.785"
+APP_VERSION = "0.99.786"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -36557,7 +36557,12 @@ def dlm_load():
 def dlm_save():
     try:
         with _dlm_lock:
-            data = json.dumps({"orders": _DLM["orders"][-400:], "trades": _DLM["trades"][-3000:], "scan": _DLM["scan"], "bar_done": _DLM.get("bar_done")})
+            # v0.99.786 — every OPEN order and every one with a real limit on the exchange kept (was: the last 400 only — an
+            # older armed limit fell out of the file, and after a restart the bot no longer knew its own limit on Binance)
+            keep = [o for o in _DLM["orders"] if o["status"] == "OPEN" or (o.get("real") or {}).get("id")]
+            rest = [o for o in _DLM["orders"] if not (o["status"] == "OPEN" or (o.get("real") or {}).get("id"))][-400:]
+            ids = {id(o) for o in keep + rest}
+            data = json.dumps({"orders": [o for o in _DLM["orders"] if id(o) in ids], "trades": _DLM["trades"][-3000:], "scan": _DLM["scan"], "bar_done": _DLM.get("bar_done")})
         tmp = DLM_STATE_FILE + ".tmp"
         with open(tmp, "w") as f:
             f.write(data)
@@ -37812,7 +37817,17 @@ def bno_tick():
     if not recs:
         return
     pos = bnf_positions()
-    gone = [k for k, rec in recs.items() if not pos.get(rec["bsym"]) and time.time() - rec.get("t", 0) > 60]
+    # v0.99.786 — a position dropped as closed only when Binance shows none on two checks in a row (a minute apart): one
+    # empty / partial answer used to take the record AND cancel its stop and take while the position lived on — a bot
+    # position left without a stop and without a record (the user: TURBO, HOME "позиция без стопа ... без записи бота")
+    miss = [k for k, rec in recs.items() if not pos.get(rec["bsym"]) and time.time() - rec.get("t", 0) > 60]
+    gone = [k for k in miss if recs[k].get("miss_t") and time.time() - recs[k]["miss_t"] >= 50]
+    with _bno_lock:
+        for k, rec in _BNO["pos"].items():
+            if k in miss and k not in gone:
+                rec.setdefault("miss_t", int(time.time()))
+            elif k not in miss:
+                rec.pop("miss_t", None)
     for k in gone:
         try:
             _bno_cancel(recs[k])
@@ -38225,11 +38240,25 @@ def bn_pos_by_bot(bsym, s, entry_px=None):
              and str(x.get("reduceOnly")).lower() != "true" and str(x.get("closePosition")).lower() != "true"
              and float(x.get("executedQty") or 0) > 0]
     last = max(opens, key=lambda x: int(x.get("updateTime") or x.get("time") or 0), default=None)
-    ok = bool(last) and str(last.get("clientOrderId") or "").startswith("vp")
+    cid = str((last or {}).get("clientOrderId") or "")
+    ok = bool(last) and cid.startswith("vp")
     if len(who) > 200:
         who.clear()
     who[key] = ok
+    m_ = re.match(r"vp([a-z]+)\d", cid) if ok else None
+    _ADOPT.setdefault("owner", {})[key] = m_.group(1) if m_ else None   # v0.99.786 — which module opened it ("dlm", "cfl", "prv" …)
     return ok
+
+
+def bn_pos_owner(bsym, s, entry_px=None):
+    """v0.99.786 — the module whose order opened this Binance position ("dlm" — a ⚡ limit, "cfl" / "prv" / "smc" / "emw" / "htf"
+    — at the market), None — not the bot's"""
+    key = (bsym, s, round(float(entry_px or 0), 10))
+    if key not in (_ADOPT.get("owner") or {}):   # the bool kept from before the owner was: asked again
+        (_ADOPT.get("who") or {}).pop(key, None)
+    if not bn_pos_by_bot(bsym, s, entry_px):
+        return None
+    return (_ADOPT.get("owner") or {}).get(key)
 
 
 def dlm_adopt_off():
@@ -38395,7 +38424,7 @@ def dlm_bn_adopt(now=None):
                 lines.append(f"{ {'prv': 'P/R', 'smc': '🧱 SMC', 'emw': '📈 EMA', 'htf': '📏 HTF'}[mode] } {sym.replace('_USDT', '')}: позиция подхвачена — стоп и тейк на бирже; "
                              f"выход по времени и по закрытию свечи этот бот по ней не ведёт (их запись на старом телефоне)")
             else:
-                lines.append(f"⚠️ {bsym}: позиция без стопа на бирже и без записи бота — поставьте стоп сами")
+                lines.append(_bn_guard_naked(bsym, sym, scl, info, s, p, dual, now))
     # (3) v0.99.714 — the user: "время жизни ордера заложенное сразу это правильно?" — the limit's GTD ends it on the exchange
     # even with the bot off, but its stop / take (closePosition triggers) stay: on a new phone (no state) nobody cancelled
     # them, and a later position on the coin would be closed by them / its own stop refused (one closePosition trigger a
@@ -38418,6 +38447,52 @@ def dlm_bn_adopt(now=None):
     if changed:
         dlm_save()
     return lines
+
+
+BN_GUARD_ATR = 3.0   # v0.99.786 — the emergency stop of a bot position found without one: 3 ATR(4h) from the entry (⚡'s own)
+_MOD_RU = {"dlm": "⚡", "cfl": "🔄 Классика", "prv": "P/R", "smc": "🧱 SMC", "emw": "📐 EMA", "htf": "📏 HTF"}
+
+
+def _bn_guard_naked(bsym, sym, scl, info, s, p, dual, now):
+    """v0.99.786 — the user: "почему само не может выставить?" (TURBO / HOME: "позиция без стопа на бирже и без записи бота"):
+    a position the bot's own order opened (its client id), with no stop and no record -> the emergency stop BN_GUARD_ATR x the
+    coin's 4h ATR from the entry. A ⚡ one is taken over as a ⚡ trade (its stop, take, 4h close stop and time exit — as any);
+    a market module's (Классика, P/R, SMC, EMA, HTF) gets the stop and a record (the take / the time exit unknown: the user
+    told); the price already through the stop -> closed at the market (what the stop would have done). A manual position is
+    never here (not the bot's). -> the line for the message"""
+    owner = bn_pos_owner(bsym, s, p["entry"]) or "?"
+    entry = p["entry"] / scl
+    a = _dlm_atr_at(sym, now)
+    if not a or not info.get("tick"):
+        return f"⚠️ {bsym}: позиция бота без стопа и без записи — нет свечей для ATR, стоп не поставлен: поставьте сами"
+    if owner == "dlm":
+        o = {"id": f"dlm_{sym}_{s}_guard{int(now)}", "symbol": sym, "side": s, "lv": entry, "atr": a, "score": None, "t0": int(now // 14400 * 14400),
+             "bs": 14400, "st": "wick4h", "until": now + 4 * 14400, "status": "OPEN", "real": None, "adopted": True}
+        real = {"ex": "binance", "bsym": bsym, "scl": scl, "tick": info.get("tick"), "step": info.get("step"), "dual": dual, "risk": None,
+                "lev": None, "filled": abs(p["amt"]), "order": None, "seen": True, "adopted": True, "guard": True}
+        t = _dlm_open_trade(o, int(now // 14400 * 14400), entry, real=real)
+        if not t:
+            return f"⚠️ {bsym}: позиция ⚡ без стопа — запись не создалась, поставьте стоп сами"
+        try:
+            _dlm_bn_exits(t)
+        except BinanceError as e:   # refused (the price through it): the ⚡ tick closes it at the market in 30 s
+            log_error(f"dlm guard stop {bsym}: {e}")
+        sl = t.get("hsl") or t["sl"]
+        return (f"🛡 {bsym}: позиция ⚡ без стопа и без записи — бот поставил стоп {sl:.6g} по правилу ⚡ ({abs(entry - sl) / a:.3g} ATR 4ч от входа {entry:.6g}) "
+                f"и снова ведёт её как сделку ⚡ (тейк, стоп по закрытию 4ч, выход по времени)" + ("" if t["real"].get("sl_id") else " · стоп не принят — закроет по рынку"))
+    slp = (entry - s * BN_GUARD_ATR * a) * scl
+    rec = {"mode": owner if owner in _MOD_RU else "smc", "bsym": bsym, "scl": scl, "side": s, "qty": abs(p["amt"]), "entry": p["entry"], "lev": None,
+           "risk": None, "dual": dual, "tick": info.get("tick"), "step": info.get("step"), "min_qty": info.get("min_qty"), "t": int(now),
+           "adopted": True, "bot_ok": True, "guard": True, "sl_px": slp}
+    note = _bno_ensure_sl(sym, rec, abs(p["amt"]))
+    with _bno_lock:
+        _BNO["pos"][sym] = rec
+    bno_save()
+    if rec.get("closed_nostop"):
+        return f"🛡 {bsym}: позиция {_MOD_RU.get(owner, 'бота')} без стопа — цена уже за аварийным стопом {slp / scl:.6g}, закрыта по рынку"
+    return (f"🛡 {bsym}: позиция {_MOD_RU.get(owner, 'бота')} без стопа и без записи — бот поставил аварийный стоп {slp / scl:.6g} "
+            f"({BN_GUARD_ATR:g} ATR 4ч от входа {entry:.6g})" + (f" · {note}" if note else "")
+            + ". Тейк и выход по времени по ней не ведутся — закройте сами, когда сочтёте нужным")
 
 
 def dlm_real_tick():

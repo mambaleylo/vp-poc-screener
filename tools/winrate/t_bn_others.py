@@ -145,8 +145,9 @@ mk = [c for c in X["calls"] if c[1] == "/fapi/v1/order" and c[2].get("type") == 
 algos = [a for a in X["algos"].values() if a["symbol"] == "AAAUSDT"]
 st = next((a for a in algos if a["type"] == "STOP_MARKET"), {}); tk = next((a for a in algos if a["type"] == "TAKE_PROFIT_MARKET"), {})
 q = float(mk[0][2]["quantity"]) if mk else 0
-res["smc opened on Binance, its 2.5% at the stop"] = (r1["status"] == "OPENED" and not gate and len(mk) == 1 and mk[0][2]["side"] == "BUY"
-                                               and 0.9 * 25 <= q * 0.5 <= 1.001 * 25 and X["mtype"].get("AAAUSDT") == "CROSSED" and X["lev"].get("AAAUSDT", 0) == min(50, V.BN_CROSS_LEV))   # v0.99.758 — the coin's bracket (50x), no ceiling   # v0.99.717 — cross; v0.99.744: the coin's bracket 50x (was 10x); v0.99.746: the ceiling 14x
+RSMC = V.MODULE_RISK_PCT.get("smc") or V.BN_OTHERS_RISK["smc"]   # v0.99.775 — SMC 3.125% (was 2.5%): the bot's own figure
+res["smc opened on Binance, its risk % at the stop"] = (r1["status"] == "OPENED" and not gate and len(mk) == 1 and mk[0][2]["side"] == "BUY"
+                                               and 0.9 * RSMC * 10 <= q * 0.5 <= 1.001 * RSMC * 10 and X["mtype"].get("AAAUSDT") == "CROSSED" and X["lev"].get("AAAUSDT", 0) == min(50, V.BN_CROSS_LEV))   # v0.99.758 — the coin's bracket (50x), no ceiling   # v0.99.717 — cross; v0.99.744: the coin's bracket 50x (was 10x); v0.99.746: the ceiling 14x
 # v0.99.744 — the cross leverage is the coin's bracket at the position's size, within the account's cap
 tb_ = {"AAAUSDT": [(5000.0, 0.01, 50), (25000.0, 0.025, 20)]}
 m14, l14, _ = V.bn_size("LONG", 10.0, 9.5, 50, 0.01, 1000.0, 2.5, "AAAUSDT", tb_, "CROSSED")   # v0.99.746 — the default ceiling 14x
@@ -215,6 +216,9 @@ V._SMC["trades"] = []
 # (6) the exchange's stop closed AAA: the take off, the record dropped
 X["pos"]["AAAUSDT"] = 0.0; V._BNO["pos"]["AAA_USDT"]["t"] -= 120
 V.bno_tick()
+res["one empty check keeps the record and its stop (v0.99.786)"] = "AAA_USDT" in V._BNO["pos"] and any(a["algoStatus"] == "NEW" for a in X["algos"].values() if a["symbol"] == "AAAUSDT")
+V._BNO["pos"]["AAA_USDT"]["miss_t"] -= 61   # the second check a minute later
+V.bno_tick()
 res["cleanup after the stop"] = "AAA_USDT" not in V._BNO["pos"] and all(a["algoStatus"] != "NEW" for a in X["algos"].values() if a["symbol"] == "AAAUSDT")
 # (7) a 1000-coin: Gate PEPE 0.00001 -> Binance 1000PEPE 0.01 (the stop / take x1000)
 V.MODULE_RISK_PCT["smc"] = 1.0
@@ -232,7 +236,7 @@ res["setting in the page"] = 'id="setBnOthers"' in html and "bn_others: document
 # (11) v0.99.700 — the header's yearly expectation: the bundle when on, ⚡ alone when off
 c_ = V.app.test_client(); V.apply_settings({"bn_others": True}); e1 = c_.get("/api/boot").get_json()["expect"]
 V.apply_settings({"bn_others": False}); e0 = c_.get("/api/boot").get_json()["expect"]
-res["header expectation (bundle / ⚡)"] = e1["kind"] == "bundle" and e0["kind"] == "dlm" and e1["p10"] < e1["p50"] < e1["p90"] and 'id="hdrExpect"' in html
+res["header expectation (bundle / ⚡)"] = e1["kind"].startswith("bundle") and e0["kind"] == "dlm" and e1["p10"] < e1["p50"] < e1["p90"] and 'id="hdrExpect"' in html
 print(" · ".join(f"{k} {v}" for k, v in res.items()))
 ok = all(res.values())
 print("ALL OK" if ok else "FAILED"); sys.exit(0 if ok else 1)
