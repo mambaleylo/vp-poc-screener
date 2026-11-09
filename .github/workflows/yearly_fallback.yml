@@ -25,6 +25,9 @@ on:
       cut_at:
         description: "a rehearsal: the cut YYYY-MM-DD (empty: the real one, 14 days before the year)"
         required: false
+      only:
+        description: "only these jobs, comma-separated (cfl, smc_htf, ema, dlm); empty: all"
+        required: false
 permissions:
   contents: write
   issues: write
@@ -57,7 +60,7 @@ jobs:
           if [ $RC -eq 0 ] || [ "${{ github.event.inputs.force }}" = "true" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; else echo "run=false" >> "$GITHUB_OUTPUT"; fi
   cfl:
     needs: gate
-    if: ${{ needs.gate.outputs.run == 'true' }}
+    if: ${{ needs.gate.outputs.run == 'true' && (github.event.inputs.only == '' || github.event.inputs.only == null || contains(github.event.inputs.only, 'cfl')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 330
     env:
@@ -95,7 +98,7 @@ jobs:
           path: /home/user/yearly_out/
   smc_htf:
     needs: gate
-    if: ${{ needs.gate.outputs.run == 'true' }}
+    if: ${{ needs.gate.outputs.run == 'true' && (github.event.inputs.only == '' || github.event.inputs.only == null || contains(github.event.inputs.only, 'smc_htf')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 330
     env:
@@ -129,7 +132,7 @@ jobs:
           path: /home/user/yearly_out/
   ema:
     needs: gate
-    if: ${{ needs.gate.outputs.run == 'true' }}
+    if: ${{ needs.gate.outputs.run == 'true' && (github.event.inputs.only == '' || github.event.inputs.only == null || contains(github.event.inputs.only, 'ema')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 330
     env:
@@ -163,7 +166,7 @@ jobs:
           path: /home/user/yearly_out/
   dlm:
     needs: gate
-    if: ${{ needs.gate.outputs.run == 'true' }}
+    if: ${{ needs.gate.outputs.run == 'true' && (github.event.inputs.only == '' || github.event.inputs.only == null || contains(github.event.inputs.only, 'dlm')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 330
     env:
