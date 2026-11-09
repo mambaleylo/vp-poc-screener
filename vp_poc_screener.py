@@ -28728,6 +28728,7 @@ def api_boot():
     if k != "dlm" and AUTOTRADE_ENABLED_CFL and "cfl" in BN_OTHERS_MODES:   # v0.99.776 — 🔄 Классика's real trades on -> with it too
         k = "bundle_cfl" if k == "bundle" else "bundle_htf_cfl"
     if k not in EXPECT_YEAR: k = k.replace("_cfl", "")
+    if request.args.get("vis") == "visible": _PAGE_SEEN["t"] = time.time()   # v0.99.789 — /happ: is the bot's page back on screen
     return jsonify({"boot": _PROC_START, "version": APP_VERSION, "expect": dict(EXPECT_YEAR[k], kind=k)})
 
 
@@ -28978,46 +28979,67 @@ def bot_zones_text(coin):
 
 BOT_COMMANDS_HELP = ("Команды бота:\n/ping — на связи ли бот (нет ответа — нет связи)\n/zones BTC — все зоны монеты и что с ними\n/update — скачать новую версию с GitHub и перезапустить\n"
                      "/restart — перезапустить\n/status — версия, время работы, зоны и сделки\n"
-                     "/happ — открыть Happ на телефоне бота; /happ <ссылка подписки> — добавить / обновить её в Happ\n"
+                     "/happ <ссылка подписки> — обновить подписку в Happ на телефоне бота (потом бот вернёт свою страницу)\n"
                      "/help — эта подсказка")
-HAPP_PKG = "com.happproxy"
+_PAGE_SEEN = {"t": 0.0}   # v0.99.789 — when the bot's page last said it is on screen (/api/boot?vis=visible)
+HAPP_BACK_S = 25          # Happ's time to fetch the subscription before the bot's page comes back over it
+HAPP_SEEN_S = 20          # then: the page must say it is on screen within this
 
 
-def happ_open(arg, run=None):
-    """v0.99.789 — the user (Tailscale unreachable: the phone's VPN slot is Happ's, its subscription stale): "/happ" brings Happ up on
-    the bot's phone (a launch may refresh the subscription — Happ's "update on start"); "/happ <https://…>" opens happ://add/<url>
-    (the import deeplink VPN panels give), "/happ happ://…" a Happ link as is. Only Happ's own links: never an arbitrary command.
-    The link is not kept or logged (the app's log goes to the public lab export) and is masked in the reply. Android blocks a
-    launch from the background unless Termux may draw over other apps. -> the reply"""
-    import shutil, subprocess
-    run = run or subprocess.run
-    arg = (arg or "").strip()
-    if arg and arg.lower().startswith(("http://", "https://")):
-        link, what = "happ://add/" + arg, "добавить подписку в Happ"
-    elif arg and arg.lower().startswith("happ://"):
-        link, what = arg, "открыть ссылку Happ"
-    elif arg:
-        return "Не понял ссылку. /happ — открыть Happ; /happ https://… — ссылка подписки; /happ happ://… — ссылка Happ."
-    else:
-        link, what = None, "открыть Happ"
-    if not shutil.which("am"):
-        return "⚠️ Команда «am» не найдена — бот запущен не в Termux на Android."
-    cmd = (["am", "start", "-a", "android.intent.action.VIEW", "-d", link] if link
-           else ["am", "start", "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", "-p", HAPP_PKG])
+def _happ_am(run, link):
+    """am start VIEW <link> -> (ok, Android's answer). "brought to the front" is fine: Happ was running, it takes the link."""
     try:
-        r = run(cmd, capture_output=True, text=True, timeout=25)
+        r = run(["am", "start", "-a", "android.intent.action.VIEW", "-d", link], capture_output=True, text=True, timeout=25)
         out = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
     except Exception as e:
-        out, r = f"{type(e).__name__}: {e}", None
-    if arg:
-        out = out.replace(arg, "<ссылка>").replace(link or "", "<ссылка>")
-    bad = (r is None or r.returncode != 0 or any(x in out for x in ("Error", "Exception", "not started", "denied", "Permission")))
-    tail = out[-600:] if out else "(Android ничего не ответил)"
-    if bad:
-        return (f"⚠️ Не получилось {what}.\nОтвет Android: {tail}\n\nЕсли Android не даёт открывать окна из фона: на телефоне бота "
-                f"Настройки → Приложения → Termux → «Поверх других приложений» → разрешить (один раз).")
-    return (f"✅ Команда «{what}» отправлена Android.\nОтвет: {tail}\n\nПроверьте через пару минут: подключается ли Tailscale / приходит ли /ping."
-            + ("\nСообщение со ссылкой подписки лучше удалить из чата." if arg.lower().startswith(("http", "happ")) else ""))
+        return False, f"{type(e).__name__}: {e}"
+    o = out.replace("Activity not started, its current task has been brought to the front", "")
+    bad = r.returncode != 0 or any(x in o for x in ("Error", "Exception", "not started", "denied", "Permission"))
+    return not bad, out
+
+
+def happ_open(arg, run=None, spawn=None, sleep=None, push=None):
+    """v0.99.789 — the user (Tailscale unreachable: the phone's VPN slot is Happ's, its subscription stale), tested on their phone:
+    "/happ <https://…>" opens happ://add/<url> — Happ (running or not) takes the link and refreshes the subscription; "/happ happ://…"
+    a Happ link as is. A launch by package (-p) does not resolve from Termux (it can't see other apps), so there is no bare "/happ".
+    Then the bot's own page is brought back over Happ (the screensaver phone: VIEW http://127.0.0.1:<port>/ — the installed app's
+    link) and the page must say it is on screen; Android may block a launch from the background unless Termux may draw over other
+    apps — said with the fix. Only Happ's own links: never an arbitrary command. The link is never kept or logged (the app's log goes
+    to the public lab export) and is masked in the replies. -> the first reply (the second, about the page, comes later by push)"""
+    import shutil, subprocess, threading
+    run = run or subprocess.run; sleep = sleep or time.sleep; push = push or tg_outbox_push
+    spawn = spawn or (lambda f: threading.Thread(target=f, daemon=True).start())
+    arg = (arg or "").strip()
+    if arg.lower().startswith(("http://", "https://")):
+        link = "happ://add/" + arg
+    elif arg.lower().startswith("happ://"):
+        link = arg
+    else:
+        return ("Напишите ссылку подписки: /happ https://… (или ссылку Happ: /happ happ://…). Бот откроет её в Happ на своём телефоне, "
+                "Happ обновит подписку, потом бот вернёт свою страницу.")
+    if not shutil.which("am"):
+        return "⚠️ Команда «am» не найдена — бот запущен не в Termux на Android."
+    hide = lambda t: t.replace(link, "<ссылка>").replace(arg, "<ссылка>")
+    ok, out = _happ_am(run, link)
+    tail = hide(out)[-500:] or "(Android ничего не ответил)"
+    fix = ("Если Android не даёт открывать окна из фона: на телефоне бота Настройки → Приложения → Termux → «Поверх других приложений» "
+           "→ разрешить (один раз).")
+    if not ok:
+        return f"⚠️ Не получилось открыть ссылку в Happ.\nОтвет Android: {tail}\n\n{fix}"
+    page = f"http://127.0.0.1:{int(os.environ.get('VP_PORT', 8080))}/"
+
+    def back():
+        sleep(HAPP_BACK_S)
+        t0 = time.time(); ok2, out2 = _happ_am(run, page)
+        sleep(HAPP_SEEN_S)
+        if _PAGE_SEEN["t"] >= t0:
+            push("✅ Страница бота снова на экране (скринсейвер вернётся сам).")
+        else:
+            push("⚠️ Страница бота не вернулась на экран после Happ" + ("" if ok2 else f" (ответ Android: {out2[-300:]})")
+                 + f".\n{fix}\nТорговля от этого не зависит — бот работает в Termux.")
+    spawn(back)
+    return (f"✅ Ссылка подписки открыта в Happ на телефоне бота — Happ обновляет подписку.\nОтвет Android: {tail}\n\n"
+            f"Через {HAPP_BACK_S} с бот вернёт свою страницу и напишет, получилось ли. Сообщение со ссылкой лучше удалить из чата.")
 
 
 def bot_command(txt, msg_t=None):
@@ -47083,7 +47105,7 @@ if ('serviceWorker' in navigator) { try { navigator.serviceWorker.register('/sw.
     || (document.getElementById('settingsModal') || {classList: {contains: () => false}}).classList.contains('open');
   async function check() {
     let r;
-    try { r = await (await fetch('/api/boot', {cache: 'no-store'})).json(); } catch (e) { return; }   // still restarting
+    try { r = await (await fetch('/api/boot?vis=' + document.visibilityState, {cache: 'no-store'})).json(); } catch (e) { return; }   // still restarting
     if (boot === null) { boot = r.boot; return; }
     if (r.boot !== boot && !busy()) {
       boot = r.boot;
@@ -51323,14 +51345,22 @@ document.addEventListener('touchend', _ssAutoFullscreen, {capture: true});
   _ssAutoArm();
 })();
 
+// v0.99.789 — the screensaver comes back when the page does (another app — Happ from /happ — covered it: leaving
+// fullscreen switched it off); the bot hears the page is on screen again (/api/boot?vis=visible)
+let _ssHiddenOn = false, _ssOffFsT = 0;
 document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'hidden') _ssHiddenOn = _ssActive || (Date.now() - _ssOffFsT < 3000);
+  if (document.visibilityState === 'visible') {
+    try { fetch('/api/boot?vis=visible', {cache: 'no-store'}).catch(() => {}); } catch (e) {}
+    if (_ssHiddenOn && !_ssActive) { _ssHiddenOn = false; toggleScreensaver(); }
+  }
   if (document.visibilityState === 'visible') _ssAutoArm();   // v0.99.407
   if (_ssActive && document.visibilityState === 'visible' && !_ssWakeLock) {
     try { _ssWakeLock = await navigator.wakeLock.request('screen'); } catch(e) {}
   }
 });
 document.addEventListener('fullscreenchange', () => {
-  if (!document.fullscreenElement && _ssActive) toggleScreensaver();
+  if (!document.fullscreenElement && _ssActive) { _ssOffFsT = Date.now(); toggleScreensaver(); }
 });
 
 </script>
