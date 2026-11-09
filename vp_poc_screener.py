@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.786"
+APP_VERSION = "0.99.787"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3374,7 +3374,7 @@ _LVL_WARN = ("Read timed out", "ReadTimeout", "timed out", "Timeout", "Connectio
              "Failed to establish a new connection", "Max retries", "NameResolution", "RemoteDisconnected", "network error", "нет связи",
              "500 Server Error", "502 ", "503 ", "504 ", "(502)", "(503)", "(504)", "Bad Gateway", "Service Unavailable", "Too Many Requests",
              "TOO_MANY_REQUESTS", "RATE_LIMIT", "429 Client Error", "GitHub не ответил", "JSONDecodeError", "Expecting value", "— skipping",
-             "restored from", "сторож: ")   # v0.99.784 — the watchdog's notes: a warning, not an error
+             "restored from", "сторож: ", "больше не принимает (-4509", "checked again next tick")   # v0.99.784 — the watchdog's notes: a warning, not an error
 
 
 def log_level(text):
@@ -36124,7 +36124,19 @@ def bnf_cancel(bsym, kind, oid):
 
 
 def bnf_order(bsym, oid):
-    return bnf_req("GET", "/fapi/v1/order", {"symbol": bsym, "orderId": oid})
+    """v0.99.787 — Binance answered -2013 "Order does not exist" for a ⚡ limit seconds after placing it and again after its
+    fill (TURBO / HOME, 9 Nov): the bot then took the fill for "cancelled, not filled" and left the position without a record
+    and a stop. A -2013 is asked again in the coin's order history (allOrders from that id); not there either -> the error"""
+    try:
+        return bnf_req("GET", "/fapi/v1/order", {"symbol": bsym, "orderId": oid})
+    except BinanceError as e:
+        if e.code != -2013:
+            raise
+        rows = bnf_req("GET", "/fapi/v1/allOrders", {"symbol": bsym, "orderId": oid, "limit": 10}) or []
+        x = next((r for r in rows if str(r.get("orderId")) == str(oid)), None)
+        if x is None:
+            raise
+        return x
 
 
 def bnf_cond_done(bsym, kind, oid):
@@ -37951,6 +37963,9 @@ def _dlm_bn_pre_exits(o, sl_x):
     level) and the take swapped for its reduce-only limit (_dlm_bn_take_over); a limit cancelled / expired -> both off
     (_dlm_bn_cancel_pre). sl_x — the emergency stop in the exchange's prices"""
     r = o["real"]; s = o["side"]; bsym, scl = r["bsym"], r["scl"]
+    if _BNF.get("pre_off"):   # v0.99.787 — Binance takes no stop before the position (-4509): not asked each limit
+        r["pre_sl_err"] = r["pre_tp_err"] = "Binance: стоп до позиции не принимает (-4509)"
+        return
     st = _dlm_stream(o.get("st") or "wick4h") or ((_DLM.get("model") or {}).get("rule") or {})
     tk = float(st.get("far_take_atr") or st.get("take_atr", 1.0))
     for key, kind, trig in (("pre_sl", "STOP_MARKET", bn_fmt(sl_x, r["tick"], up=(s < 0))),
@@ -37958,8 +37973,14 @@ def _dlm_bn_pre_exits(o, sl_x):
         try:
             r[key] = list(bnf_place_cond(bsym, s, kind, trig, r.get("dual"))); r[key + "_px"] = trig
         except BinanceError as e:
-            log_error(f"binance {kind} with the limit {bsym}: {e}")
             r[key + "_err"] = str(e)[:120]
+            if e.code == -4509:   # v0.99.787 — since 9 Nov: a closePosition trigger only with an open position
+                if not _BNF.get("pre_off"):
+                    _BNF["pre_off"] = int(time.time())
+                    log_error("binance: стоп вместе с лимиткой Binance больше не принимает (-4509, только при открытой позиции) — "
+                              "лимитки ⚡ идут без него; стоп ставится сразу при исполнении, а исполненная при выключенном боте — когда бот вернётся")
+                return
+            log_error(f"binance {kind} with the limit {bsym}: {e}")
 
 
 def _dlm_bn_cancel_pre(r, keep_sl=False):
@@ -38087,8 +38108,12 @@ def dlm_bn_tick(orders, trades):
             try:
                 x = bnf_order(r["bsym"], r["id"])
                 filled = float(x.get("executedQty") or 0)
-            except BinanceError:
-                pass
+            except BinanceError as e:   # v0.99.787 — unknown after the cancel: maybe filled ("unknown order" = gone) — decided next tick
+                log_error(f"dlm binance order {o['symbol']} after the cancel: {e} — checked again next tick")
+                continue
+            if x.get("status") not in ("FILLED", "CANCELED", "EXPIRED", "REJECTED", "EXPIRED_IN_MATCH"):   # v0.99.787 — a stale "NEW"
+                log_error(f"dlm binance order {o['symbol']} after the cancel: still {x.get('status')} — checked again next tick")
+                continue
             done = True
         if not done:
             continue
@@ -38236,7 +38261,9 @@ def bn_pos_by_bot(bsym, s, entry_px=None):
         return who[key]
     rows = bnf_req("GET", "/fapi/v1/allOrders", {"symbol": bsym, "limit": 100}) or []
     want = "BUY" if s > 0 else "SELL"
-    opens = [x for x in rows if x.get("status") in ("FILLED", "PARTIALLY_FILLED") and x.get("side") == want
+    # v0.99.787 — any status with a filled part: a ⚡ GTD limit filled in part and then expired by the exchange is "EXPIRED"
+    # (MOVE, 9 Nov: taken for a manual position and skipped silently — no stop, no word)
+    opens = [x for x in rows if x.get("side") == want
              and str(x.get("reduceOnly")).lower() != "true" and str(x.get("closePosition")).lower() != "true"
              and float(x.get("executedQty") or 0) > 0]
     last = max(opens, key=lambda x: int(x.get("updateTime") or x.get("time") or 0), default=None)
