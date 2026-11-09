@@ -37,3 +37,4 @@ vp_backup_last.json
 vp_backup_last.json.tmp
 vp_report_state.json
 vp_report_state.json.tmp
+vp_bt_trades.json.*.new

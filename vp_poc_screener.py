@@ -65,7 +65,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.787"
+APP_VERSION = "0.99.788"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -32573,9 +32573,15 @@ def model_refresh_once():
 BT_TRADES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_bt_trades.json")
 BT_TRADES_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/main/vp_bt_trades.json"
 _bt_cache = {"d": None, "t": 0}
+_bt_dl_lock = threading.Lock()   # v0.99.788 — one download at a time (the bot's start: the modules, the watchdog, the report asked at once)
 
 
 def bt_trades(need=None):
+    with _bt_dl_lock:
+        return _bt_trades_get(need)
+
+
+def _bt_trades_get(need=None):
     """v0.99.637 — the research's backtest trades shown in the tabs (📈 breakout, P/R): the file next to the bot,
     fetched from the repo when missing or a day old. v0.99.733: `need` — a module's list missing from the file (a copy
     fetched before the list was published) refetches it, at most once in 10 min"""
@@ -32592,7 +32598,7 @@ def bt_trades(need=None):
             r = requests.get(BT_TRADES_URL, params={"nocache": int(time.time())}, timeout=60)
             r.raise_for_status()
             d = r.json()
-            tmp = BT_TRADES_FILE + ".new"
+            tmp = f"{BT_TRADES_FILE}.{os.getpid()}.{threading.get_ident()}.new"   # v0.99.788 — its own name: two writers never share one
             with open(tmp, "w") as f:
                 json.dump(d, f, separators=(",", ":"))
             os.replace(tmp, BT_TRADES_FILE)
