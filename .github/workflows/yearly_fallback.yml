@@ -127,8 +127,42 @@ jobs:
         with:
           name: smc_htf
           path: /home/user/yearly_out/
+  ema:
+    needs: gate
+    if: ${{ needs.gate.outputs.run == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      YEAR: ${{ needs.gate.outputs.year }}
+      END: ${{ needs.gate.outputs.end }}
+      CUT_AT: ${{ github.event.inputs.cut_at }}
+      OUT: /home/user/yearly_out
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Libraries
+        run: |
+          pip install -q numpy pandas pyarrow scipy lightgbm numba scikit-learn flask requests playwright
+          python3 -m playwright install --with-deps chromium > /dev/null
+          sudo mkdir -p /opt/pw-browsers && sudo ln -sf "$(find ~/.cache/ms-playwright -type f -name chrome -path '*chrome-linux*' | head -1)" /opt/pw-browsers/chromium
+      - name: The lab's paths
+        run: |
+          sudo mkdir -p /home/user && sudo chown "$USER" /home/user
+          ln -s "$GITHUB_WORKSPACE" /home/user/vp-poc-screener
+          [ -n "$CUT_AT" ] && echo "MIN_DAYS_EMA=20" >> "$GITHUB_ENV" || true
+      - name: 📐 EMA — the candles, the touches, the recipe, the checks, the bot's test
+        run: bash tools/yearly/run_ema.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ema
+          path: /home/user/yearly_out/
   finish:
-    needs: [gate, cfl, smc_htf]
+    needs: [gate, cfl, smc_htf, ema]
     if: ${{ always() && needs.gate.outputs.run == 'true' }}
     runs-on: ubuntu-latest
     steps:
