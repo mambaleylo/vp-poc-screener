@@ -14,6 +14,7 @@ set +e; python3 "$HERE/yearly_ema.py"; rc=$?; set -e
 [ $rc -eq 0 ] || exit 0
 cp "$ROOT/vp_ema_model.json" "$OUT/vp_ema_model.old.json"; cp "$OUT/vp_ema_model.json" "$ROOT/vp_ema_model.json"
 cd "$WR"; export PYTHONPATH="$WR:$R/new_ind:$R/zones_model:$R/neuro_model:$R/adaptation"
+[ -e "$WR/data/1h" ] || { mkdir -p "$WR/data"; ln -s "$EM/data/1h" "$WR/data/1h"; }   # t_emx_v13's candles (common.load: data/1h next to winrate, else lab-store — not cloned in this job)
 YEARLY_NEW_MODEL=1 python3 -c "import sys, types; sys.modules['nx_h'] = types.SimpleNamespace(pain=None); sys.argv=['t_emx_v13.py']; exec(compile(open('$EM/t_emx_v13.py').read(), 't_emx_v13.py', 'exec'), {'__file__': '$EM/t_emx_v13.py', '__name__': '__main__'})" > "$OUT/t_emx_v13.log" 2>&1 || true
 cp "$OUT/vp_ema_model.old.json" "$ROOT/vp_ema_model.json"
 out=$(grep -E "^FAIL|t_emx_v13 (OK|FAIL)" "$OUT/t_emx_v13.log" | tail -3); echo "t_emx_v13: $out"
