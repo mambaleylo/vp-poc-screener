@@ -192,7 +192,7 @@ jobs:
           sudo mkdir -p /home/user && sudo chown "$USER" /home/user
           ln -s "$GITHUB_WORKSPACE" /home/user/vp-poc-screener
           git clone -q --depth 1 -b lab-store "https://github.com/${{ github.repository }}" "$LABSTORE"
-          [ -n "$CUT_AT" ] && echo "MIN_DAYS_DLM=20" >> "$GITHUB_ENV" || true
+          [ -n "$CUT_AT" ] && { echo "MIN_DAYS_DLM=20"; echo "MIN_DAYS=200"; } >> "$GITHUB_ENV" || true
           cd tools/yearly && python3 extend_data.py | tail -4
       - name: ⚡ the 4h streams — the features, the recipe, the checks, the bot's tests
         run: bash tools/yearly/run_dlm.sh
