@@ -232,7 +232,7 @@ def run(sym):
                 rows.append({"t": int(cs[j]["time"]), "j": j, "tf": tf, "n": n, "side": side, "lv": lv, "f": f,
                              "lab": labels(O, H, L, C, j, side, fill, f["datr"])})
     os.makedirs(OUT, exist_ok=True)
-    pickle.dump(rows, open(fn, "wb"))
+    pickle.dump(rows, open(fn + ".tmp", "wb")); os.replace(fn + ".tmp", fn)   # atomic: a run cut off (a full disk) left truncated files that later runs skipped
     return sym, len(rows), round(time.time() - t0)
 
 if __name__ == "__main__":

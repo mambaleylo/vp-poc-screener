@@ -11,8 +11,8 @@ def chk(nm, c):
     print(("OK  " if c else "FAIL") + " " + nm); ok &= bool(c)
 vp.HTF_MODEL_FILE = "/home/user/vp-poc-screener/vp_htf_model.json"; vp._HTF["model"] = None
 m = vp.htf_model()
-chk("модель: досягаемость 2.5, модели и пороги прежние", m and float(m["rule"]["reach_datr"]) == 2.5 and abs(float(m["thr_o"]) - 0.6777573532639909) < 1e-9
-    and abs(float(m["thr_n"]) - 1.0733757545199634) < 1e-9)
+chk("модель: досягаемость 2.5, модели и пороги прежние" + (" (запасное переобучение: пороги новые)" if os.environ.get("YEARLY_NEW_MODEL") else ""), m and float(m["rule"]["reach_datr"]) == 2.5
+    and ((abs(float(m["thr_o"]) - 0.6777573532639909) < 1e-9 and abs(float(m["thr_n"]) - 1.0733757545199634) < 1e-9) or bool(os.environ.get("YEARLY_NEW_MODEL"))))
 # 2) the arm filter on a level 2 dATR away
 H1 = {}
 def load(sym):

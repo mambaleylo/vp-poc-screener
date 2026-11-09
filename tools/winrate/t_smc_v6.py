@@ -12,7 +12,7 @@ def chk(nm, c):
     print(("OK  " if c else "FAIL") + " " + nm); ok &= bool(c)
 vp.SMC_MODEL_FILE = "/home/user/vp-poc-screener/vp_smc_model.json"; vp._SMC["model"] = None
 m = vp.smc_model()
-chk("модель: ver 4, тейк 4R, порог прежний", m and m["ver"] == 4 and float(m["rule"]["take_r"]) == 4.0 and abs(float(m["thr"]) - 0.709599) < 1e-9)
+chk("модель: ver 4, тейк 4R, порог прежний" + (" (запасное переобучение: порог новый)" if os.environ.get("YEARLY_NEW_MODEL") else ""), m and m["ver"] == 4 and float(m["rule"]["take_r"]) == 4.0 and (abs(float(m["thr"]) - 0.709599) < 1e-9 or bool(os.environ.get("YEARLY_NEW_MODEL"))))
 H1 = {}
 def load(sym):
     if sym not in H1:

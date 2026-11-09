@@ -13,7 +13,7 @@ step "$OUT/smc_dl127.log" env END=$END python3 "$R/zones_model/dl.py" 1h
 step "$OUT/smc_dl83.log" env END=$END DL_COINS="$HERE/coins83.txt" python3 "$R/zones_model/dl.py" 1h
 step "$OUT/smc_fill.log" python3 "$R/zones_model/fill_gaps.py" data/1h
 echo "свечи 210 монет с 2020: $(ls data/1h | wc -l) файлов, ${SECONDS}s"
-export LV_D1H="$WORK/c/data/1h" LV_OUT="$WORK/lv2" LVDIR="$WORK/lv2"
+export LV_D1H="$WORK/c/data/1h" LV_OUT="$WORK/lv2" LVDIR="$WORK/lv2" CANDLES="$WORK/c/data/1h"   # CANDLES: t_smc_v6 / t_htf_v3
 cd "$WR"
 step "$OUT/smc_lv.log" python3 "$R/new_ind/lv_engine.py" $(python3 -c "import json;s=json.load(open('lv/split.json'));print(' '.join(s['bot']+s['chk']))")
 echo "события уровней: ${SECONDS}s"
