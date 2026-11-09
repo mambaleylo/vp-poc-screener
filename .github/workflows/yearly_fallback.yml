@@ -74,7 +74,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Libraries
-        run: pip install -q numpy lightgbm numba scikit-learn flask requests playwright
+        run: pip install -q numpy pandas scipy lightgbm numba scikit-learn flask requests playwright
       - name: The lab's paths and data (lab-store + the months to the year's end)
         run: |
           sudo mkdir -p /home/user && sudo chown "$USER" /home/user
