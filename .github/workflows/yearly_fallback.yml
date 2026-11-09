@@ -1,0 +1,126 @@
+# The yearly retrain's FALLBACK (the user: "запасной вариант — сразу, если основной не срабатывает"). The main way is the
+# claude.ai task in the chat on 5 January, 11:47 Moscow (RETRAIN.md): it marks "started" on the branch yearly-status first and
+# "prepared" when the new models wait for the user's «да». This runs on 5 January 1.5 h later and daily to the 15th: the gate
+# (tools/yearly/yearly_gate.py) starts it only when the main way never started, or started and prepared nothing in 24 h. Each
+# model then goes through its recipe with strict checks (its deployed model reproduced, a new year of data, a sanity check, the
+# bot's tests with the new file); an accepted one goes into main (the bot takes it within a day and says so in Telegram), a
+# refused one stays as it was; an issue tells what happened. Models not moved here yet: they stay (the report says so).
+name: Yearly retrain fallback
+on:
+  schedule:
+    - cron: "17 10 5-15 1 *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "run even if the gate says no (a test run)"
+        type: boolean
+        default: false
+      apply:
+        description: "put accepted models into main"
+        type: boolean
+        default: false
+      year:
+        description: "the run's year (the data to 31 December of the year before); empty: this year"
+        required: false
+      cut_at:
+        description: "a rehearsal: the cut YYYY-MM-DD (empty: the real one, 14 days before the year)"
+        required: false
+permissions:
+  contents: write
+  issues: write
+concurrency:
+  group: yearly-fallback
+  cancel-in-progress: false
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.g.outputs.run }}
+      why: ${{ steps.g.outputs.why }}
+      year: ${{ steps.g.outputs.year }}
+      end: ${{ steps.g.outputs.end }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: The gate
+        id: g
+        run: |
+          YEAR="${{ github.event.inputs.year }}"; [ -n "$YEAR" ] || YEAR=$(date -u +%Y)
+          echo "year=$YEAR" >> "$GITHUB_OUTPUT"; echo "end=$((YEAR - 1))-12" >> "$GITHUB_OUTPUT"
+          git fetch -q origin yearly-status 2>/dev/null && git show origin/yearly-status:status.json > /tmp/status.json 2>/dev/null || echo "{}" > /tmp/status.json
+          set +e; WHY=$(python3 tools/yearly/yearly_gate.py /tmp/status.json); RC=$?; set -e
+          echo "$WHY"; echo "why=$WHY" >> "$GITHUB_OUTPUT"
+          if [ $RC -eq 0 ] || [ "${{ github.event.inputs.force }}" = "true" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; else echo "run=false" >> "$GITHUB_OUTPUT"; fi
+  cfl:
+    needs: gate
+    if: ${{ needs.gate.outputs.run == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      LABSTORE: /home/user/vp-lab-store
+      YEAR: ${{ needs.gate.outputs.year }}
+      END: ${{ needs.gate.outputs.end }}
+      CUT_AT: ${{ github.event.inputs.cut_at }}
+      OUT: /home/user/yearly_out
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Libraries
+        run: pip install -q numpy lightgbm numba scikit-learn flask requests playwright
+      - name: The lab's paths and data (lab-store + the months to the year's end)
+        run: |
+          sudo mkdir -p /home/user && sudo chown "$USER" /home/user
+          ln -s "$GITHUB_WORKSPACE" /home/user/vp-poc-screener
+          git clone -q --depth 1 -b lab-store "https://github.com/${{ github.repository }}" "$LABSTORE"
+          [ -n "$CUT_AT" ] && echo "MIN_DAYS=200" >> "$GITHUB_ENV" || true
+          cd tools/yearly && python3 extend_data.py | tail -4
+      - name: 🔄 Классика — the recipe, the checks, the bot's tests
+        run: bash tools/yearly/run_cfl.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cfl
+          path: /home/user/yearly_out/
+  finish:
+    needs: [gate, cfl]
+    if: ${{ always() && needs.gate.outputs.run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/arts
+      - name: The report, the accepted models
+        id: rep
+        run: |
+          python3 tools/yearly/yearly_finish.py /tmp/arts "${{ needs.gate.outputs.why }}" > /tmp/report.md
+          cat /tmp/report.md
+      - name: Into main
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.apply == 'true' }}
+        run: |
+          git config user.name "github-actions[bot]"; git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A vp_*_model.json tools/yearly/YEARLY_LOG.md
+          git commit -q -m "Yearly retrain fallback ${{ needs.gate.outputs.year }}: $(head -1 /tmp/report.md)" || true
+          for i in 1 2 3; do git pull -q --rebase origin main && git push -q origin HEAD:main && break; sleep 10; done
+          GIT_NAME="github-actions[bot]" GIT_EMAIL="41898282+github-actions[bot]@users.noreply.github.com" bash tools/yearly/yearly_mark.sh fallback "${{ needs.gate.outputs.year }}"
+      - name: Tell the user
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.apply == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --title "Годовое переобучение (запасной вариант) ${{ needs.gate.outputs.year }}: $(head -1 /tmp/report.md)" --body "$(cat /tmp/report.md)
+
+          Запуск: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
