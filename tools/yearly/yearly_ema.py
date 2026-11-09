@@ -42,9 +42,7 @@ print(f"(A) воспроизведение на старом конце: кор�
 if cor < 0.95 or abs(thr0r - thr0) > 0.15 * abs(thr0):
     done(False, f"нынешняя модель не воспроизвелась (корреляция {cor:.3f}, порог {thr0r:.4f} против {thr0:.4f})")
 # (B) newer data (EMA's model is the latest of the yearly ones: September 2026; the year's end adds ~3 months)
-end1 = int(T.max())
-if os.environ.get("CUT_AT"):
-    end1 = int(time.mktime(time.strptime(os.environ["CUT_AT"], "%Y-%m-%d")) - time.timezone)
+end1 = int(T.max())   # always the data's end (a rehearsal's CUT_AT is for the models cut a year back; EMA's ends in September)
 rep["checks"]["B"] = {"end": end1, "old_end": end0}
 print(f"(B) последнее касание {time.strftime('%Y-%m-%d', time.gmtime(end1))}, было {time.strftime('%Y-%m-%d', time.gmtime(end0))}", flush=True)
 if end1 - end0 < int(os.environ.get("MIN_DAYS_EMA", "60")) * 86400:
