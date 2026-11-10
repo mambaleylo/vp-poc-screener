@@ -144,7 +144,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.791"
+APP_VERSION = "0.99.792"
 
 # v0.99.791 — the bundle's state files (the user: "проверку на стабильность и сохранение данных, живучесть при перезапусках"; the
 # check — tools/winrate/t_state_safe.py — broke every one of them three ways): (1) the modules save from several threads (⚡: its
@@ -29252,6 +29252,7 @@ def bot_zones_text(coin):
 
 BOT_COMMANDS_HELP = ("Команды бота:\n/ping — на связи ли бот (нет ответа — нет связи)\n/zones BTC — все зоны монеты и что с ними\n/update — скачать новую версию с GitHub и перезапустить\n"
                      "/restart — перезапустить\n/status — версия, время работы, зоны и сделки\n"
+                     "/orders — сколько сейчас лимиток P/R, лимиток на бирже и активных сделок\n"
                      "/happ <ссылка подписки> — обновить подписку в Happ на телефоне бота (потом бот вернёт свою страницу)\n"
                      "/help — эта подсказка")
 _PAGE_SEEN = {"t": 0.0, "hid": 0.0}   # v0.99.789 — when the bot's page last said it is on screen / went off it (/api/boot?vis=…)
@@ -29329,6 +29330,36 @@ def happ_open(arg, run=None, spawn=None, sleep=None, push=None):
             + "Сообщение со ссылкой лучше удалить из чата.")
 
 
+def bot_orders_text(now=None):
+    """v0.99.792 — the user: "команду показывающую количество лимиток в p/r, лимиток, выставленных на бирже и количество сделок
+    активных": from the bot's own records (no request to the exchange — answers at once, also with Binance out of reach)"""
+    now = now or time.time()
+    with _prx_lock:
+        pr = [t for t in _PRX["trades"] if t["status"] == "PENDING" and not t.get("rt") and t.get("lv") and now < t["hour"] + int(t.get("wait") or 3) * 3600]
+    with _dlm_lock:
+        live = [o for o in _DLM["orders"] if o["status"] == "OPEN" and (o.get("real") or {}).get("id")]
+        wait = [o for o in _DLM["orders"] if o["status"] == "OPEN" and o.get("real") is None and now < o["until"] and int(o.get("bs") or 900) != 900]
+        dlm_real = [t for t in _DLM["trades"] if t["status"] == "OPEN" and t.get("real")]
+        dlm_virt = [t for t in _DLM["trades"] if t["status"] == "OPEN" and not t.get("real")]
+    with _bno_lock:
+        oth = [r.get("mode") for r in _BNO["pos"].values()]
+    virt = len(dlm_virt)
+    for st_, lk in ((_PRX, _prx_lock), (_EMX, _emx_lock), (_SMC, _smc_lock), (_HTF, _htf_lock), (_CFL, _cfl_lock)):
+        with lk:
+            virt += sum(1 for t in st_["trades"] if t["status"] == "OPEN" and not t.get("real"))
+    names = [("prv", "P/R"), ("smc", "🧱 SMC"), ("emw", "📐 EMA"), ("htf", "📏 HTF"), ("cfl", "🔄 Классика")]
+    parts = ([f"⚡ {len(dlm_real)}"] if dlm_real else []) + [f"{nm} {oth.count(k)}" for k, nm in names if oth.count(k)]
+    n_real = len(dlm_real) + len(oth)
+    side = lambda xs: f"лонг {sum(1 for x in xs if x['side'] > 0)}, шорт {sum(1 for x in xs if x['side'] < 0)}"
+    loaded = all(x.get("loaded") for x in (_DLM, _PRX, _BNO))
+    return ("📋 Сейчас" + ("" if loaded else " (бот только что запущен — записи ещё читаются, цифры неполные)") + ":\n"
+            f"• Лимитки P/R (ждут цену): {len(pr)}" + (f" — {side(pr)}" if pr else "") + "\n"
+            f"• Лимитки ⚡ на бирже: {len(live)}" + (f" — {side(live)}" if live else "") + f"; ещё ждут подхода цены: {len(wait)}\n"
+            f"• Активные сделки на бирже: {n_real}" + (f" — {', '.join(parts)}" if parts else "") + "\n"
+            f"• Виртуальные сделки (без денег): {virt}\n"
+            "По записям бота; биржа не опрашивалась.")
+
+
 def bot_command(txt, msg_t=None):
     """v0.99.458 — commands from the user's own chat (TELEGRAM_CHAT_ID only).
     A fixed list — never an arbitrary shell command."""
@@ -29342,6 +29373,8 @@ def bot_command(txt, msg_t=None):
         tg_outbox_push(BOT_COMMANDS_HELP)
     elif cmd == "/status":
         tg_outbox_push(bot_status_text())
+    elif cmd in ("/orders", "/count"):   # v0.99.792 — the limits and the open trades, counted
+        tg_outbox_push(bot_orders_text())
     elif cmd == "/happ":   # v0.99.789 — Happ on the bot's phone (its subscription refreshed from afar)
         tg_outbox_push(happ_open(txt.strip()[len(txt.strip().split()[0]):].strip()))
     elif cmd == "/restart":
@@ -36289,7 +36322,9 @@ def bnf_req(method, path, params=None, signed=True, base=BNF_BASE, timeout=15):
     try:
         r = requests.request(method, base + path + ("?" + qs if qs else ""), headers={"X-MBX-APIKEY": key} if key else {}, timeout=timeout)
     except Exception as e:
-        raise BinanceError(None, f"нет связи: {e}")
+        err = BinanceError(None, f"нет связи: {e}")
+        err.net = True   # v0.99.792 — no answer at all: the request may or may not have reached Binance
+        raise err
     try:
         j = r.json()
     except ValueError:
@@ -36301,6 +36336,29 @@ def bnf_req(method, path, params=None, signed=True, base=BNF_BASE, timeout=15):
             _BNF["synced"] = 0.0   # the clock is off: synced again on the next call
         raise BinanceError(code, msg, r.status_code)
     return j
+
+
+# v0.99.792 — the user: "А что на счёт проблем с сетью" -> "1 и 2 пункт надо сделать". An error that says nothing about the
+# order itself — no connection, a timeout, Binance busy / its "status unknown" — is not a refusal: the thing is tried again.
+BNF_TRANSIENT_CODES = (-1000, -1001, -1003, -1006, -1007, -1008, -1016)
+
+
+def bnf_transient(e):
+    if isinstance(e, BinanceError):
+        return bool(getattr(e, "net", False) or (e.code is None and e.status in (408, 429, 500, 502, 503, 504)) or e.code in BNF_TRANSIENT_CODES)
+    return isinstance(e, RETRYABLE_NETWORK_EXCEPTIONS)
+
+
+def bnf_order_by_cid(bsym, cid):
+    """the order with this client id, or None when Binance knows none (its history asked too: a fresh order can be "unknown"
+    for seconds — v0.99.787); a connection error is raised"""
+    try:
+        return bnf_req("GET", "/fapi/v1/order", {"symbol": bsym, "origClientOrderId": cid})
+    except BinanceError as e:
+        if e.code != -2013:
+            raise
+    rows = bnf_req("GET", "/fapi/v1/allOrders", {"symbol": bsym, "limit": 50}) or []
+    return next((r for r in rows if str(r.get("clientOrderId")) == str(cid)), None)
 
 
 def bnf_err_ru(e):
@@ -37168,16 +37226,19 @@ def dlm_osc_mult(sym, side, now=None):
     return 1.0
 
 
-def dlm_scan(t_bar, st, cu=False):
+def dlm_scan(t_bar, st, cu=False, only=None):
     """at the close of a bar of the stream's chart (4h / 2h) that started at t_bar - its bar: the coins' limits of the
     stream scored by its models; the ones above its threshold become orders alive for its next 4 bars — one per coin &
     side a bar; another stream's order of the coin & side may stand too (the first to fill is the trade, the other one
     goes — dlm4_export4.py's pool). v0.99.691: an order is made even while a trade of the coin & side is open — as in
     the research, the coin being busy counts when the price reaches the order (an order of a trade that closed by then
-    trades; the audit's replay of this code over 2026 found 5% of the backtest's trades missing for that)"""
+    trades; the audit's replay of this code over 2026 found 5% of the backtest's trades missing for that).
+    v0.99.792 — only: these coins alone (a re-scan); -> the coins whose bar could not be read (no connection, the bar
+    not out yet): dlm_rescan_add() scans them again later"""
     m = dlm_model()
     if not m:
-        return
+        return []
+    missed = []
     rule = m.get("rule") or {}
     bs, tf, off = int(st["bar_sec"]), st["tf"], _dlm_off(st)
     nb = 3000 if bs >= 14400 else 4500   # ≥ ~375 days: the daily EMA50 settled (the research's from the coin's whole history)
@@ -37185,11 +37246,12 @@ def dlm_scan(t_bar, st, cu=False):
     thr = float(st["thr"])
     src = {"binance": 0, "gate": 0}
     new, coins, cands, best = [], 0, 0, []
-    for sym in dlm_coins():
+    for sym in (dlm_coins() if only is None else [c for c in dlm_coins() if c in only]):
         heartbeat("dlm_loop")
         try:
             bars = _dlm_chart(sym, st, nb, t_bar)
             if not bars or bars[-1]["time"] != t_bar - bs:
+                missed.append(sym)
                 continue   # the bar just closed is missing
             src["binance" if bars[-1].get("bn") else "gate"] += 1
             cs = dlm_candidates4(_dlm_shift(bars, off), bb, streams=[st], dmin=float(rule.get("depth_min", 0.3)), dmax=float(rule.get("depth_max", 6.0)),
@@ -37208,6 +37270,7 @@ def dlm_scan(t_bar, st, cu=False):
                             "atr": a, "score": round(sc, 4), "bs": bs, "st": st["name"], "t0": t_bar, "until": t_bar + int(st.get("alive_bars", 4)) * bs,
                             "px": bars[-1]["close"], "status": "OPEN", "real": None, **({"cu": True, "from_cu": True} if cu else {}), **({"off": off} if off else {})})
         except Exception as e:
+            missed.append(sym)
             log_error(f"dlm scan {sym} {tf}: {e}")
     new.sort(key=lambda o: -o["score"])
     best.sort(key=lambda x: -x[0])
@@ -37220,13 +37283,110 @@ def dlm_scan(t_bar, st, cu=False):
         prev = (sc_all.get("by") or {}).get(st["name"]) or {}
         if int(prev.get("bar") or 0) > t_bar:   # v0.99.715 — a catch-up scan of an older bar (its own thread) keeps the newer one shown
             prev = None
+        if only is not None:   # v0.99.792 — a re-scan of the coins missed: added to its bar's numbers, nothing else touched
+            b_ = (sc_all.get("by") or {}).get(st["name"])
+            if b_ and int(b_.get("bar") or 0) == t_bar:
+                b_ = dict(b_, coins=int(b_.get("coins") or 0) + coins, cands=int(b_.get("cands") or 0) + cands, orders=int(b_.get("orders") or 0) + len(new),
+                          rescan=int(b_.get("rescan") or 0) + coins)
+                sc_all["by"] = dict(sc_all["by"], **{st["name"]: b_})
+                if int(sc_all.get("bar") or 0) == t_bar:
+                    sc_all["coins"] = max(int(sc_all.get("coins") or 0), b_["coins"])
+            prev = None
         if prev is not None:
             sc_all.update({"t": int(time.time()), "bar": max(t_bar, int(sc_all.get("bar") or 0)), "coins": coins, "src": src})
             sc_all.setdefault("by", {})[st["name"]] = {"t": int(time.time()), "bar": t_bar, "coins": coins, "cands": cands, "orders": len(new), "near": near}
-        sc_all["near"] = sorted([x for v in sc_all["by"].values() for x in v.get("near") or []], key=lambda x: -x["pct"])[:8]
+        sc_all["near"] = sorted([x for v in (sc_all.get("by") or {}).values() for x in v.get("near") or []], key=lambda x: -x["pct"])[:8]
         _DLM["scan"] = sc_all
     # v0.99.705 — no Telegram for the new orders (the user: "набор лимиток для меня бесполезен"): only a filled one (_dlm_fill_msg)
     dlm_save()   # v0.99.691 — the real limits: _dlm_arm (dlm_real_tick) places them as the price comes
+    return missed
+
+
+# v0.99.792 — the user: "1 и 2 пункт надо сделать". A coin whose just-closed bar could not be read at the scan (no connection, a
+# timeout, Binance late with the bar) was skipped without a word, and a scan that could not run in the bar's first 10 minutes was
+# dropped: that bar's orders (alive 4 bars) appeared only after a restart's catch-up. Now the missed coins (None — the whole
+# scan) are scanned again later — DLM_RESCAN_SEC after the scan, while the bar's orders would still be alive — the catch-up's
+# way: an order the price reached meanwhile is settled as a virtual trade, never a real limit on a signal already traded.
+DLM_RESCAN_SEC = (120, 300, 600, 1200, 1800, 3600, 3600, 3600)
+
+
+def dlm_rescan_add(st, t_bar, syms, now=None):
+    now = now or time.time()
+    if syms is not None and not syms:
+        return
+    with _dlm_lock:
+        jobs = _DLM.setdefault("rescan", [])
+        jobs[:] = [j for j in jobs if not (j["st"] == st["name"] and j["bar"] == t_bar)]
+        jobs.append({"st": st["name"], "bar": int(t_bar), "syms": None if syms is None else sorted(set(syms)), "n": 0, "t": now + DLM_RESCAN_SEC[0],
+                     "until": t_bar + int(st.get("alive_bars", 4)) * int(st["bar_sec"])})
+
+
+def _dlm_cu_check():
+    """the catch-up's / a re-scan's new orders (bars above 1h) checked at once on the closed 1h candles: not reached since
+    the bar -> armed like any other; reached meanwhile -> stays for the loop's settle (the virtual trade)"""
+    with _dlm_lock:
+        fresh = [o for o in _DLM["orders"] if o.get("cu") and not o.get("cu_chk") and int(o.get("bs") or 900) > 3600]
+    for o in fresh:
+        o["cu_chk"] = True
+        try:
+            h = _dlm_hit(o, time.time())
+        except Exception as e:
+            log_error(f"dlm catch-up check {o['symbol']}: {e}")
+            h = None
+        if h is False:
+            o.pop("cu", None)
+
+
+def dlm_rescan_run(now=None):
+    """the re-scans that are due -> the orders added"""
+    now = now or time.time(); added = 0
+    with _dlm_lock:
+        jobs = [j for j in _DLM.get("rescan") or [] if j["t"] <= now]
+    for j in jobs:
+        st = _dlm_stream(j["st"]); left = j["syms"]; n0 = 0
+        if st is None or now >= j["until"]:
+            left = []
+        else:
+            with _dlm_lock:
+                n0 = len(_DLM["orders"])
+            try:
+                left = dlm_scan(j["bar"], st, cu=True, only=None if j["syms"] is None else set(j["syms"]))
+                if j["syms"] is None and len(left) > len(dlm_coins()) // 2:
+                    left = None   # the whole scan failed again (no data at all)
+            except Exception as e:
+                log_error(f"dlm rescan {j['st']} {j['bar']}: {e}")
+            _dlm_cu_check()
+            with _dlm_lock:
+                added += max(0, len(_DLM["orders"]) - n0)
+        with _dlm_lock:
+            j["n"] += 1; j["syms"] = None if left is None else sorted(set(left))
+            if (left is not None and not left) or j["n"] >= len(DLM_RESCAN_SEC) or now + DLM_RESCAN_SEC[min(j["n"], len(DLM_RESCAN_SEC) - 1)] >= j["until"]:
+                _DLM["rescan"] = [x for x in _DLM.get("rescan") or [] if x is not j]
+            else:
+                j["t"] = time.time() + DLM_RESCAN_SEC[j["n"]]
+    if added:
+        _DLM["cu_settle"] = True   # the loop settles the ones reached meanwhile, then the rest may be armed
+    return added
+
+
+def dlm_rescan_tick(now=None):
+    """from the loop: the due re-scans in their own thread (a whole scan takes minutes on a phone; the fills / exits go on)"""
+    now = now or time.time()
+    with _dlm_lock:
+        due = any(j["t"] <= now for j in _DLM.get("rescan") or [])
+        if not due or _DLM.get("rescan_run"):
+            return False
+        _DLM["rescan_run"] = True
+
+    def run():
+        try:
+            dlm_rescan_run()
+        except Exception as e:
+            log_error(f"dlm rescan: {e}")
+        finally:
+            _DLM["rescan_run"] = False
+    threading.Thread(target=run, daemon=True, name="dlm_rescan").start()
+    return True
 
 
 def _dlm_why_virtual(o, t=None):
@@ -37692,6 +37852,18 @@ def _dlm_arm(now):
                 armed.remove(a)
             dlm_real_place(o)
         except Exception as e:
+            if (o.get("real") or {}).get("id"):   # v0.99.792 — the limit stands (the error came after it): never dropped
+                log_error(f"dlm place {o['symbol']} after the limit: {e}")
+                armed.append(o)
+                continue
+            if bnf_transient(e):   # v0.99.792 — no connection / Binance busy: the order waits and goes on the exchange on the
+                # next pass (was: "no trade" for good — a blink of the network while the price came cost the real trade)
+                o["real"] = None
+                o["hold"] = "нет связи с Binance в момент выставления — лимитка встанет, как только связь вернётся"
+                if now - float(o.get("net_t") or 0) > 60:
+                    o["net_t"] = int(now)
+                    log_error(f"dlm place {o['symbol']}: {e} — again on the next pass")
+                continue
             log_error(f"dlm place {o['symbol']}: {e}")
             o["real"] = {"status": "SKIPPED", "detail": str(e)[:160]}
             continue
@@ -38248,6 +38420,21 @@ def dlm_bn_place(o):
     if not info or not info["ok"]:
         o["real"] = {"status": "SKIPPED", "ex": "binance", "detail": f"{bsym} сейчас не торгуется на Binance"}
         return
+    # v0.99.792 — the order's own client id is kept over the retries: a request whose answer was lost (a timeout) may have
+    # placed the limit — Binance is asked by this id before anything is sent again (first of all: the lost limit may even
+    # have filled), so a retry never makes a second limit
+    if o.get("cid"):
+        x = bnf_order_by_cid(bsym, o["cid"])   # a connection error -> out: the order waits, again on the next pass
+        if x is not None and x.get("status") in ("NEW", "PARTIALLY_FILLED", "FILLED"):
+            c = o.pop("cid_ctx", None) or {}; o.pop("cid", None)
+            o["real"] = {"status": "LIMIT", "ex": "binance", "id": str(x.get("orderId")), "bsym": bsym, "scl": scl, "qty": float(x.get("origQty") or 0),
+                         "price": float(x.get("price") or 0) / scl, "lev": c.get("lev"), "risk": c.get("risk"), "osc": c.get("osc"), "load": c.get("load"),
+                         "dual": bnf_dual(), "tick": info["tick"], "step": info["step"], "tif": x.get("timeInForce"), "margin": c.get("margin"),
+                         "t_place": int(float(x.get("time") or time.time() * 1000) / 1000), "found": True}
+            log_error(f"dlm place {sym}: the limit whose answer was lost stands on Binance ({x.get('status')}) — taken")
+            return
+        if x is not None:   # it stood and is gone (cancelled / expired): a new one under a new id
+            o.pop("cid", None); o.pop("cid_ctx", None)
     if bnf_positions().get(bsym):   # v0.99.715 — waits (the position may close before the price comes), the reason by whose it is
         with _bno_lock:
             m_ = (_BNO["pos"].get(sym) or {}).get("mode")
@@ -38302,13 +38489,26 @@ def dlm_bn_place(o):
                 _BNF["lev_retry"] = False
         raise
     px = bn_fmt(lv, info["tick"], up=(s < 0))
-    base_p = dict(_bnf_side_params(s, False, dual), symbol=bsym, type="LIMIT", quantity=qty, price=px, newClientOrderId=f"vpdlm{int(time.time() * 1000)}")
+    # v0.99.792 — the order's own client id, kept over the retries: a request whose answer was lost (a timeout) may have
+    # placed the limit — asked back by this id before anything is sent again, so a retry never makes a second limit
+    cid = o.get("cid") or f"vpdlm{int(time.time() * 1000)}"
+    o["cid"] = cid; o["cid_ctx"] = {"lev": int(lev), "risk": round(risk / kx, 2), "osc": osc, "load": lm, "margin": mt}
+    base_p = dict(_bnf_side_params(s, False, dual), symbol=bsym, type="LIMIT", quantity=qty, price=px, newClientOrderId=cid)
     gtd = int(max(float(o["until"]), time.time() + 700) * 1000)   # v0.99.708 — Binance takes a GTD at least 10 min ahead
     try:
         r = bnf_req("POST", "/fapi/v1/order", dict(base_p, timeInForce="GTD", goodTillDate=gtd)); tif = "GTD"
     except BinanceError as e:
-        log_error(f"binance GTD limit {bsym}: {e} — GTC")
-        r = bnf_req("POST", "/fapi/v1/order", dict(base_p, timeInForce="GTC")); tif = "GTC"
+        if bnf_transient(e):
+            raise   # the answer lost: o["cid"] stays — the next pass asks Binance whether the limit stands
+        if e.code == -4116:   # "ClientOrderId is duplicated": the lost request did place it
+            r = bnf_order_by_cid(bsym, cid); tif = (r or {}).get("timeInForce") or "GTD"
+            if r is None:
+                raise
+            q = float(r.get("origQty") or q); px = r.get("price") or px
+        else:
+            log_error(f"binance GTD limit {bsym}: {e} — GTC")
+            r = bnf_req("POST", "/fapi/v1/order", dict(base_p, timeInForce="GTC")); tif = "GTC"
+    o.pop("cid", None); o.pop("cid_ctx", None)
     o["real"] = {"status": "LIMIT", "ex": "binance", "id": str(r.get("orderId")), "bsym": bsym, "scl": scl, "qty": q, "price": float(px) / scl,
                  "lev": int(lev), "risk": round(risk / kx, 2), "osc": osc, "load": lm, "dual": dual, "tick": info["tick"], "step": info["step"], "tif": tif,
                  "margin": mt, "t_place": int(time.time())}   # v0.99.717; v0.99.731 — t_place: from when it stood on the exchange
@@ -39070,17 +39270,7 @@ def dlm_catch_up(now=None):
         # v0.99.716 — each catch-up order checked at once on its closed 1h candles: not reached since its bar -> armed like
         # any other right away (was: all of them waited for the whole catch-up — minutes in which a limit could not go
         # on the exchange); reached while the bot was off -> stays for the settle (the virtual trade)
-        with _dlm_lock:
-            fresh = [o for o in _DLM["orders"] if o.get("cu") and not o.get("cu_chk") and int(o.get("bs") or 900) > 3600]
-        for o in fresh:
-            o["cu_chk"] = True
-            try:
-                h = _dlm_hit(o, time.time())
-            except Exception as e:
-                log_error(f"dlm catch-up check {o['symbol']}: {e}")
-                h = None
-            if h is False:
-                o.pop("cu", None)
+        _dlm_cu_check()
         _DLM["catchup"]["done"] += 1
     _DLM["catchup"].update(run=False, end=int(time.time()))
     _DLM["cu_settle"] = True   # v0.99.715 — the loop settles them (its own thread: no two settles at once), then they may be armed
@@ -39125,11 +39315,20 @@ def dlm_loop():
                 if _DLM.get("bar_done") != t_bar and now - t_bar >= 15:   # every 15 min: settle; a stream's bar closed: its scan
                     dlm_settle(now)
                     for st in _dlm_streams(dlm_model()):   # v0.99.689 — 4h and 2h
-                        if (t_bar - _dlm_off(st)) % int(st["bar_sec"]) == 0 and now - t_bar < 600:   # a scan later than 10 min into the bar is stale
+                        if (t_bar - _dlm_off(st)) % int(st["bar_sec"]) != 0 or (_DLM.get("scan_ok") or {}).get(st["name"]) == t_bar:
+                            continue   # v0.99.792 — a stream scanned in this bar is not scanned again when a later one fails
+                        if now - t_bar < 600:   # a scan later than 10 min into the bar is stale
                             # (v0.99.691: from this pass's start — a slow 4h scan, e.g. the first candles after a restart, no longer drops the 2h one)
-                            dlm_scan(t_bar, st)
+                            miss = dlm_scan(t_bar, st)   # an error (no BTC bars: no connection): the whole pass again in 5 s
+                            _DLM.setdefault("scan_ok", {})[st["name"]] = t_bar
+                            dlm_rescan_add(st, t_bar, miss, now)   # v0.99.792 — the coins whose bar could not be read: again later
+                        else:   # v0.99.792 — it could not run in its 10 minutes: the whole scan later, the catch-up's way
+                            _DLM.setdefault("scan_ok", {})[st["name"]] = t_bar   # (not after a start: its catch-up scans this bar)
+                            if float((_DLM.get("catchup") or {}).get("t") or 0) < t_bar:
+                                dlm_rescan_add(st, t_bar, None, now)
                     with _dlm_lock:
                         _DLM["bar_done"] = t_bar
+                dlm_rescan_tick(now)   # v0.99.792
                 if AUTOTRADE_ENABLED_DLM:
                     with live_http():
                         dlm_real_tick()
