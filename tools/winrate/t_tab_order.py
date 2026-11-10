@@ -18,7 +18,7 @@ with sync_playwright() as p:
     assert pg.locator("#prvPanel").is_visible() and not pg.locator("#dlmPanel").is_visible()
     pg.click("#settingsBtn"); pg.wait_for_timeout(1000)
     gs = pg.eval_on_selector_all("#settingsBody > details.settingsGroup", "els => els.map(e => e.querySelector('summary').textContent.trim())")
-    assert gs[:6] == ["⚡ Лимитки 4ч+2ч", "Peak Reversal (Keltner Channel)", "🧱 SMC", "📐 EMA — касания", "🔄 Классика наоборот", "📏 HTF-уровни"], gs
+    assert gs[:6] == ["⚡ Лимитки 4ч+2ч", "P/R — Peak Reversal", "🧱 SMC", "📐 EMA — касания", "🔄 Классика наоборот", "📏 HTF-уровни"], gs
     pg.screenshot(path="ui_settings_order.png")
     print(tabs); print(gs)
     assert not errs, errs

@@ -44011,8 +44011,8 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
     --neg:#bf4136; --neg-bg:rgba(191,65,54,.10); --neg-line:rgba(191,65,54,.32);
     --warn:#8f620b; --warn-bg:rgba(143,98,11,.11); --warn-line:rgba(143,98,11,.34);
     --money:#86610d; --money-bg:rgba(134,97,13,.10); --money-line:rgba(134,97,13,.30);
-    --neuro:#6f55b8; --snr:#12788a; --prv:#b3602a; --lsw:#b2475a; --msnr:#2f7f9e;
-    --m-dlm:#8f6a08; --m-smc:#7a6a57; --m-ema:#2f7f9e; --m-cfl:#a8662a; --m-htf:#55801f; --m-zones:#1c7f52; --m-rbx:#a8662a;
+    --neuro:#6f55b8; --snr:#12788a; --prv:#a4521f; --lsw:#b2475a; --msnr:#256f8b;
+    --m-dlm:#84620a; --m-smc:#74644f; --m-ema:#256f8b; --m-cfl:#96571d; --m-htf:#4a7117; --m-zones:#1c7f52; --m-rbx:#96571d;
     --m-cas:#12788a; --m-rbs:#b4522f; --m-hdg:#6f55b8; --m-warn:#b4522f;
     --ov:70,56,36; --hover:rgba(70,56,36,.06); --on-acc:#ffffff;
   }
@@ -44285,7 +44285,16 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
   .settingRow.subRow2, .settingRow.tree2 { padding-left:44px; background:var(--inset); }
   .settingRow.subRow .label, .settingRow.tree1 .label, .settingRow.tree2 .label { font-size:var(--fs); color:var(--tx); }
   .settingRow.tree1, .settingRow.tree2 { margin-left:0; border-left:none; }
-  .settingsGroup.searchHidden, .settingRow.searchHidden { display:none; }
+  .settingsGroup.searchHidden, .settingRow.searchHidden, .setSection.searchHidden { display:none; }
+  /* v0.99.793 — the settings by meaning: section labels over the groups; a group's title in sentence case; a row's long
+     explanation shows two lines, a tap opens the rest (the list is scanned first, read second) */
+  .setSection { margin:20px 6px 2px; font-size:var(--fs-xs); font-weight:700; letter-spacing:.07em; text-transform:uppercase; color:var(--tx-3); }
+  #settingsSearchWrap + .setSection { margin-top:8px; }
+  .settingsGroup { margin-top:8px; }
+  .settingsGroupTitle { text-transform:none !important; letter-spacing:0 !important; font-size:var(--fs-md) !important; font-weight:600 !important; color:var(--tx) !important; }
+  details[data-warn] > .settingsGroupTitle { color:var(--tx) !important; }
+  .settingRow .sub { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; cursor:pointer; }
+  .settingRow .sub.open { display:block; }
   .switch { position:relative; display:inline-block; width:46px; height:28px; flex-shrink:0; }
   .switch input { opacity:0; width:0; height:0; }
   .switchSlider { position:absolute; cursor:pointer; inset:0; background:var(--ctl-2); border-radius:999px; transition:.15s; }
@@ -44378,7 +44387,7 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
     background:linear-gradient(180deg, var(--gl-a), var(--gl-b));
     box-shadow:inset 0 -1px 0 var(--line);
   }
-  body.glass #settingsSearchWrap { background:transparent; backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px); }
+  body.glass #settingsSearchWrap { background:var(--gl-modal); backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px); margin:0 -12px; padding:10px 12px; }   /* v0.99.793 — nothing shows through under the search */
   body.glass .switchSlider { background:var(--gl-sw); box-shadow:inset 0 1px 2px rgba(0,0,0,.22); }
   body.glass .switchSlider:before { background:linear-gradient(180deg,#fff,#eceae6); box-shadow:0 2px 6px rgba(0,0,0,.30), inset 0 -1px 0 rgba(0,0,0,.08); }
   body.glass input:checked + .switchSlider { background:var(--pos); }
@@ -44547,6 +44556,7 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
     <div id="settingsSearchWrap">
       <input type="text" id="settingsSearch" placeholder="Поиск по настройкам…">
     </div>
+<div class="setSection">Модули связки</div>
     <details class="settingsGroup" style="--mod-color:var(--m-dlm);"><summary class="settingsGroupTitle">⚡ Лимитки 4ч+2ч</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -44555,44 +44565,29 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
         </div>
         <label class="switch"><input type="checkbox" id="setDlm"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow">
+      <div class="settingRow">
         <div>
-          <div class="label">↳ ⚡ Лимитки в Telegram</div>
-          <div class="sub">новые лимитки раз в 4 часа и исполнение реальной (итоги сделок — общим переключателем «Итоги сделок»); по умолчанию выключено</div>
+          <div class="label">Торговля на бирже</div>
+          <div class="sub">реальные сделки этого модуля; выключено — только виртуальный учёт. Тот же переключатель, что в «Торговля на бирже → Какие модули торгуют»</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setTgDlm"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" data-mirror="setAutotradeDlm"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow">
+      <div class="settingRow">
         <div>
-          <div class="label">↳ ⚡ Торговать на Binance</div>
-          <div class="sub">реальные лимитки, стоп и тейк — на Binance USDⓈ-M (модель училась на его свечах), сигналы и виртуальные сделки — тоже по свечам Binance; выключено — на Gate. Ключи и баланс — во вкладке ⚡</div>
+          <div class="label">Уведомления в Telegram</div>
+          <div class="sub">сигналы и сделки этого модуля. Тот же переключатель, что в разделе «Уведомления»</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setDlmBinance"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" data-mirror="setTgDlm"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow">
+      <div class="settingRow">
         <div>
-          <div class="label">↳ 🔄 P/R, 🧱 SMC, 📐 EMA — тоже на Binance</div>
-          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, маржа — по настройке ниже; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто: P/R 3.75%, SMC 3.125%, EMA 3.75%, HTF 2.5%. На истории (честный отбор сделок) ⚡ 4.5% вместе с ними — медиана за год примерно вдвое больше, чем один ⚡, при той же просадке; без ⚡ эти три слабые. Включается вместе с автоторговлей самих модулей</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setBnOthers"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ 💱 Кросс-маржа, плечо — максимум монеты на Binance, общий риск до 100%</div>
-          <div class="sub hintx">новые позиции на Binance — в кросс-марже с наибольшим плечом, которое Binance даёт монете при этом размере позиции (не больше лимита аккаунта; потеря на стопе от плеча не зависит — размер позиции считается от риска, а маржи на позицию нужно меньше), а предел — сам риск: сумма потерь всех открытых позиций и выставленных лимиток ⚡, если все сработают по стопам на бирже, не больше 90% счёта (новая сделка урезается, чтобы в него уложиться). В изолированной марже пределом была маржа: на истории она урезала 31% сделок и отменяла ещё 20% — долгие позиции SMC / P/R / EMA держали её, когда приходили лучшие пачки ⚡. За год со $100: плохой год $1 631 → $2 393, медиана $17 743 → $24 773, последние 12 мес $37 206 → $72 757, просадка та же ~61%. Выключено — как раньше: изолированная, плечо по стопу. Монета, где Binance не даёт сменить режим (на ней позиция или ордер), торгуется по-старому</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setBnCross"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ ⚡ Ещё 83 монеты Binance (210 всего)</div>
+          <div class="label">Ещё 83 монеты Binance (210 всего)</div>
           <div class="sub">монеты с оборотом от 150 млн $ в месяц сверх 127 исследованных: модель их не видела — на них WR 77%, +0.15R на сделку, каждый год в плюсе; сделок почти вдвое больше. На Gate — только те, что там торгуются</div>
         </div>
         <label class="switch"><input type="checkbox" id="setDlmMoreCoins"><span class="switchSlider"></span></label>
       </div>
     </div></details>
-
-    <details class="settingsGroup" style="--mod-color:var(--prv);"><summary class="settingsGroupTitle">Peak Reversal (Keltner Channel)</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--prv);"><summary class="settingsGroupTitle">P/R — Peak Reversal</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Работа (каждый час — 120 монет)</div>
@@ -44600,14 +44595,28 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
         </div>
         <label class="switch"><input type="checkbox" id="setPrv"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow" style="display:none;">
+      <div class="settingRow">
+        <div>
+          <div class="label">Торговля на бирже</div>
+          <div class="sub">реальные сделки этого модуля; выключено — только виртуальный учёт. Тот же переключатель, что в «Торговля на бирже → Какие модули торгуют»</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-mirror="setAutotradePrv"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Уведомления в Telegram</div>
+          <div class="sub">сигналы и сделки этого модуля. Тот же переключатель, что в разделе «Уведомления»</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-mirror="setTelegramPrv"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow" style="display:none;">
         <div>
           <div class="label">↳ Сколько монет держать в топе</div>
           <div class="sub">вселенная — топ 30 по ликвидности; здесь сколько лучших по TEST avg P&L остаются активными (торгуются)</div>
         </div>
         <input type="number" id="setPrvTopN" min="1" max="30" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
-      <div class="settingRow subRow" style="display:none;">
+      <div class="settingRow" style="display:none;">
         <div>
           <div class="label">↳ Сколько монет отображать</div>
           <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, остальные показываются серым как справочные</div>
@@ -44622,7 +44631,6 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
         <label class="switch"><input type="checkbox" id="setPrvSingleBest"><span class="switchSlider"></span></label>
       </div>
     </div></details>
-
     <details class="settingsGroup" style="--mod-color:var(--m-smc);"><summary class="settingsGroupTitle">🧱 SMC</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -44631,15 +44639,21 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
         </div>
         <label class="switch"><input type="checkbox" id="setSmc"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow">
+      <div class="settingRow">
         <div>
-          <div class="label">↳ 🧱 SMC в Telegram</div>
-          <div class="sub">новая сделка и её итог</div>
+          <div class="label">Торговля на бирже</div>
+          <div class="sub">реальные сделки этого модуля; выключено — только виртуальный учёт. Тот же переключатель, что в «Торговля на бирже → Какие модули торгуют»</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setTgSmc"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" data-mirror="setAutotradeSmc"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Уведомления в Telegram</div>
+          <div class="sub">сигналы и сделки этого модуля. Тот же переключатель, что в разделе «Уведомления»</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-mirror="setTgSmc"><span class="switchSlider"></span></label>
       </div>
     </div></details>
-
     <details class="settingsGroup" style="--mod-color:var(--m-ema);"><summary class="settingsGroupTitle">📐 EMA — касания</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -44648,8 +44662,21 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
         </div>
         <label class="switch"><input type="checkbox" id="setEmw"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Торговля на бирже</div>
+          <div class="sub">реальные сделки этого модуля; выключено — только виртуальный учёт. Тот же переключатель, что в «Торговля на бирже → Какие модули торгуют»</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-mirror="setAutotradeEmw"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Уведомления в Telegram</div>
+          <div class="sub">сигналы и сделки этого модуля. Тот же переключатель, что в разделе «Уведомления»</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-mirror="setTelegramEmw"><span class="switchSlider"></span></label>
+      </div>
     </div></details>
-
     <details class="settingsGroup" style="--mod-color:var(--m-cfl);"><summary class="settingsGroupTitle">🔄 Классика наоборот</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -44658,15 +44685,21 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
         </div>
         <label class="switch"><input type="checkbox" id="setCfl"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow">
+      <div class="settingRow">
         <div>
-          <div class="label">↳ 🔄 Классика в Telegram</div>
-          <div class="sub">новая виртуальная сделка (итог — переключателем «Итоги сделок»)</div>
+          <div class="label">Торговля на бирже</div>
+          <div class="sub">реальные сделки этого модуля; выключено — только виртуальный учёт. Тот же переключатель, что в «Торговля на бирже → Какие модули торгуют»</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setTgCfl"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" data-mirror="setAutotradeCfl"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Уведомления в Telegram</div>
+          <div class="sub">сигналы и сделки этого модуля. Тот же переключатель, что в разделе «Уведомления»</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-mirror="setTgCfl"><span class="switchSlider"></span></label>
       </div>
     </div></details>
-
     <details class="settingsGroup" style="--mod-color:var(--m-htf);"><summary class="settingsGroupTitle">📏 HTF-уровни</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -44675,16 +44708,211 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
         </div>
         <label class="switch"><input type="checkbox" id="setHtf"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow">
+      <div class="settingRow">
         <div>
-          <div class="label">↳ 📏 HTF в Telegram</div>
-          <div class="sub">новая сделка и её итог</div>
+          <div class="label">Торговля на бирже</div>
+          <div class="sub">реальные сделки этого модуля; выключено — только виртуальный учёт. Тот же переключатель, что в «Торговля на бирже → Какие модули торгуют»</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setTgHtf"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" data-mirror="setAutotradeHtf"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Уведомления в Telegram</div>
+          <div class="sub">сигналы и сделки этого модуля. Тот же переключатель, что в разделе «Уведомления»</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-mirror="setTgHtf"><span class="switchSlider"></span></label>
       </div>
     </div></details>
-
-    <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">💧 Размер позиции по ликвидности</summary><div class="settingsGroupBody">
+    <div class="setSection">Торговля на бирже</div>
+    <details class="settingsGroup" style="--mod-color:var(--pos);"><summary class="settingsGroupTitle">💱 Биржа и счёт</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">⚡ Лимитки торгуют на Binance</div>
+          <div class="sub">реальные лимитки, стоп и тейк — на Binance USDⓈ-M (модель училась на его свечах), сигналы и виртуальные сделки — тоже по свечам Binance; выключено — на Gate. Ключи и баланс — во вкладке ⚡</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setDlmBinance"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">P/R, SMC, EMA, HTF, Классика — тоже на Binance</div>
+          <div class="sub">реальные сделки этих модулей — на тот же счёт Binance, что и ⚡ (вместо Gate): вход по рынку при касании, стоп и тейк на бирже, маржа — по настройке ниже; на монету одна позиция на весь счёт (есть позиция или лимитка ⚡ — сделки нет). Риск — поле модуля, пусто: P/R 3.75%, SMC 3.125%, EMA 3.75%, HTF 2.5%. На истории (честный отбор сделок) ⚡ 4.5% вместе с ними — медиана за год примерно вдвое больше, чем один ⚡, при той же просадке; без ⚡ эти три слабые. Включается вместе с автоторговлей самих модулей</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setBnOthers"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Кросс-маржа, плечо — максимум монеты на Binance, общий риск до 100%</div>
+          <div class="sub hintx">новые позиции на Binance — в кросс-марже с наибольшим плечом, которое Binance даёт монете при этом размере позиции (не больше лимита аккаунта; потеря на стопе от плеча не зависит — размер позиции считается от риска, а маржи на позицию нужно меньше), а предел — сам риск: сумма потерь всех открытых позиций и выставленных лимиток ⚡, если все сработают по стопам на бирже, не больше 90% счёта (новая сделка урезается, чтобы в него уложиться). В изолированной марже пределом была маржа: на истории она урезала 31% сделок и отменяла ещё 20% — долгие позиции SMC / P/R / EMA держали её, когда приходили лучшие пачки ⚡. За год со $100: плохой год $1 631 → $2 393, медиана $17 743 → $24 773, последние 12 мес $37 206 → $72 757, просадка та же ~61%. Выключено — как раньше: изолированная, плечо по стопу. Монета, где Binance не даёт сменить режим (на ней позиция или ордер), торгуется по-старому</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setBnCross"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Бумажная торговля (dry-run)</div>
+          <div class="sub">без реальных ордеров, только лог того, что было бы сделано — выключи только когда уверен</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeDryRun"><span class="switchSlider"></span></label>
+      </div>
+      <div class="sub hintx" style="padding:8px 14px;">Ключи Binance задаются на вкладке ⚡ Лимитки, в блоке «Биржа». Ниже — ключи Gate.io.</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">API-ключи Gate.io</div>
+          <div class="sub" id="setGateApiSub">проверка...</div>
+        </div>
+      </div>
+      <div class="settingRow" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <input type="text" id="setGateApiKey" placeholder="API Key" style="background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:8px 10px;border-radius:var(--r-sm);font-size:var(--fs);">
+        <input type="password" id="setGateApiSecret" placeholder="API Secret" style="background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:8px 10px;border-radius:var(--r-sm);font-size:var(--fs);">
+        <div style="display:flex;gap:8px;">
+          <button id="saveGateApiBtn" style="flex:1;background:var(--ctl);border:none;color:var(--tx);padding:8px;border-radius:var(--r-sm);font-size:var(--fs);">Сохранить ключи</button>
+          <button id="clearGateApiBtn" style="background:var(--neg-bg);border:none;color:var(--neg);padding:8px 12px;border-radius:var(--r-sm);font-size:var(--fs);">Удалить</button>
+          <button onclick="testGateAccount('')" style="background:var(--line);border:none;color:var(--acc);padding:8px 12px;border-radius:var(--r-sm);font-size:var(--fs);">Проверить</button>
+        </div>
+        <div class="sub" id="acctTest_main"></div>
+      </div>
+      <div class="settingRow" style="flex-direction:column;align-items:stretch;gap:6px;">
+        <div>
+          <div class="label">API-ключи по модулям (суб-аккаунты)</div>
+          <div class="sub">модуль со своими ключами торгует, считает баланс, проверяет позиции и стопы только на своём суб-аккаунте; если его ключи не работают — сделка не откроется (никакого переключения на основной счёт). Нужны права суб-аккаунта на фьючерсы (чтение + торговля).</div>
+        </div>
+        <div id="moduleAcctRows" class="dim">загрузка...</div>
+      </div>
+    </div></details>
+    <details class="settingsGroup" style="--mod-color:var(--neg);" data-warn><summary class="settingsGroupTitle">✅ Какие модули торгуют</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">⚡ Лимитки 4ч+2ч</div>
+          <div class="sub">настоящие лимитки на бирже из вкладки ⚡ (до 20 позиций, с лимитками — до 26, по монете без чужой позиции); исполнилась — стоп триггером и тейк лимиткой «только закрытие», через 5 дней 8 ч бот закрывает остаток. Риск — поле «⚡» выше (пусто = 4%, больше 10% не берётся); не хватает свободной маржи — риск сделки уменьшается</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeDlm"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">P/R — Peak Reversal</div>
+          <div class="sub">вход по рынку в начале часа, стоп 1.5 ATR и тейк 3R сразу на бирже, выход через 48 свечей; риск — поле «P/R» ниже (пусто = 0.5%, не общий %)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradePrv"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">🧱 SMC</div>
+          <div class="sub">реальная сделка по рынку при касании уровня (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 2 дневных ATR и тейк 3R сразу на бирже, выход по закрытию 4ч-свечи за 1 дневным ATR, после +2R стоп на бирже переносится в безубыток (освобождает общий риск для ⚡), через 96 ч бот закрывает сделку. Риск — поле «🧱» выше (пусто = 2.5% на Binance)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeSmc"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow"><!-- v0.99.618 — «EMA — касания» trades again -->
+        <div>
+          <div class="label">📐 EMA — касания</div>
+          <div class="sub">реальная сделка по рынку при касании уровня «на прицеле»: стоп 0.75 дневного хода за EMA, тейк 4 риска, закрытие через 3 дня. Риск — поле «EMA» (пусто — 0.5%, не общий %)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeEmw"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">🔄 Классика наоборот</div>
+          <div class="sub">реальный лонг по рынку сразу после закрытия 4ч-свечи (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 1.5 дневного ATR и тейк 4R сразу на бирже, выход по закрытию дневной свечи (00:00 UTC) за 0.75 ATR, через 96 ч бот закрывает сделку; цена ушла от открытия часа дальше 1R или бот был выключен — без сделки. Риск — поле «🔄» выше (пусто = 1% на Binance). Пока модуль новый — по умолчанию выключено</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeCfl"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">📏 HTF-уровни</div>
+          <div class="sub">реальный лонг по рынку, когда цена прошла уровень на 0.1% (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 3 дневных ATR и тейк 3R сразу на бирже, выход по закрытию дневной свечи (00:00 UTC) за 1 дневным ATR, через 96 ч бот закрывает сделку. Риск — поле «📏» выше (пусто = 2% на Binance)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeHtf"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">🎯 Зоны (скрины из Telegram)</div>
+          <div class="sub">вход, когда цена дошла до линии зоны (какой — выбирает обучение, сначала 1-я), стоп за дальней линией зоны с запасом, тейк — свой % из настроек «Зоны» или обученный; риск — общий или свой «Зоны»</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeZones"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Зоны: движение к зоне</div>
+          <div class="sub">если на скрине зоны только с одной стороны от цены — сразу после поста сделка по ходу движения к ближайшей линии (к поддержкам — шорт, к сопротивлениям — лонг), тейк чуть раньше линии; открывается, только когда по истории постов это в плюсе; стоп — лучший по истории</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeZonesAppr"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Зоны: свои (наш поиск)</div>
+          <div class="sub">реальные сделки по зонам, которые нашёл наш поиск. Выключено — они только отслеживаются виртуально (статистика во вкладке «Зоны»). Включайте, когда наш поиск догонит паблик по совпадениям и результату</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeZonesOwn"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Зоны: 🎯 сильные зоны</div>
+          <div class="sub">реальные сделки по зонам модели, обученной на 6 годах истории 127 монет: лимитки на края зоны, стоп — дневной ход монеты за зоной, тейк — 3 риска. Работает сам по себе, без остальных переключателей зон. Риск — как у зон. Выключено — только виртуальный учёт во вкладке «Зоны»</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeZonesZm"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">🧠 Neuro</div>
+          <div class="sub">вход по рынку в начале часа, стоп и тейк сразу на бирже (стоп 1 ATR, тейк 3R), выход через 48 ч; риск — поле «Neuro» ниже (пусто = 0.5%, не общий %): сделок бывает много одновременно</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeNeuro"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Neuro: только лучшая карточка</div>
+          <div class="sub">вкл — торгуется только первая карточка (лучшая оценка «сумма R ÷ √сделок» на проверке + тесте). Выкл — торгуются монеты, отмеченные галочкой «🤖 торговать»; если отмеченная монета перестала проходить проверку или опустилась в рейтинге — придёт уведомление</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setNeuroSingleBest"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">📈 Пробой диапазона</div>
+          <div class="sub">реальная сделка по рынку после дневного закрытия: стоп 1.5 ATR сразу на бирже, тейка нет — бот закрывает сделку, когда день закроется за 20-дневным минимумом / максимумом. Риск — поле «📈» выше (пусто = 0.5%)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeRbx"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">🌊 Каскад EMA</div>
+          <div class="sub">реальная сделка по рынку в начале часа: стоп за экстремумом 24 свечей и тейк 2R сразу на бирже, через 48 ч бот закрывает сделку. Риск — поле «🌊» выше (пусто = 0.5%)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeCas"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow" style="display:none;">
+        <div>
+          <div class="label">↳ S/R Zones</div>
+          <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча и размера позиции, что и у остальных режимов</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeSnr"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+    <details class="settingsGroup" style="--mod-color:var(--warn);"><summary class="settingsGroupTitle">⚖️ Риск и размер позиции</summary><div class="settingsGroupBody">
+      <div class="settingRow" style="flex-wrap:wrap;">
+        <div style="flex:1 1 100%;">
+          <div class="label">Риск на сделку — у каждого модуля свой</div>
+          <div class="sub">% от счёта, который теряется на стопе (0.1–100). Пустое поле — значение модуля по умолчанию (на Binance, по истории связки): ⚡ 4% · P/R 3.75% · 🧱 SMC 3.125% · EMA 3.75% · 📏 HTF 2.5%; остальные модули — 0.5%. У ⚡ к своему % ещё множители: загрузка (×0.625 / ×1.25), дневной WaveTrend (×1.25, если монета на дневке сильно растянута против сделки) и шорты 2ч-потока ×0.5</div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+          <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro 0.5" title="Нейро: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctSnr" min="0.1" max="100" step="0.5" placeholder="S/R" title="S/R Zones" style="display:none;width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R 3.75" title="Peak Reversal: пусто — 3% на Binance (0.5% на Gate)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctEmw" min="0.1" max="100" step="0.5" placeholder="EMA 3.75" title="EMA — касания: пусто — 2% на Binance (0.5% на Gate)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctZones" min="0.1" max="100" step="0.5" placeholder="Зоны 0.5" title="Зоны: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctZm" min="0.1" max="100" step="0.1" placeholder="🎯 0.5" title="🎯 Сильные зоны: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctRbx" min="0.1" max="100" step="0.1" placeholder="📈 0.5" title="📈 Пробой: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctCas" min="0.1" max="100" step="0.1" placeholder="🌊 0.5" title="🌊 Каскад: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctDlm" min="0.1" max="100" step="0.05" placeholder="⚡ 4" title="⚡ Лимитки 4ч+2ч: пусто — 4% на сделку, до 20 сделок сразу; больше 10% не берётся" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctSmc" min="0.1" max="100" step="0.05" placeholder="🧱 3.125" title="🧱 SMC: пусто — 2.5% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctHtf" min="0.1" max="100" step="0.05" placeholder="📏 2.5" title="📏 HTF-уровни: пусто — 2% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctCfl" min="0.1" max="100" step="0.05" placeholder="🔄 2" title="🔄 Классика наоборот: пусто — 1% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+        </div>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Авто-риск (лучший % для каждой монеты Neuro / P/R; у Зон — один на все, вместе с тейком)</div>
+          <div class="sub">вместо % выше каждая монета Neuro / P/R торгуется со своим риском на сделку — тем, при котором счёт растёт быстрее всего на длинной дистанции (Келли), осторожно: по сделкам теста (их не видел выбор настроек), с пессимистичной поправкой на малую выборку (без деления пополам). Не больше 50%. Бэктест «с $15» считает так же</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutoRisk"><span class="switchSlider"></span></label>
+      </div>
       <div class="settingRow">
         <div>
           <div class="label">Урезать позицию, когда она велика для монеты</div>
@@ -44692,7 +44920,7 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
         </div>
         <label class="switch"><input type="checkbox" id="setLiqEnabled"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow">
+      <div class="settingRow">
         <div>
           <div class="label">↳ Шаги урезания</div>
           <div class="sub hintx">«доля оборота %:наклон» через «/». «5:0» — позиция не больше 5% часового оборота; «2:0.5/4:0.25/8:0» — от 2% каждый лишний $ плана даёт $0.5, от 4% — $0.25, от 8% — ничего. Наклоны от 1 к 0, доли по возрастанию. Пусто — шаги по умолчанию этой версии бота (<span id="liqDefault">4:0.5/8:0.25/12:0</span>).</div>
@@ -44701,6 +44929,182 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
       </div>
       <div id="liqRecent" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">урезанных позиций пока не было</div>
     </div></details>
+    <div class="setSection">Уведомления</div>
+    <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">🔔 Telegram: общее и сделки</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Уведомления в Telegram</div>
+          <div class="sub" id="setTelegramSub">проверка...</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegram"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Итоги сделок (тейк / стоп)</div>
+          <div class="sub">сообщение о каждой закрытой сделке Neuro, P/R и Зон: тейк, стоп или выход по времени, вход → выход, результат в R и % движения, реальная она или виртуальная. Не теряются без сети — придут, когда связь вернётся</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgTradeResults"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳↳ только реальные сделки</div>
+          <div class="sub">присылать итоги только сделок, открытых на бирже (без виртуальных сигналов)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgTradeResultsReal"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+    <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">📣 Сигналы модулей</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">⚡ Лимитки</div>
+          <div class="sub">новые лимитки раз в 4 часа и исполнение реальной (итоги сделок — общим переключателем «Итоги сделок»); по умолчанию выключено</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgDlm"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">P/R — Peak Reversal</div>
+          <div class="sub">новые сигналы Peak Reversal: монета, сторона, стоп и тейк</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramPrv"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">🧱 SMC</div>
+          <div class="sub">новая сделка и её итог</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgSmc"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">📐 EMA — касания</div>
+          <div class="sub">цена на живой недельной / месячной свече дошла до подтверждённой EMA</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramEmw"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">🔄 Классика наоборот</div>
+          <div class="sub">новая виртуальная сделка (итог — переключателем «Итоги сделок»)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgCfl"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">📏 HTF-уровни</div>
+          <div class="sub">новая сделка и её итог</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgHtf"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">🎯 Зоны</div>
+          <div class="sub">распознанный пост, цена дошла до линии, вход, пробой зоны</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramZones"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ 🔎 Наш поиск зон</div>
+          <div class="sub">пока поиск не доказал, что работает (меньше 30 его отработавших зон или средний результат не в плюсе), — в Telegram ничего не шлёт, всё видно во вкладке «Зоны». Потом — только сильные новые зоны (оценка от 0.7) и открытие/закрытие сделок по ним, без касаний и пробоев</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgZonesOwn"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ 🎯 Сильные зоны</div>
+          <div class="sub">новая зона (лимитки, стоп, тейк), налив лимиток и итог сделки; касания и пробои — только во вкладке</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgZonesZm"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">🧠 Neuro</div>
+          <div class="sub">новые сигналы Нейро: монета, сторона, стоп и тейк</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramNeuro"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow" style="display:none;">
+        <div>
+          <div class="label">↳ Сводка бэктеста Neuro</div>
+          <div class="sub">краткая сводка по топ-N монетам после каждого полного цикла бэктеста — по одной строке на монету, например "BTC-45%-RR2" (винрейт и подобранный RR — те же цифры что и на карточке монеты)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramNeuroSummary"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">📈 Пробой диапазона</div>
+          <div class="sub">новая сделка и её итог</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgRbx"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">🚀 Пробой 4ч</div>
+          <div class="sub">новая виртуальная сделка (итог — переключателем «Итоги сделок»)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgRbs"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">🌊 Каскад EMA</div>
+          <div class="sub">новая сделка и её итог</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgCas"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow" style="display:none;">
+        <div>
+          <div class="label">↳ Алерты S/R Zones</div>
+          <div class="sub">новые живые сигналы отскока от зон поддержки/сопротивления</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramSnr"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+    <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">🛠 Сервисные сообщения</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">💰 Совет по выводу прибыли</div>
+          <div class="sub">1-го числа каждого месяца. Тот же переключатель, что в «Деньги и контроль»</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-mirror="setWdEnabled"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">📊 Итоги месяца: план и факт</div>
+          <div class="sub">1-го числа. Тот же переключатель, что в «Деньги и контроль»</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-mirror="setReportEnabled"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">🛡 Сторож</div>
+          <div class="sub">живые сделки хуже бэктеста. Тот же переключатель, что в «Деньги и контроль»</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-mirror="setWatchEnabled"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">💾 Резервная копия</div>
+          <div class="sub">архив раз в сутки. Тот же переключатель, что в «Система»</div>
+        </div>
+        <label class="switch"><input type="checkbox" data-mirror="setBackupEnabled"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Нестабильность сети</div>
+          <div class="sub">разово, когда за 10 минут накопилось 5+ сетевых ошибок (Read timed out / ConnectionError) — не про открытые позиции, только про сбор данных</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramNetwork"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Часовая статистика</div>
+          <div class="sub">сводка винрейта по всем режимам, раз в час</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramHourly"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+    <div class="setSection">Деньги и контроль</div>
     <details class="settingsGroup" style="--mod-color:var(--pos);"><summary class="settingsGroupTitle">💰 Совет по выводу прибыли</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -44709,18 +45113,20 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
         </div>
         <label class="switch"><input type="checkbox" id="setWdEnabled"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow"><div><div class="label">↳ Доля новой прибыли, %</div></div>
+      <div class="settingRow"><div><div class="label">↳ Доля новой прибыли, %</div></div>
         <input type="number" id="setWdPct" min="0" max="100" step="5" placeholder="30" style="width:90px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);"></div>
-      <div class="settingRow subRow"><div><div class="label">↳ Не выводить, пока баланс ниже, $</div></div>
+      <div class="settingRow"><div><div class="label">↳ Не выводить, пока баланс ниже, $</div></div>
         <input type="number" id="setWdMin" min="0" step="500" placeholder="5000" style="width:90px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);"></div>
-      <div class="settingRow subRow"><div><div class="label">↳ Минимум в месяц, $</div></div>
+      <div class="settingRow"><div><div class="label">↳ Минимум в месяц, $</div></div>
         <input type="number" id="setWdFloor" min="0" step="500" placeholder="5000" style="width:90px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);"></div>
-      <div class="settingRow subRow"><div><div class="label">↳ …с баланса от, $</div><div class="sub hintx">0 — без минимума</div></div>
+      <div class="settingRow"><div><div class="label">↳ …с баланса от, $</div><div class="sub hintx">0 — без минимума</div></div>
         <input type="number" id="setWdFloorBal" min="0" step="1000" placeholder="25000" style="width:90px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);"></div>
       <div id="wdStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
+    </div></details>
+    <details class="settingsGroup" style="--mod-color:var(--pos);"><summary class="settingsGroupTitle">📊 Итоги месяца: план и факт</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
-          <div class="label">📊 Итоги месяца: план и факт</div>
+          <div class="label">Итоги месяца в Telegram 1-го числа</div>
           <div class="sub hintx">1-го числа вместе с советом — итоги прошлого месяца: деньги на Binance (сделки, комиссии, фандинг; по модулям) и результат каждого модуля в R против его бэктеста — средний месяц и обычный разброс. Только сообщение, бот ничего не меняет.</div>
         </div>
         <label class="switch"><input type="checkbox" id="setReportEnabled"><span class="switchSlider"></span></label>
@@ -44737,7 +45143,24 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
       </div>
       <div id="watchStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
     </div></details>
-    <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">💾 Резервная копия</summary><div class="settingsGroupBody">
+    <div class="setSection">Система</div>
+    <details class="settingsGroup" style="--mod-color:var(--tx-2);"><summary class="settingsGroupTitle">🔄 Обновление и источник данных</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Автообновление с GitHub</div>
+          <div class="sub">каждые 10 минут бот смотрит, нет ли новой версии; если есть — сам делает /update и перезапускается (сообщение в Telegram)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutoUpdate"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Сигналы по свечам Binance</div>
+          <div class="sub">модели (📐 EMA, P/R, 🧠 Нейро, 🌊 Каскад, 🧱 SMC, 🎯 зоны, 📈 пробой, ⚡ лимитки) учились на свечах Binance — по ним и считаются сигналы; входы, лимитки, стопы и учёт сделок — на Gate. Монета, которой нет на Binance, или Binance не отвечает — свечи Gate</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setResearchBinance"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+    <details class="settingsGroup" style="--mod-color:var(--tx-2);"><summary class="settingsGroupTitle">💾 Резервная копия</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Раз в сутки — архив в Telegram</div>
@@ -44745,7 +45168,7 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
         </div>
         <label class="switch"><input type="checkbox" id="setBackupEnabled"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow"><div><div class="label">↳ Отправить копию сейчас</div></div>
+      <div class="settingRow"><div><div class="label">↳ Отправить копию сейчас</div></div>
         <button type="button" id="backupNowBtn" onclick="backupNow()">Отправить</button></div>
       <div id="backupStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
     </div></details>
@@ -44753,6 +45176,37 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
       <div class="sub hintx" style="padding:4px 2px;">P/R переобучается сама 3-го числа каждого месяца на машине GitHub (GitHub Actions, не зависит от подписки): новая модель попадает в бота, только если прошла все проверки, иначе остаётся старая. Остальные модели — запланированная задача в claude.ai 5 января, в бота — только после вашего «да» (порядок — RETRAIN.md в репозитории). Если модель устарела (задача не запустилась — например, закончилась подписка), бот пишет в Telegram не чаще раза в 3 дня.</div>
       <div id="modelAge" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
     </div></details>
+    <details class="settingsGroup" style="--mod-color:var(--tx-2);"><summary class="settingsGroupTitle">⚙️ Производительность</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="name">Процессы для расчёта бэктестов (Neuro, P/R)</div>
+          <div class="sub">сколько ядер процессора использовать для расчёта (каждый процесс ≈85 МБ памяти). 0 — считать как раньше, в одном процессе. Результаты одинаковые, меняется только скорость и нагрузка</div>
+        </div>
+        <input type="number" id="setCalcWorkers" min="0" max="8" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="name">↳ Процессов при первом прогоне / после «Очистить»</div>
+          <div class="sub">пока у модуля ещё нет ни одного готового бэктеста, расчёт идёт на этом числе ядер (по умолчанию — все), потом снова на числе выше</div>
+        </div>
+        <input type="number" id="setCalcWorkersBoost" min="0" max="8" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="name">Фильтр Neuro в бэктесте P/R</div>
+          <div class="sub">для каждой монеты подбирается одно условие Neuro («убрать X» / «только X») — только по обучающей части; проверочная решает, принять ли его. Принятый фильтр применяется и к живым сигналам (отсеянный сигнал записывается с пометкой 🧪 и не торгуется). Действует со следующего бэктеста</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setNeuroTradeFilter"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Часовая статистика (сбор)</div>
+          <div class="sub">сам сбор часовой статистики винрейта — выключение здесь остановит и подсчёт, и телеграм-алерт ниже, даже если он включён</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setHourlyStats"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+    <div class="setSection">Оформление</div>
     <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">🎨 Оформление</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -44778,140 +45232,8 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
         <label class="switch"><input type="checkbox" id="setAutoSs" onchange="setAutoScreensaver(this.checked)"><span class="switchSlider"></span></label>
       </div>
     </div></details>
-
-    <details class="settingsGroup" style="--mod-color:var(--neuro);"><summary class="settingsGroupTitle">⚙️ Производительность и фильтр Neuro</summary><div class="settingsGroupBody">
-      <div class="settingRow">
-        <div>
-          <div class="name">Фильтр Neuro в бэктесте P/R</div>
-          <div class="sub">для каждой монеты подбирается одно условие Neuro («убрать X» / «только X») — только по обучающей части; проверочная решает, принять ли его. Принятый фильтр применяется и к живым сигналам (отсеянный сигнал записывается с пометкой 🧪 и не торгуется). Действует со следующего бэктеста</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setNeuroTradeFilter"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="name">Процессы для расчёта бэктестов (Neuro, P/R)</div>
-          <div class="sub">сколько ядер процессора использовать для расчёта (каждый процесс ≈85 МБ памяти). 0 — считать как раньше, в одном процессе. Результаты одинаковые, меняется только скорость и нагрузка</div>
-        </div>
-        <input type="number" id="setCalcWorkers" min="0" max="8" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="name">↳ Процессов при первом прогоне / после «Очистить»</div>
-          <div class="sub">пока у модуля ещё нет ни одного готового бэктеста, расчёт идёт на этом числе ядер (по умолчанию — все), потом снова на числе выше</div>
-        </div>
-        <input type="number" id="setCalcWorkersBoost" min="0" max="8" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
-      </div>
-    </div></details>
-
-    <details class="settingsGroup" style="--mod-color:var(--neuro);"><summary class="settingsGroupTitle">🧠 Neuro</summary><div class="settingsGroupBody">
-      
-      <div class="settingRow">
-        <div>
-          <div class="label">Работа (каждый час — 120 монет)</div>
-          <div class="sub">модель, обученная на 6 годах истории 127 монет: в начале каждого часа оценивает только что закрытую свечу по 89 параметрам; выключение останавливает сигналы и учёт сделок</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setNeuro"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow" style="display:none;">
-        <div>
-          <div class="name">Neuro: дополнительные условия (12)</div>
-          <div class="sub">ликвидации, long/short толпы, OI+цена, изменение фандинга, премия к индексу, открытие недели/месяца, хай/лоу прошлого дня, сжатие, серия 5+, сила к BTC, круглые уровни — действует со следующего майнинга; выключите, чтобы сравнить с прежним набором</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setNeuroExtra"><span class="switchSlider"></span></label>
-      </div>
-
-    </div></details>
-
-    <details class="settingsGroup" style="--mod-color:var(--snr);display:none;"><summary class="settingsGroupTitle">S/R Zones (Flux Charts)</summary><div class="settingsGroupBody">
-      <div class="settingRow">
-        <div>
-          <div class="label">Работа (бэктест + живые сигналы)</div>
-          <div class="sub">зоны поддержки/сопротивления по pivot high/low (порт индикатора Flux Charts), отскок от неповреждённого уровня — вход, стоп и тейк подбираются перебором по таймфрейму/pivot/силе/RR с проверкой на train/test</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setSnr"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ Сколько монет держать в топе</div>
-          <div class="sub">бэктест проверяет всю вселенную каждый цикл — здесь только сколько лучших по TEST avg P&L остаются активными (торгуются)</div>
-        </div>
-        <input type="number" id="setSnrTopN" min="1" max="30" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ Сколько монет отображать</div>
-          <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, остальные показываются серым как справочные</div>
-        </div>
-        <input type="number" id="setSnrDisplayN" min="1" max="30" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Автоторговля: только лучшая карточка</div>
-          <div class="sub">торговать только ОДНУ монету — первую карточку (лучший средний R на проверочной части после комиссий). Остальные активные монеты продолжают давать сигналы и уведомления, но автоторговля по ним не открывает сделки</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setSnrSingleBest"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
-
-    <details class="settingsGroup" style="--mod-color:var(--m-cfl);"><summary class="settingsGroupTitle">📈 Пробой диапазона</summary><div class="settingsGroupBody">
-      <div class="settingRow">
-        <div>
-          <div class="label">Работа (день и 12ч — 120 монет)</div>
-          <div class="sub">после закрытия свечи: монета шла в узком коридоре (день — 20 свечей, 12ч — 30) и закрылась за ним по своему тренду (EMA200) — вход; стоп 1.5 ATR, выход по 20-свечному минимуму / максимуму; не больше 6 сделок в одну сторону на каждом графике</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setRbx"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ 📈 Пробой в Telegram</div>
-          <div class="sub">новая сделка и её итог</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTgRbx"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ Четверть на +1R</div>
-          <div class="sub">на +1R закрыть четверть позиции и перенести стоп в безубыток, остаток — по тренду. Винрейт 54% вместо 33%, стопов подряд до 14 вместо 26, рост депозита при той же просадке — как без неё. Действует на новые сделки</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setRbxPart"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
-
-    <details class="settingsGroup" style="--mod-color:var(--m-rbs);"><summary class="settingsGroupTitle">🚀 Пробой 4ч</summary><div class="settingsGroupBody">
-      <div class="settingRow">
-        <div>
-          <div class="label">Работа (4ч — 127 монет, виртуально)</div>
-          <div class="sub">на закрытии каждой 4ч-свечи: пробои узкого коридора по тренду, модель берёт оцененные выше +0.8R (~4 в неделю); вход на открытии следующей свечи, стоп 1.5 ATR, тейк 2R, выход через 48 ч. Пока без реальных сделок</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setRbs"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ 🚀 Пробой 4ч в Telegram</div>
-          <div class="sub">новая виртуальная сделка (итог — переключателем «Итоги сделок»)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTgRbs"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
-
-    <details class="settingsGroup" style="--mod-color:var(--m-cas);"><summary class="settingsGroupTitle">🌊 Каскад EMA</summary><div class="settingsGroupBody">
-      <div class="settingRow">
-        <div>
-          <div class="label">Работа (1ч — 120 монет)</div>
-          <div class="sub">в начале часа: свеча закрылась за всем каскадом EMA 5/10/14/20/28 и модель оценила пробой выше порога — вход; стоп за экстремумом 24 свечей, тейк 2R, выход через 48 ч; не больше 12 сделок в одну сторону</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setCas"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ 🌊 Каскад в Telegram</div>
-          <div class="sub">новая сделка и её итог</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTgCas"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
-
-    <details class="settingsGroup" style="--mod-color:var(--pos);"><summary class="settingsGroupTitle">🎯 Зоны</summary><div class="settingsGroupBody">
+    <div class="setSection">Остальные модули</div>
+    <details class="settingsGroup" style="--mod-color:var(--m-zones);"><summary class="settingsGroupTitle">🎯 Зоны</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Свой тейк, % от входа</div>
@@ -44933,13 +45255,6 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
         </div>
         <label class="switch"><input type="checkbox" id="setZonesOwnScan"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ 🔎 Наш поиск в Telegram</div>
-          <div class="sub">пока поиск не доказал, что работает (меньше 30 его отработавших зон или средний результат не в плюсе), — в Telegram ничего не шлёт, всё видно во вкладке «Зоны». Потом — только сильные новые зоны (оценка от 0.7) и открытие/закрытие сделок по ним, без касаний и пробоев</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTgZonesOwn"><span class="switchSlider"></span></label>
-      </div>
       <div class="settingRow">
         <div>
           <div class="label">🎯 Сильные зоны</div>
@@ -44947,280 +45262,148 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
         </div>
         <label class="switch"><input type="checkbox" id="setZonesZm"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow">
+      <div class="settingRow">
         <div>
-          <div class="label">↳ 🎯 Сильные зоны в Telegram</div>
-          <div class="sub">новая зона (лимитки, стоп, тейк), налив лимиток и итог сделки; касания и пробои — только во вкладке</div>
+          <div class="label">Торговля на бирже</div>
+          <div class="sub">реальные сделки этого модуля; выключено — только виртуальный учёт. Тот же переключатель, что в «Торговля на бирже → Какие модули торгуют»</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setTgZonesZm"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" data-mirror="setAutotradeZones"><span class="switchSlider"></span></label>
       </div>
-    </div></details>
-
-    <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">Telegram</summary><div class="settingsGroupBody">
-      
       <div class="settingRow">
         <div>
           <div class="label">Уведомления в Telegram</div>
-          <div class="sub" id="setTelegramSub">проверка...</div>
+          <div class="sub">сигналы и сделки этого модуля. Тот же переключатель, что в разделе «Уведомления»</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setTelegram"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Алерты Нейро</div>
-          <div class="sub">новые сигналы Нейро: монета, сторона, стоп и тейк</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramNeuro"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow" style="display:none;">
-        <div>
-          <div class="label">↳ Сводка бэктеста Neuro</div>
-          <div class="sub">краткая сводка по топ-N монетам после каждого полного цикла бэктеста — по одной строке на монету, например "BTC-45%-RR2" (винрейт и подобранный RR — те же цифры что и на карточке монеты)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramNeuroSummary"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow" style="display:none;">
-        <div>
-          <div class="label">↳ Алерты S/R Zones</div>
-          <div class="sub">новые живые сигналы отскока от зон поддержки/сопротивления</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramSnr"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Алерты Peak Reversal</div>
-          <div class="sub">новые сигналы Peak Reversal: монета, сторона, стоп и тейк</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramPrv"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Алерты EMA W/M</div>
-          <div class="sub">цена на живой недельной / месячной свече дошла до подтверждённой EMA</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramEmw"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Алерты Зон</div>
-          <div class="sub">распознанный пост, цена дошла до линии, вход, пробой зоны</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramZones"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Итоги сделок (тейк / стоп)</div>
-          <div class="sub">сообщение о каждой закрытой сделке Neuro, P/R и Зон: тейк, стоп или выход по времени, вход → выход, результат в R и % движения, реальная она или виртуальная. Не теряются без сети — придут, когда связь вернётся</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTgTradeResults"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳↳ только реальные сделки</div>
-          <div class="sub">присылать итоги только сделок, открытых на бирже (без виртуальных сигналов)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTgTradeResultsReal"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">Автообновление с GitHub</div>
-          <div class="sub">каждые 10 минут бот смотрит, нет ли новой версии; если есть — сам делает /update и перезапускается (сообщение в Telegram)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutoUpdate"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">Сигналы по свечам Binance</div>
-          <div class="sub">модели (📐 EMA, P/R, 🧠 Нейро, 🌊 Каскад, 🧱 SMC, 🎯 зоны, 📈 пробой, ⚡ лимитки) учились на свечах Binance — по ним и считаются сигналы; входы, лимитки, стопы и учёт сделок — на Gate. Монета, которой нет на Binance, или Binance не отвечает — свечи Gate</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setResearchBinance"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Нестабильность сети</div>
-          <div class="sub">разово, когда за 10 минут накопилось 5+ сетевых ошибок (Read timed out / ConnectionError) — не про открытые позиции, только про сбор данных</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramNetwork"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Часовая статистика (сбор)</div>
-          <div class="sub">сам сбор часовой статистики винрейта — выключение здесь остановит и подсчёт, и телеграм-алерт ниже, даже если он включён</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setHourlyStats"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Часовая статистика</div>
-          <div class="sub">сводка винрейта по всем режимам, раз в час</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramHourly"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" data-mirror="setTelegramZones"><span class="switchSlider"></span></label>
       </div>
     </div></details>
-
-    <details class="settingsGroup" style="--mod-color:var(--neg);" data-warn style="background:rgba(255,112,67,0.05);"><summary class="settingsGroupTitle">Автоторговля</summary><div class="settingsGroupBody">
-      
+    <details class="settingsGroup" style="--mod-color:var(--neuro);"><summary class="settingsGroupTitle">🧠 Neuro</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
-          <div class="label">API-ключи Gate.io</div>
-          <div class="sub" id="setGateApiSub">проверка...</div>
+          <div class="label">Работа (каждый час — 120 монет)</div>
+          <div class="sub">модель, обученная на 6 годах истории 127 монет: в начале каждого часа оценивает только что закрытую свечу по 89 параметрам; выключение останавливает сигналы и учёт сделок</div>
         </div>
-      </div>
-      <div class="settingRow" style="flex-direction:column;align-items:stretch;gap:8px;">
-        <input type="text" id="setGateApiKey" placeholder="API Key" style="background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:8px 10px;border-radius:var(--r-sm);font-size:var(--fs);">
-        <input type="password" id="setGateApiSecret" placeholder="API Secret" style="background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:8px 10px;border-radius:var(--r-sm);font-size:var(--fs);">
-        <div style="display:flex;gap:8px;">
-          <button id="saveGateApiBtn" style="flex:1;background:var(--ctl);border:none;color:var(--tx);padding:8px;border-radius:var(--r-sm);font-size:var(--fs);">Сохранить ключи</button>
-          <button id="clearGateApiBtn" style="background:var(--neg-bg);border:none;color:var(--neg);padding:8px 12px;border-radius:var(--r-sm);font-size:var(--fs);">Удалить</button>
-          <button onclick="testGateAccount('')" style="background:var(--line);border:none;color:var(--acc);padding:8px 12px;border-radius:var(--r-sm);font-size:var(--fs);">Проверить</button>
-        </div>
-        <div class="sub" id="acctTest_main"></div>
-      </div>
-      <div class="settingRow" style="flex-direction:column;align-items:stretch;gap:6px;">
-        <div>
-          <div class="label">API-ключи по модулям (суб-аккаунты)</div>
-          <div class="sub">модуль со своими ключами торгует, считает баланс, проверяет позиции и стопы только на своём суб-аккаунте; если его ключи не работают — сделка не откроется (никакого переключения на основной счёт). Нужны права суб-аккаунта на фьючерсы (чтение + торговля).</div>
-        </div>
-        <div id="moduleAcctRows" class="dim">загрузка...</div>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">Бумажная торговля (dry-run)</div>
-          <div class="sub">без реальных ордеров, только лог того, что было бы сделано — выключи только когда уверен</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeDryRun"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow" style="flex-wrap:wrap;">
-        <div style="flex:1 1 100%;">
-          <div class="label">Риск на сделку — у каждого модуля свой</div>
-          <div class="sub">% от счёта, который теряется на стопе (0.1–100). Пустое поле — значение модуля по умолчанию (на Binance, по истории связки): ⚡ 4% · P/R 3.75% · 🧱 SMC 3.125% · EMA 3.75% · 📏 HTF 2.5%; остальные модули — 0.5%. У ⚡ к своему % ещё множители: загрузка (×0.625 / ×1.25), дневной WaveTrend (×1.25, если монета на дневке сильно растянута против сделки) и шорты 2ч-потока ×0.5</div>
-        </div>
-        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-          <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro 0.5" title="Нейро: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctSnr" min="0.1" max="100" step="0.5" placeholder="S/R" title="S/R Zones" style="display:none;width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R 3.75" title="Peak Reversal: пусто — 3% на Binance (0.5% на Gate)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctEmw" min="0.1" max="100" step="0.5" placeholder="EMA 3.75" title="EMA — касания: пусто — 2% на Binance (0.5% на Gate)" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctZones" min="0.1" max="100" step="0.5" placeholder="Зоны 0.5" title="Зоны: пусто — 0.5%" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctZm" min="0.1" max="100" step="0.1" placeholder="🎯 0.5" title="🎯 Сильные зоны: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctRbx" min="0.1" max="100" step="0.1" placeholder="📈 0.5" title="📈 Пробой: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctCas" min="0.1" max="100" step="0.1" placeholder="🌊 0.5" title="🌊 Каскад: пусто — 0.5%" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctDlm" min="0.1" max="100" step="0.05" placeholder="⚡ 4" title="⚡ Лимитки 4ч+2ч: пусто — 4% на сделку, до 20 сделок сразу; больше 10% не берётся" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctSmc" min="0.1" max="100" step="0.05" placeholder="🧱 3.125" title="🧱 SMC: пусто — 2.5% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctHtf" min="0.1" max="100" step="0.05" placeholder="📏 2.5" title="📏 HTF-уровни: пусто — 2% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctCfl" min="0.1" max="100" step="0.05" placeholder="🔄 2" title="🔄 Классика наоборот: пусто — 1% на Binance (0.25% на Gate)" style="width:64px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-        </div>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳↳ Авто-риск (лучший % для каждой монеты Neuro / P/R; у Зон — один на все, вместе с тейком и стопом)</div>
-          <div class="sub">вместо % выше каждая монета Neuro / P/R торгуется со своим риском на сделку — тем, при котором счёт растёт быстрее всего на длинной дистанции (Келли), осторожно: по сделкам теста (их не видел выбор настроек), с пессимистичной поправкой на малую выборку (без деления пополам). Не больше 50%. Бэктест «с $15» считает так же</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutoRisk"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Нейро</div>
-          <div class="sub">вход по рынку в начале часа, стоп и тейк сразу на бирже (стоп 1 ATR, тейк 3R), выход через 48 ч; риск — поле «Neuro» ниже (пусто = 0.5%, не общий %): сделок бывает много одновременно</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeNeuro"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳↳ Neuro: только лучшая карточка</div>
-          <div class="sub">вкл — торгуется только первая карточка (лучшая оценка «сумма R ÷ √сделок» на проверке + тесте). Выкл — торгуются монеты, отмеченные галочкой «🤖 торговать»; если отмеченная монета перестала проходить проверку или опустилась в рейтинге — придёт уведомление</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setNeuroSingleBest"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" id="setNeuro"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow" style="display:none;">
         <div>
-          <div class="label">↳ S/R Zones</div>
-          <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча и размера позиции, что и у остальных режимов</div>
+          <div class="name">Neuro: дополнительные условия (12)</div>
+          <div class="sub">ликвидации, long/short толпы, OI+цена, изменение фандинга, премия к индексу, открытие недели/месяца, хай/лоу прошлого дня, сжатие, серия 5+, сила к BTC, круглые уровни — действует со следующего майнинга; выключите, чтобы сравнить с прежним набором</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeSnr"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" id="setNeuroExtra"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Peak Reversal</div>
-          <div class="sub">вход по рынку в начале часа, стоп 1.5 ATR и тейк 3R сразу на бирже, выход через 48 свечей; риск — поле «P/R» ниже (пусто = 0.5%, не общий %)</div>
+          <div class="label">Торговля на бирже</div>
+          <div class="sub">реальные сделки этого модуля; выключено — только виртуальный учёт. Тот же переключатель, что в «Торговля на бирже → Какие модули торгуют»</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setAutotradePrv"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow"><!-- v0.99.618 — «EMA — касания» trades again -->
-        <div>
-          <div class="label">↳ EMA — касания</div>
-          <div class="sub">реальная сделка по рынку при касании уровня «на прицеле»: стоп 0.75 дневного хода за EMA, тейк 4 риска, закрытие через 3 дня. Риск — поле «EMA» (пусто — 0.5%, не общий %)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeEmw"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" data-mirror="setAutotradeNeuro"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Зоны (скрины из Telegram)</div>
-          <div class="sub">вход, когда цена дошла до линии зоны (какой — выбирает обучение, сначала 1-я), стоп за дальней линией зоны с запасом, тейк — свой % из настроек «Зоны» или обученный; риск — общий или свой «Зоны»</div>
+          <div class="label">Уведомления в Telegram</div>
+          <div class="sub">сигналы и сделки этого модуля. Тот же переключатель, что в разделе «Уведомления»</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeZones"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" data-mirror="setTelegramNeuro"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow">
+    </div></details>
+    <details class="settingsGroup" style="--mod-color:var(--m-rbx);"><summary class="settingsGroupTitle">📈 Пробой диапазона</summary><div class="settingsGroupBody">
+      <div class="settingRow">
         <div>
-          <div class="label">↳↳ Зоны: движение к зоне</div>
-          <div class="sub">если на скрине зоны только с одной стороны от цены — сразу после поста сделка по ходу движения к ближайшей линии (к поддержкам — шорт, к сопротивлениям — лонг), тейк чуть раньше линии; открывается, только когда по истории постов это в плюсе; стоп — лучший по истории</div>
+          <div class="label">Работа (день и 12ч — 120 монет)</div>
+          <div class="sub">после закрытия свечи: монета шла в узком коридоре (день — 20 свечей, 12ч — 30) и закрылась за ним по своему тренду (EMA200) — вход; стоп 1.5 ATR, выход по 20-свечному минимуму / максимуму; не больше 6 сделок в одну сторону на каждом графике</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeZonesAppr"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳↳ Зоны: свои (наш поиск)</div>
-          <div class="sub">реальные сделки по зонам, которые нашёл наш поиск. Выключено — они только отслеживаются виртуально (статистика во вкладке «Зоны»). Включайте, когда наш поиск догонит паблик по совпадениям и результату</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeZonesOwn"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳↳ Зоны: 🎯 сильные зоны</div>
-          <div class="sub">реальные сделки по зонам модели, обученной на 6 годах истории 127 монет: лимитки на края зоны, стоп — дневной ход монеты за зоной, тейк — 3 риска. Работает сам по себе, без остальных переключателей зон. Риск — как у зон. Выключено — только виртуальный учёт во вкладке «Зоны»</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeZonesZm"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" id="setRbx"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ 📈 Пробой диапазона</div>
-          <div class="sub">реальная сделка по рынку после дневного закрытия: стоп 1.5 ATR сразу на бирже, тейка нет — бот закрывает сделку, когда день закроется за 20-дневным минимумом / максимумом. Риск — поле «📈» выше (пусто = 0.5%)</div>
+          <div class="label">Четверть на +1R</div>
+          <div class="sub">на +1R закрыть четверть позиции и перенести стоп в безубыток, остаток — по тренду. Винрейт 54% вместо 33%, стопов подряд до 14 вместо 26, рост депозита при той же просадке — как без неё. Действует на новые сделки</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeRbx"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" id="setRbxPart"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ 🌊 Каскад EMA</div>
-          <div class="sub">реальная сделка по рынку в начале часа: стоп за экстремумом 24 свечей и тейк 2R сразу на бирже, через 48 ч бот закрывает сделку. Риск — поле «🌊» выше (пусто = 0.5%)</div>
+          <div class="label">Торговля на бирже</div>
+          <div class="sub">реальные сделки этого модуля; выключено — только виртуальный учёт. Тот же переключатель, что в «Торговля на бирже → Какие модули торгуют»</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeCas"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" data-mirror="setAutotradeRbx"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ 🧱 SMC</div>
-          <div class="sub">реальная сделка по рынку при касании уровня (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 2 дневных ATR и тейк 3R сразу на бирже, выход по закрытию 4ч-свечи за 1 дневным ATR, после +2R стоп на бирже переносится в безубыток (освобождает общий риск для ⚡), через 96 ч бот закрывает сделку. Риск — поле «🧱» выше (пусто = 2.5% на Binance)</div>
+          <div class="label">Уведомления в Telegram</div>
+          <div class="sub">сигналы и сделки этого модуля. Тот же переключатель, что в разделе «Уведомления»</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeSmc"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" data-mirror="setTgRbx"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+    <details class="settingsGroup" style="--mod-color:var(--m-rbs);"><summary class="settingsGroupTitle">🚀 Пробой 4ч</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (4ч — 127 монет, виртуально)</div>
+          <div class="sub">на закрытии каждой 4ч-свечи: пробои узкого коридора по тренду, модель берёт оцененные выше +0.8R (~4 в неделю); вход на открытии следующей свечи, стоп 1.5 ATR, тейк 2R, выход через 48 ч. Пока без реальных сделок</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setRbs"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ 📏 HTF-уровни</div>
-          <div class="sub">реальный лонг по рынку, когда цена прошла уровень на 0.1% (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 3 дневных ATR и тейк 3R сразу на бирже, выход по закрытию дневной свечи (00:00 UTC) за 1 дневным ATR, через 96 ч бот закрывает сделку. Риск — поле «📏» выше (пусто = 2% на Binance)</div>
+          <div class="label">Уведомления в Telegram</div>
+          <div class="sub">сигналы и сделки этого модуля. Тот же переключатель, что в разделе «Уведомления»</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeHtf"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" data-mirror="setTgRbs"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+    <details class="settingsGroup" style="--mod-color:var(--m-cas);"><summary class="settingsGroupTitle">🌊 Каскад EMA</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (1ч — 120 монет)</div>
+          <div class="sub">в начале часа: свеча закрылась за всем каскадом EMA 5/10/14/20/28 и модель оценила пробой выше порога — вход; стоп за экстремумом 24 свечей, тейк 2R, выход через 48 ч; не больше 12 сделок в одну сторону</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setCas"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ 🔄 Классика наоборот</div>
-          <div class="sub">реальный лонг по рынку сразу после закрытия 4ч-свечи (на Binance, если включены P/R, SMC, EMA на Binance; иначе Gate): аварийный стоп 1.5 дневного ATR и тейк 4R сразу на бирже, выход по закрытию дневной свечи (00:00 UTC) за 0.75 ATR, через 96 ч бот закрывает сделку; цена ушла от открытия часа дальше 1R или бот был выключен — без сделки. Риск — поле «🔄» выше (пусто = 1% на Binance). Пока модуль новый — по умолчанию выключено</div>
+          <div class="label">Торговля на бирже</div>
+          <div class="sub">реальные сделки этого модуля; выключено — только виртуальный учёт. Тот же переключатель, что в «Торговля на бирже → Какие модули торгуют»</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeCfl"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" data-mirror="setAutotradeCas"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ ⚡ Лимитки 4ч+2ч</div>
-          <div class="sub">настоящие лимитки на бирже из вкладки ⚡ (до 20 позиций, с лимитками — до 26, по монете без чужой позиции); исполнилась — стоп триггером и тейк лимиткой «только закрытие», через 5 дней 8 ч бот закрывает остаток. Риск — поле «⚡» выше (пусто = 4%, больше 10% не берётся); не хватает свободной маржи — риск сделки уменьшается</div>
+          <div class="label">Уведомления в Telegram</div>
+          <div class="sub">сигналы и сделки этого модуля. Тот же переключатель, что в разделе «Уведомления»</div>
         </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeDlm"><span class="switchSlider"></span></label>
+        <label class="switch"><input type="checkbox" data-mirror="setTgCas"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+    <details class="settingsGroup" style="--mod-color:var(--snr);display:none;"><summary class="settingsGroupTitle">S/R Zones (Flux Charts)</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (бэктест + живые сигналы)</div>
+          <div class="sub">зоны поддержки/сопротивления по pivot high/low (порт индикатора Flux Charts), отскок от неповреждённого уровня — вход, стоп и тейк подбираются перебором по таймфрейму/pivot/силе/RR с проверкой на train/test</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setSnr"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Сколько монет держать в топе</div>
+          <div class="sub">бэктест проверяет всю вселенную каждый цикл — здесь только сколько лучших по TEST avg P&L остаются активными (торгуются)</div>
+        </div>
+        <input type="number" id="setSnrTopN" min="1" max="30" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Сколько монет отображать</div>
+          <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, остальные показываются серым как справочные</div>
+        </div>
+        <input type="number" id="setSnrDisplayN" min="1" max="30" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Автоторговля: только лучшая карточка</div>
+          <div class="sub">торговать только ОДНУ монету — первую карточку (лучший средний R на проверочной части после комиссий). Остальные активные монеты продолжают давать сигналы и уведомления, но автоторговля по ним не открывает сделки</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setSnrSingleBest"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -50711,17 +50894,55 @@ if (settingsSearchInput) {
     const q = settingsSearchInput.value.trim().toLowerCase();
     document.querySelectorAll('#settingsBody > details.settingsGroup').forEach(group => {
       let anyMatch = false;
+      const inTitle = !!q && (group.querySelector('summary')?.textContent || '').toLowerCase().includes(q);   // v0.99.793 — the group's own name too
       group.querySelectorAll('.settingRow').forEach(row => {
         const text = row.textContent.toLowerCase();
-        const match = !q || text.includes(q);
+        const match = !q || inTitle || text.includes(q);
         row.classList.toggle('searchHidden', !match);
         if (match) anyMatch = true;
       });
+      if (inTitle) anyMatch = true;
       group.classList.toggle('searchHidden', !anyMatch);
       if (q && anyMatch) group.open = true;
     });
+    // v0.99.793 — a section label stays only while a group under it does
+    document.querySelectorAll('#settingsBody > .setSection').forEach(sec => {
+      let any = false;
+      for (let el = sec.nextElementSibling; el && !el.classList.contains('setSection'); el = el.nextElementSibling) {
+        if (el.classList.contains('settingsGroup') && !el.classList.contains('searchHidden') && el.style.display !== 'none') any = true;
+      }
+      sec.classList.toggle('searchHidden', !any);
+    });
   };
 }
+// v0.99.793 — a setting lives in one place; a module's card (and «Сервисные сообщения») shows its switch as a mirror: the same
+// setting, changed from either place
+function syncMirrors() {
+  document.querySelectorAll('#settingsBody input[data-mirror]').forEach(m => {
+    const o = document.getElementById(m.dataset.mirror);
+    if (o) { m.checked = o.checked; m.disabled = o.disabled; }
+  });
+}
+(function() {
+  const body = document.getElementById('settingsBody');
+  if (!body) return;
+  body.addEventListener('change', e => {
+    const t = e.target;
+    if (t && t.dataset && t.dataset.mirror) {
+      const o = document.getElementById(t.dataset.mirror);
+      if (o && !o.disabled) { o.checked = t.checked; o.dispatchEvent(new Event('change', {bubbles: true})); }
+    }
+    setTimeout(syncMirrors, 0); setTimeout(syncMirrors, 600);   // the original may be put back when the save fails
+  });
+  body.addEventListener('click', e => {   // a row's explanation: two lines, a tap opens the rest
+    const sub = e.target.closest && e.target.closest('.settingRow .sub');
+    if (sub && !e.target.closest('a, button, input, select')) sub.classList.toggle('open');
+  });
+  if (typeof loadSettings === 'function') {
+    const _ls = loadSettings;
+    loadSettings = async function() { const r = await _ls.apply(this, arguments); syncMirrors(); return r; };
+  }
+})();
 
 document.getElementById('settingsBtn').onclick = async () => {
   // every section starts collapsed (and the search is cleared) on each opening
