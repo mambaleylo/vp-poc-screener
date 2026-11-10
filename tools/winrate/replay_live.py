@@ -92,6 +92,9 @@ elif MOD == "emw":
     V.emx_save = lambda: None; V.AUTOTRADE_ENABLED_EMW = False; ST, arm, settle, model = V._EMX, V.emx_arm, V.emx_settle, V.emx_model()
     thr = {"": model.get("thr")}
 else:   # P/R: the hour's scan makes the pending limits, the settle fills / walks them on the closed candles
+    import os
+    if os.environ.get("PRV_MODEL"):   # the model that was live in the period (P/R is retrained monthly: today's has seen it)
+        V.PRX_MODEL_FILE = os.environ["PRV_MODEL"]; V._PRX["model"] = None
     V.prx_save = lambda: None; V.AUTOTRADE_ENABLED_PRV = False; ST, arm, settle, model = V._PRX, V.prx_scan_once, V.prx_settle, V.prx_model()
     thr = {str(k): v for k, v in (model.get("thr") or {}).items()}
 ST.update({"trades": [], "armed": [], "armed_at": None, "loaded": True, "scan": None, "last": []})
