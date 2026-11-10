@@ -38,3 +38,12 @@ vp_backup_last.json.tmp
 vp_report_state.json
 vp_report_state.json.tmp
 vp_bt_trades.json.*.new
+vp_*_state.json.bak
+vp_*.json.bak
+vp_*.json.*.tmp
+vp_*.json.*.tmp.bak
+vp_*.json*.bad-*
+vp_poc_screener.py.boot
+vp_poc_screener.py.boot.*.tmp
+vp_poc_screener.py.bak
+vp_poc_screener.py.broken

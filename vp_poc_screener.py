@@ -43,6 +43,85 @@ from collections import deque
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait as futures_wait, FIRST_COMPLETED, TimeoutError as FutureTimeoutError
 
+
+# v0.99.791 — a new version that cannot start is rolled back (the user: "живучесть при перезапусках"). This block runs before
+# anything else of the bot. Each start is counted in <bot>.boot; a start that lives BOOT_OK_SEC, and every deliberate stop
+# (/update, /restart, pkill, another copy), clears the count. BOOT_FAILS starts in a row that died early, right after an update
+# (BOOT_UPD_SEC) with the copy the update left next to the bot (.bak) -> the copy comes back, the broken version is remembered
+# (the auto-update skips it until a newer one) and the bot starts on the old one; told in Telegram after the start.
+BOOT_FILE = os.path.abspath(__file__) + ".boot"
+BOOT_OK_SEC = 180
+BOOT_FAILS = 3
+BOOT_UPD_SEC = 3600
+BOOT_LOOP_SEC = 1200   # the failed starts follow each other (the keepalive loop: 10 s; the 15-min job) — a lone early stop is not a loop
+
+
+def _boot_read():
+    try:
+        with open(BOOT_FILE) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _boot_write(d):
+    try:
+        tmp = f"{BOOT_FILE}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(d, f)
+        os.replace(tmp, BOOT_FILE)
+    except Exception:
+        pass
+
+
+def boot_clear():
+    """a healthy run / a deliberate stop: not a failed start"""
+    d = _boot_read()
+    if d.get("fails"):
+        d["fails"] = 0
+        _boot_write(d)
+
+
+def _file_version(path):
+    try:
+        with open(path, "rb") as f:
+            m = re.search(rb'^APP_VERSION = "([^"]+)"', f.read(), re.M)
+        return m.group(1).decode() if m else None
+    except Exception:
+        return None
+
+
+def boot_guard(me=None, restart=None, now=None):
+    """-> True when the old version was put back (the process is then replaced by it)"""
+    me = me or os.path.abspath(__file__); now = now or time.time()
+    d = _boot_read(); bak = me + ".bak"
+    ver, old = _file_version(me), _file_version(bak)
+    if (int(d.get("fails") or 0) >= BOOT_FAILS and old and ver and old != ver and now - float(d.get("upd_t") or 0) < BOOT_UPD_SEC
+            and now - float(d.get("t") or 0) <= BOOT_LOOP_SEC):
+        try:
+            shutil.copy2(me, me + ".broken")   # the version that could not start, for a look
+        except OSError:
+            pass
+        os.replace(bak, me)
+        _boot_write({"fails": 0, "bad": ver, "rolled": {"t": int(now), "from": ver, "to": old}})
+        print(f"[ERR] boot guard: v{ver} died {d.get('fails')} times at the start — back to v{old}", flush=True)
+        (restart or (lambda: os.execv(sys.executable, [sys.executable] + sys.argv)))()
+        return True
+    if now - float(d.get("t") or 0) > BOOT_LOOP_SEC:
+        d["fails"] = 0   # the start before was long ago (Android stopped Termux, the phone restarted): not a crash loop
+    d["fails"] = int(d.get("fails") or 0) + 1; d["t"] = int(now); d["ver"] = ver
+    _boot_write(d)
+    t_ = threading.Timer(BOOT_OK_SEC, boot_clear); t_.daemon = True; t_.start()
+    return False
+
+
+if __name__ == "__main__" and "--calc-worker" not in sys.argv:
+    try:
+        boot_guard()
+    except Exception as _e:
+        print("[ERR] boot guard:", _e, flush=True)
+
 import requests
 
 # v0.99.125, per direct user report (screenshot: "magnified profile
@@ -65,7 +144,145 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.790"
+APP_VERSION = "0.99.791"
+
+# v0.99.791 — the bundle's state files (the user: "проверку на стабильность и сохранение данных, живучесть при перезапусках"; the
+# check — tools/winrate/t_state_safe.py — broke every one of them three ways): (1) the modules save from several threads (⚡: its
+# loop, the catch-up, the take-over button; Binance's records: every module's thread) and shared one .tmp — one renamed it away
+# under the other ("No such file"), their writes mixed -> a broken file; (2) a broken file was read as "no trades" without a word
+# and the next save wrote that emptiness over it; (3) a save before the module read its file (the first 1–2.5 min after a start)
+# wrote the empty state over the real one. Now: one writer per file, its own .tmp, fsync (a power cut never leaves a half-written
+# file under the real name), the previous good file kept as .bak; a broken file -> the .bak, the broken one kept aside
+# (.bad-<time>), told in Telegram; no save before the load.
+_STATE_IO = {"locks": {}, "guard": threading.Lock()}
+
+
+def _state_lock(path):
+    with _STATE_IO["guard"]:
+        return _STATE_IO["locks"].setdefault(path, threading.RLock())
+
+
+def state_saver(path_name):
+    """a module's save function: one at a time per file, its snapshot and its write together — an older snapshot never lands
+    over a newer one (two threads: the first took its snapshot, the second wrote a newer one, the first then wrote the old)"""
+    def deco(fn):
+        def w(*a, **k):
+            with _state_lock(globals()[path_name]):
+                return fn(*a, **k)
+        w.__name__ = getattr(fn, "__name__", "w"); w.__doc__ = fn.__doc__
+        return w
+    return deco
+
+
+def state_write(path, data):
+    """the state (a JSON string / an object) -> the file, safely; an error is the caller's to log"""
+    if not isinstance(data, str):
+        data = json.dumps(data)
+    with _state_lock(path):
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            with open(tmp, "w") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            try:   # the file being replaced (a whole one: it ends as JSON does) stays as .bak
+                with open(path, "rb") as f:
+                    f.seek(-1, 2)
+                    whole = f.read(1) in (b"}", b"]", b"\n")
+                if whole:
+                    shutil.copyfile(path, tmp + ".bak")
+                    os.replace(tmp + ".bak", path + ".bak")
+            except OSError:
+                pass
+            os.replace(tmp, path)
+        finally:
+            for x in (tmp, tmp + ".bak"):
+                try:
+                    os.remove(x)
+                except OSError:
+                    pass
+
+
+def _state_note(text):
+    log_error(text)
+    try:
+        tg_outbox_push(text)
+    except Exception:
+        pass
+
+
+def state_read(path, label=None):
+    """-> the file's dict; None when there is no file. A broken file (an interrupted write, a power cut): its .bak is read,
+    the broken one is kept aside (<file>.bad-<time>) and it is told in Telegram — never an empty state without a word"""
+    label = label or os.path.basename(path); bad = False
+    for fn in (path, path + ".bak"):
+        try:
+            with open(fn) as f:
+                d = json.load(f)
+            if not isinstance(d, dict):
+                raise ValueError("not a JSON object")
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            bad = True
+            log_error(f"state file {os.path.basename(fn)} unreadable: {e}")
+            try:
+                os.replace(fn, f"{fn}.bad-{int(time.time())}")
+            except OSError:
+                pass
+            continue
+        if bad:
+            _state_note(f"⚠️ Файл состояния «{label}» был повреждён (оборванная запись) — взята предыдущая копия. Позиции и лимитки "
+                        f"на Binance бот сверит сам; повреждённый файл сохранён рядом (.bad-…).")
+        return d
+    if bad:
+        _state_note(f"⚠️ Файл состояния «{label}» повреждён, запасной копии нет — модуль начал с пустого списка. Позиции и лимитки "
+                    f"на Binance бот подхватит сам; история сделок — в ежедневной резервной копии в этом чате (повреждённый файл "
+                    f"сохранён рядом, .bad-…).")
+    return None
+
+
+# v0.99.791 — a restart / stop waits for the exchange operation in flight (an entry at the market and then its stop and take;
+# a limit and its record): the restart used to cut between them — a position without a stop or without the bot's record until
+# the next start's take-over. New operations do not start once a stop is asked; the ones in flight get EXCH_QUIET_SEC to end.
+EXCH_QUIET_SEC = 25
+_XOP = {"n": 0, "stop": 0.0, "lock": threading.Lock(), "tl": threading.local()}
+
+
+class exchange_op:
+    def __enter__(self):
+        d = getattr(_XOP["tl"], "d", 0)
+        if not d:
+            while time.time() < _XOP["stop"]:   # the bot is stopping: wait it out (the process ends meanwhile)
+                time.sleep(0.2)
+            with _XOP["lock"]:
+                _XOP["n"] += 1
+        _XOP["tl"].d = d + 1
+        return self
+
+    def __exit__(self, *a):
+        _XOP["tl"].d -= 1
+        if not _XOP["tl"].d:
+            with _XOP["lock"]:
+                _XOP["n"] -= 1
+        return False
+
+
+def exchange_guarded(fn):
+    def w(*a, **k):
+        with exchange_op():
+            return fn(*a, **k)
+    w.__name__ = getattr(fn, "__name__", "w"); w.__doc__ = fn.__doc__
+    return w
+
+
+def exchange_quiesce(sec=EXCH_QUIET_SEC):
+    """no new exchange operation from now (for sec + 60 s); -> True when none is in flight within sec"""
+    _XOP["stop"] = time.time() + sec + 60
+    t_end = time.time() + sec
+    while time.time() < t_end and _XOP["n"] > 0:
+        time.sleep(0.1)
+    return _XOP["n"] <= 0
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1669,25 +1886,26 @@ def apply_settings(updates):
         globals()["_zones_learn_event"].set()
 
 
+_SETTINGS_IO = {"loaded": False}
+
+
 def save_settings():
+    if not _SETTINGS_IO["loaded"]:   # v0.99.791 — never the defaults over the file before it is read
+        return
     try:
-        tmp_path = SETTINGS_FILE + ".tmp"
-        with open(tmp_path, "w") as f:
-            json.dump(get_settings(), f)
-        os.replace(tmp_path, SETTINGS_FILE)
+        state_write(SETTINGS_FILE, json.dumps(get_settings()))   # v0.99.791 — safely, the previous file kept as .bak
     except Exception as e:
         log_error(f"save_settings: {e}")
 
 
 def load_settings():
-    if not os.path.exists(SETTINGS_FILE):
-        return
     try:
-        with open(SETTINGS_FILE) as f:
-            saved = json.load(f)
-        apply_settings({k: v for k, v in saved.items() if k in SETTINGS_KEYS})
+        saved = state_read(SETTINGS_FILE, "настройки бота")   # v0.99.791 — a broken file: its .bak, told in Telegram
+        if saved is not None:
+            apply_settings({k: v for k, v in saved.items() if k in SETTINGS_KEYS})
     except Exception as e:
         log_error(f"load_settings: {e}")
+    _SETTINGS_IO["loaded"] = True
 
 
 # ----------------------------------------------------------------------------
@@ -7724,6 +7942,7 @@ LOOP_MAX_GAP_SEC = {
     "htf_loop": 60 * 60,   # v0.99.732 — 📏 HTF, the same
     "cfl_loop": 60 * 60,   # v0.99.739 — 🔄 Классика наоборот
     "rbs_loop": 60 * 60,   # v0.99.757 — 🚀 Пробой 4ч
+    "bno_loop": 15 * 60,   # v0.99.791 — P/R, SMC, EMA, HTF, Классика's positions on Binance (their stops kept / put again), beats every minute
     "dlm_loop": 30 * 60,   # v0.99.679 — ⚡ 15m deep limits, beats every 5 s and per coin while scanning
     "hdg_loop": 10 * 60,   # v0.99.628 — 🪞 hedge mirror, beats every 5 s
     "auto_update_loop": 30 * 60,   # v0.99.637 — beats every 10 min
@@ -7746,6 +7965,7 @@ LOOP_LABELS = {
     "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
     "snr_backtest_loop": "S/R бэктест",
     "emx_loop": "EMA — касания",   # v0.99.618
+    "bno_loop": "позиции модулей на Binance",   # v0.99.791
     "battery_watch_loop": "батарея телефона",   # v0.99.582
 }
 BACKTEST_RETRY_AFTER_ERROR_SEC = int(os.environ.get("VP_BACKTEST_RETRY_AFTER_ERROR_SEC", 1800))  # v0.99.322 — failed backtest cycles retry in 30 min, not a full refresh interval later
@@ -8024,8 +8244,34 @@ def system_health_watchdog():
                 if name not in names:
                     _loop_stall_alerted.discard(name)
                     send_telegram(f"✅ {LOOP_LABELS.get(name, name)} снова работает.")
+            stall_restart_check(stalled)   # v0.99.791
         except Exception as e:
             log_error(f"system_health_watchdog: {e}")
+
+
+# v0.99.791 — a hung loop of the bundle (⚡'s stops at the 4h close, the time exits, the other modules' stops put again — all the
+# bot's own work) was only told in Telegram ("может потребоваться перезапуск") and stayed hung until the user restarted the bot.
+# Now the bot restarts itself — at most once in STALL_RESTART_GAP_SEC (kept in the boot file, so a restart does not reset it).
+STALL_RESTART = os.environ.get("VP_STALL_RESTART", "1") == "1"
+STALL_RESTART_LOOPS = ("dlm_loop", "bno_loop", "emx_loop", "prx_loop", "smc_loop", "htf_loop", "cfl_loop")
+STALL_RESTART_GAP_SEC = 3 * 3600
+
+
+def stall_restart_check(stalled, now=None, restart=None):
+    """-> the hung loop's name when the bot restarts itself over it"""
+    now = now or time.time()
+    hung = [x for x in stalled if x["name"] in STALL_RESTART_LOOPS]
+    if not (STALL_RESTART and hung):
+        return None
+    b = _boot_read()
+    if now - float(b.get("stall_t") or 0) < STALL_RESTART_GAP_SEC:
+        return None
+    _boot_write(dict(b, stall_t=int(now)))
+    x = hung[0]
+    tg_outbox_push(f"🔁 Зависание: {x['label']} — нет отклика {x['silent_min']} мин. Перезапускаю бота сам (не чаще раза в "
+                   f"{STALL_RESTART_GAP_SEC // 3600} ч). Стопы и тейки на бирже стоят, после запуска бот сверит позиции.")
+    (restart or self_restart)("stall", 3)
+    return x["name"]
 
 
 def send_telegram(text, category=None):
@@ -28750,6 +28996,8 @@ def self_update_download(only_if_newer=False):
         raise RuntimeError("скачанный файл не похож на бота — оставил текущую версию")
     if only_if_newer and m_.group(1).decode() == APP_VERSION:
         return APP_VERSION
+    if only_if_newer and m_.group(1).decode() == _boot_read().get("bad"):   # v0.99.791 — it could not start here: not by itself again
+        return APP_VERSION
     try:
         compile(code, "vp_poc_screener.py", "exec")   # a broken download never replaces a working bot
     except SyntaxError as e:
@@ -28763,6 +29011,10 @@ def self_update_download(only_if_newer=False):
     except OSError:
         pass
     os.replace(tmp, me)
+    try:   # v0.99.791 — for the boot guard: the update's time (a version that dies at the start right after it is rolled back)
+        _boot_write(dict(_boot_read(), upd_t=int(time.time()), fails=0))
+    except Exception:
+        pass
     return m_.group(1).decode()
 
 
@@ -28848,16 +29100,26 @@ def auto_update_loop():
         time.sleep(AUTO_UPDATE_SEC)
 
 
-def save_everything_before_exit(wait_tg=10.0):
+def save_everything_before_exit(wait_tg=10.0, quiet=EXCH_QUIET_SEC):
     """v0.99.486 — before any restart / stop: every module's state to disk (the
     modules save at their own moments; a change since the last save would be
     lost) and the in-memory Telegram queue drained (up to wait_tg seconds); the
     zones' own messages are on disk anyway."""
-    for fn in (save_state, save_neuro_state, save_nq_state, save_settings, zones_save, _zones_outbox_save):
+    try:   # v0.99.791 — no new exchange operation from here, the one in flight ends first (an entry with its stop and record)
+        if not exchange_quiesce(quiet):
+            log_error("stop: an exchange operation was still in flight — the next start's take-over checks Binance")
+    except Exception as e:
+        log_error(f"stop: exchange quiesce: {e}")
+    for fn in (save_state, save_neuro_state, save_nq_state, save_settings, zones_save, _zones_outbox_save,
+               dlm_save, bno_save, emx_save, prx_save, smc_save, htf_save, cfl_save):   # v0.99.791 — the bundle's modules too
         try:
             fn()
         except Exception as e:
             log_error(f"save before exit {getattr(fn, '__name__', fn)}: {e}")
+    try:
+        boot_clear()   # v0.99.791 — a deliberate stop is not a failed start
+    except Exception:
+        pass
     t_end = time.time() + wait_tg
     while time.time() < t_end and not _telegram_send_queue.empty():
         time.sleep(0.2)
@@ -28870,7 +29132,7 @@ def _on_sigterm(signum, frame):
     starting: save everything, then leave"""
     try:
         print("stopping: saving state…", flush=True)
-        save_everything_before_exit(wait_tg=5.0)
+        save_everything_before_exit(wait_tg=3.0, quiet=12)   # v0.99.791 — the new copy waits 25 s for this one
     finally:
         os._exit(0)
 
@@ -28909,6 +29171,15 @@ def self_restart(why, delay=1.5):
 
 def restart_note_on_start():
     """After a restart from the button or a Telegram command: 'back in work'."""
+    try:   # v0.99.791 — the boot guard put the old version back: told once
+        b = _boot_read(); r_ = b.get("rolled")
+        if r_ and not r_.get("told"):
+            tg_outbox_push(f"⚠️ Новая версия v{r_.get('from')} не смогла запуститься ({BOOT_FAILS} раза подряд упала в первые минуты) — "
+                           f"бот сам вернул прежнюю v{r_.get('to')} и работает на ней. Сама v{r_.get('from')} больше не поставится; "
+                           f"исправленная версия поставится как обычно.")
+            r_["told"] = True; _boot_write(b)
+    except Exception as e:
+        log_error(f"boot guard note: {e}")
     try:
         if not os.path.exists(RESTART_NOTE_FILE):
             return
@@ -31334,9 +31605,8 @@ def emx_model():
 
 def emx_load():
     try:
-        if os.path.exists(EMX_STATE_FILE):
-            with open(EMX_STATE_FILE) as f:
-                d = json.load(f)
+        d = state_read(EMX_STATE_FILE, "📐 EMA")   # v0.99.791
+        if d is not None:
             with _emx_lock:
                 _EMX["trades"] = d.get("trades") or []
                 _EMX["armed"] = d.get("armed") or []
@@ -31346,14 +31616,14 @@ def emx_load():
     _EMX["loaded"] = True
 
 
+@state_saver("EMX_STATE_FILE")
 def emx_save():
+    if not _EMX.get("loaded"):   # v0.99.791 — never the empty state over the file before it is read
+        return
     try:
         with _emx_lock:
             data = json.dumps({"trades": _EMX["trades"][-600:], "armed": _EMX["armed"], "armed_at": _EMX["armed_at"]})
-        tmp = EMX_STATE_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(data)
-        os.replace(tmp, EMX_STATE_FILE)
+        state_write(EMX_STATE_FILE, data)   # v0.99.791
     except Exception as e:
         log_error(f"ema state save: {e}")
 
@@ -31553,6 +31823,7 @@ def emx_fire(a, t_touch, live_px=None, how=None):
                       + (" · касание по Binance" if how == "binance" else ""), category="emw")
 
 
+@exchange_guarded   # v0.99.791 — a restart waits for it
 def emx_watch_tick():
     """every EMX_POLL_SEC: the armed levels of this hour against the price (Gate's last price or, v0.99.669, Binance's
     1-min wick — the deep limit lives on wicks; the trade is opened at Gate's market)"""
@@ -31625,6 +31896,7 @@ def emx_settle(now=None):
         emx_save()
 
 
+@exchange_guarded   # v0.99.791 — a restart waits for it
 def emx_part_tick():
     """v0.99.661 — the partial take of the real EMA trades: from the hour after the touch (as the research), once the
     price reached +part_r R from the level — the share off at market, the stop to the entry"""
@@ -33110,9 +33382,8 @@ def model_refresh_loop():
 
 def prx_load():
     try:
-        if os.path.exists(PRX_STATE_FILE):
-            with open(PRX_STATE_FILE) as f:
-                d = json.load(f)
+        d = state_read(PRX_STATE_FILE, "P/R")   # v0.99.791
+        if d is not None:
             with _prx_lock:
                 _PRX["trades"] = d.get("trades") or []
                 _PRX["scan"] = d.get("scan")
@@ -33122,14 +33393,14 @@ def prx_load():
     _PRX["loaded"] = True
 
 
+@state_saver("PRX_STATE_FILE")
 def prx_save():
+    if not _PRX.get("loaded"):   # v0.99.791 — never the empty state over the file before it is read
+        return
     try:
         with _prx_lock:
             data = json.dumps({"trades": _PRX["trades"][-800:], "scan": _PRX["scan"], "last": _PRX["last"]})
-        tmp = PRX_STATE_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(data)
-        os.replace(tmp, PRX_STATE_FILE)
+        state_write(PRX_STATE_FILE, data)   # v0.99.791
     except Exception as e:
         log_error(f"p/r state save: {e}")
 
@@ -33332,6 +33603,7 @@ def prx_settle(now=None):
         prx_save()
 
 
+@exchange_guarded   # v0.99.791 — a restart waits for it
 def prx_watch_tick():
     """v0.99.662 — the P/R limit on the exchange: a pending signal whose price reached its limit within the wait opens
     the real trade at market (the stops / take from the fill)"""
@@ -34184,9 +34456,8 @@ def smc_model():
 
 def smc_load():
     try:
-        if os.path.exists(SMC_STATE_FILE):
-            with open(SMC_STATE_FILE) as f:
-                d = json.load(f)
+        d = state_read(SMC_STATE_FILE, "🧱 SMC")   # v0.99.791
+        if d is not None:
             with _smc_lock:
                 _SMC["trades"] = d.get("trades") or []
                 _SMC["armed"] = d.get("armed") or []
@@ -34197,14 +34468,14 @@ def smc_load():
     _SMC["loaded"] = True
 
 
+@state_saver("SMC_STATE_FILE")
 def smc_save():
+    if not _SMC.get("loaded"):   # v0.99.791 — never the empty state over the file before it is read
+        return
     try:
         with _smc_lock:
             data = json.dumps({"trades": _SMC["trades"][-600:], "armed": _SMC["armed"], "armed_at": _SMC["armed_at"], "scan": _SMC["scan"]})
-        tmp = SMC_STATE_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(data)
-        os.replace(tmp, SMC_STATE_FILE)
+        state_write(SMC_STATE_FILE, data)   # v0.99.791
     except Exception as e:
         log_error(f"smc state save: {e}")
 
@@ -34311,6 +34582,7 @@ def smc_fire(a, t_touch, live_px=None, how=None):
                       + (" · касание по минутной свече Binance" if how == "binance" else ""), category="smc")
 
 
+@exchange_guarded   # v0.99.791 — a restart waits for it
 def smc_watch_tick():
     """every SMC_POLL_SEC: the armed levels of this hour against the price (Gate's last price or Binance's 1-min wick)"""
     with _smc_lock:
@@ -34379,6 +34651,7 @@ def smc_settle(now=None):
         smc_save()
 
 
+@exchange_guarded   # v0.99.791 — a restart waits for it
 def smc_be_tick():
     """v0.99.719 — the real SMC trades: once a CLOSED 1h candle after the touch's hour reached +SMC_BE_R R, the exchange
     stop to the entry (part_take_on_exchange with nothing closed) — exactly the rule the research and the virtual walk
@@ -34549,9 +34822,8 @@ def htf_model():
 
 def htf_load():
     try:
-        if os.path.exists(HTF_STATE_FILE):
-            with open(HTF_STATE_FILE) as f:
-                d = json.load(f)
+        d = state_read(HTF_STATE_FILE, "📏 HTF")   # v0.99.791
+        if d is not None:
             with _htf_lock:
                 _HTF["trades"] = d.get("trades") or []
                 _HTF["armed"] = d.get("armed") or []
@@ -34562,14 +34834,14 @@ def htf_load():
     _HTF["loaded"] = True
 
 
+@state_saver("HTF_STATE_FILE")
 def htf_save():
+    if not _HTF.get("loaded"):   # v0.99.791 — never the empty state over the file before it is read
+        return
     try:
         with _htf_lock:
             data = json.dumps({"trades": _HTF["trades"][-600:], "armed": _HTF["armed"], "armed_at": _HTF["armed_at"], "scan": _HTF["scan"]})
-        tmp = HTF_STATE_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(data)
-        os.replace(tmp, HTF_STATE_FILE)
+        state_write(HTF_STATE_FILE, data)   # v0.99.791
     except Exception as e:
         log_error(f"htf state save: {e}")
 
@@ -34698,6 +34970,7 @@ def htf_touched(symbol, trig, px, since):
     return None
 
 
+@exchange_guarded   # v0.99.791 — a restart waits for it
 def htf_watch_tick():
     """every HTF_POLL_SEC: the armed levels of this hour against the price"""
     with _htf_lock:
@@ -34907,9 +35180,8 @@ def cfl_model():
 
 def cfl_load():
     try:
-        if os.path.exists(CFL_STATE_FILE):
-            with open(CFL_STATE_FILE) as f:
-                d = json.load(f)
+        d = state_read(CFL_STATE_FILE, "🔄 Классика")   # v0.99.791
+        if d is not None:
             with _cfl_lock:
                 for k in ("trades", "days", "cool", "first", "scan", "last_bar"):
                     if d.get(k) is not None:
@@ -34919,15 +35191,15 @@ def cfl_load():
     _CFL["loaded"] = True
 
 
+@state_saver("CFL_STATE_FILE")
 def cfl_save():
+    if not _CFL.get("loaded"):   # v0.99.791 — never the empty state over the file before it is read
+        return
     try:
         with _cfl_lock:
             data = json.dumps({k: _CFL[k] for k in ("trades", "days", "cool", "first", "scan", "last_bar")} | {"trades": _CFL["trades"][-600:]},
                               separators=(",", ":"))
-        tmp = CFL_STATE_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(data)
-        os.replace(tmp, CFL_STATE_FILE)
+        state_write(CFL_STATE_FILE, data)   # v0.99.791
     except Exception as e:
         log_error(f"cfl state save: {e}")
 
@@ -36639,9 +36911,8 @@ def dlm_model():
 
 def dlm_load():
     try:
-        if os.path.exists(DLM_STATE_FILE):
-            with open(DLM_STATE_FILE) as f:
-                d = json.load(f)
+        d = state_read(DLM_STATE_FILE, "⚡ Лимитки")   # v0.99.791
+        if d is not None:
             with _dlm_lock:
                 for k in ("orders", "trades", "scan", "bar_done"):
                     if d.get(k) is not None:
@@ -36651,7 +36922,10 @@ def dlm_load():
     _DLM["loaded"] = True
 
 
+@state_saver("DLM_STATE_FILE")
 def dlm_save():
+    if not _DLM.get("loaded"):   # v0.99.791 — never the empty state over the file before it is read
+        return
     try:
         with _dlm_lock:
             # v0.99.786 — every OPEN order and every one with a real limit on the exchange kept (was: the last 400 only — an
@@ -36660,10 +36934,7 @@ def dlm_save():
             rest = [o for o in _DLM["orders"] if not (o["status"] == "OPEN" or (o.get("real") or {}).get("id"))][-400:]
             ids = {id(o) for o in keep + rest}
             data = json.dumps({"orders": [o for o in _DLM["orders"] if id(o) in ids], "trades": _DLM["trades"][-3000:], "scan": _DLM["scan"], "bar_done": _DLM.get("bar_done")})
-        tmp = DLM_STATE_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(data)
-        os.replace(tmp, DLM_STATE_FILE)
+        state_write(DLM_STATE_FILE, data)   # v0.99.791
     except Exception as e:
         log_error(f"dlm state save: {e}")
 
@@ -37676,24 +37947,23 @@ _bno_lock = threading.Lock()
 
 def bno_load():
     try:
-        with open(BNO_FILE) as f:
-            d = json.load(f)
-        with _bno_lock:
-            _BNO["pos"] = dict(d.get("pos") or {})
-    except FileNotFoundError:
-        pass
+        d = state_read(BNO_FILE, "позиции P/R, SMC, EMA, HTF, Классики на Binance")   # v0.99.791
+        if d is not None:
+            with _bno_lock:
+                _BNO["pos"] = dict(d.get("pos") or {})
     except Exception as e:
         log_error(f"bn others load: {e}")
+    _BNO["loaded"] = True
 
 
+@state_saver("BNO_FILE")
 def bno_save():
+    if not _BNO.get("loaded"):   # v0.99.791 — never the empty state over the file before it is read
+        return
     try:
         with _bno_lock:
-            d = {"pos": dict(_BNO["pos"])}
-        tmp = BNO_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(d, f)
-        os.replace(tmp, BNO_FILE)
+            d = json.dumps({"pos": dict(_BNO["pos"])})
+        state_write(BNO_FILE, d)   # v0.99.791
     except Exception as e:
         log_error(f"bn others save: {e}")
 
@@ -37728,6 +37998,7 @@ def _bnf_lev_cap_learn(ex):
     return True
 
 
+@exchange_guarded   # v0.99.791 — a restart waits for it
 def bno_open(mode, symbol, direction, entry, sl, tp, kx=1.0):
     """the real trade of P/R / SMC / EMA on Binance -> {"status": OPENED | OPENED_TP_SL_FAILED | SKIPPED | DRY_RUN, "detail"}"""
     if AUTOTRADE_DRY_RUN:
@@ -37817,6 +38088,7 @@ def _bno_cancel(rec, which=("sl", "tp")):
             rec[kk + "_id"] = None
 
 
+@exchange_guarded   # v0.99.791 — a restart waits for it
 def bno_close(mode, symbol, direction):
     """the time exit / a close stop of a P/R / SMC / EMA position on Binance: its stop and take off, the rest at the market"""
     with _bno_lock:
@@ -37834,6 +38106,7 @@ def bno_close(mode, symbol, direction):
     return {"ok": True, "ex": "binance"}
 
 
+@exchange_guarded   # v0.99.791 — a restart waits for it
 def bno_settle_close(mode, t, kind):
     """v0.99.729 — a real P/R / SMC / EMA trade's record closed by its walk (the take / the emergency stop / the
     break-even): its Binance position, if still there (the exchange's trigger not hit — a tick away, the order of the
@@ -37851,6 +38124,7 @@ def bno_settle_close(mode, t, kind):
         log_error(f"{mode} settle close {t['symbol']}: {e}")
 
 
+@exchange_guarded   # v0.99.791 — a restart waits for it
 def bno_part(mode, t, frac):
     """EMA's partial take on Binance: `frac` of the position off reduce-only at the market, the stop moved to the entry"""
     with _bno_lock:
@@ -37906,6 +38180,7 @@ def _bno_ensure_sl(symbol, rec, amt):
     return "закрыта по рынку: стоп не встал"
 
 
+@exchange_guarded   # v0.99.791 — a restart waits for it
 def bno_tick():
     """a position the exchange's stop / take closed: the other trigger off, the record dropped. v0.99.728 — a live one
     without its stop (refused at the open / at the break-even) gets it again, or is closed at the market"""
@@ -38607,6 +38882,7 @@ def _bn_guard_naked(bsym, sym, scl, info, s, p, dual, now):
             + ". Тейк и выход по времени по ней не ведутся — закройте сами, когда сочтёте нужным")
 
 
+@exchange_guarded   # v0.99.791 — a restart waits for it
 def dlm_real_tick():
     """every DLM_POLL_SEC: the real limits (filled / expired / a foreign position on the coin) and the real trades
     (the stop / take on the exchange, the time exit, the result)"""
@@ -38912,6 +39188,8 @@ def api_dlm_adopt():
     off = dlm_adopt_off()
     if off and not (DLM_BINANCE and BINANCE_API_KEY and not AUTOTRADE_DRY_RUN):
         return jsonify({"ok": False, "err": off})
+    if not (_DLM.get("loaded") and _BNO.get("loaded")):   # v0.99.791 — the first ~2 min: the bot's own records are not read yet
+        return jsonify({"ok": False, "err": "бот только что запущен и ещё читает свои записи (до 2 минут) — нажмите чуть позже"})
     try:
         with live_http():
             got = dlm_bn_adopt()
@@ -51501,7 +51779,7 @@ def stop_previous_instances():
             os.kill(pid, signal.SIGTERM)
         except Exception:
             pass
-    deadline = time.time() + 10
+    deadline = time.time() + 25   # v0.99.791 — 10 -> 25 s: the old copy ends its exchange operation in flight and saves
     while time.time() < deadline and any(os.path.exists(f"/proc/{pid}") for pid in others):
         time.sleep(0.3)
     for pid in others:
@@ -51530,6 +51808,13 @@ if __name__ == "__main__":
     load_module_credentials()   # v0.99.331
     load_binance_credentials()   # v0.99.684
     _load_alert_cfg()
+    # v0.99.791 — the bundle's records read at once (each module's loop read its own only 1–2.5 min after the start: until then
+    # the tabs were empty, a module could not see another's armed limit / position, and a save in that window wrote emptiness)
+    for _ld in (bno_load, dlm_load, emx_load, prx_load, smc_load, htf_load, cfl_load):
+        try:
+            _ld()
+        except Exception as e:
+            log_error(f"early state load {_ld.__name__}: {e}")
     threading.Thread(target=_telegram_sender_worker, daemon=True).start()
     t = threading.Thread(target=scan_loop, daemon=True)
     t.start()

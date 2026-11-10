@@ -17,6 +17,9 @@ V = importlib.util.module_from_spec(_spec)
 sys.modules["vp_poc_screener"] = V
 _spec.loader.exec_module(V)
 
+for _st in ("_DLM", "_EMX", "_PRX", "_SMC", "_HTF", "_CFL", "_BNO"):   # v0.99.791 — the state files count as read (a save before the load writes nothing)
+    getattr(V, _st)["loaded"] = True
+V._SETTINGS_IO["loaded"] = True
 V._bt_trades_real = V.bt_trades   # the bot's own (t_bt_refetch)
 _BTD = json.load(open(os.path.join(TMP, "vp_bt_trades.json")))
 
