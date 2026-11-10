@@ -184,4 +184,23 @@ chk("/orders: виртуальные 3", "Виртуальные сделки (�
 sent = []; V.tg_outbox_push = lambda t: sent.append(t)
 chk("команда /orders (и /count) через Telegram, есть в /help", V.bot_command("/orders") and V.bot_command("/count") and len(sent) == 2 and sent[0].startswith("📋") and "/orders" in V.BOT_COMMANDS_HELP)
 V._DLM["loaded"] = False; chk("сразу после запуска — честная пометка", "записи ещё читаются" in V.bot_orders_text(now)); V._DLM["loaded"] = True
+# ---- v0.99.794 — a limit Binance no longer knows (the user's log: "-2013 Order does not exist" every 6 s for H_USDT)
+errs.clear(); V._dlm_bn_fills = lambda now=None: False; V._dlm_bn_cancel_pre = lambda r, **k: None; V._dlm_touch_note = lambda *a: None
+def gone(bsym, oid): raise BE(-2013, "Order does not exist.")
+V.bnf_order = gone; V.bnf_positions = lambda: {}
+g = dict(order("H_USDT"), real={"id": "999", "bsym": "HUSDT", "scl": 1.0, "ex": "binance", "price": 1.0})
+real_time = time.time; base = real_time()
+try:
+    for k in range(0, 125):   # a little over 10 minutes of passes, 5 s apart
+        time.time = lambda k=k: base + k * 5
+        V.dlm_bn_tick([g], [])
+        if g["status"] != "OPEN": break
+finally:
+    time.time = real_time
+n_err = len([e for e in errs if "Order does not exist" in e])
+chk(f"лимитка, которую Binance не знает 10 минут (позиции нет): снята с учёта — {g['status']}, «{g.get('gone', '')[:40]}…»", g["status"] in ("CANCELLED", "EXPIRED") and g.get("gone"))
+chk(f"в журнале за это время {n_err} строка, а не сотня", n_err <= 2)
+g2 = dict(order("H_USDT"), real={"id": "998", "bsym": "HUSDT", "scl": 1.0, "ex": "binance", "price": 1.0, "nf_t": int(time.time()) - 5000})
+V.bnf_positions = lambda: {"HUSDT": [{"amt": 5.0, "mark": 1.0}]}; V.dlm_bn_tick([g2], [])
+chk("Binance не знает лимитку, но позиция по монете есть — запись не трогается (решит подхват)", g2["status"] == "OPEN")
 print("t_net792 OK" if ok else "t_net792 FAIL")

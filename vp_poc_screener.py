@@ -144,7 +144,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.793"
+APP_VERSION = "0.99.794"
 
 # v0.99.791 — the bundle's state files (the user: "проверку на стабильность и сохранение данных, живучесть при перезапусках"; the
 # check — tools/winrate/t_state_safe.py — broke every one of them three ways): (1) the modules save from several threads (⚡: its
@@ -37308,6 +37308,7 @@ def dlm_scan(t_bar, st, cu=False, only=None):
 # scan) are scanned again later — DLM_RESCAN_SEC after the scan, while the bar's orders would still be alive — the catch-up's
 # way: an order the price reached meanwhile is settled as a virtual trade, never a real limit on a signal already traded.
 DLM_RESCAN_SEC = (120, 300, 600, 1200, 1800, 3600, 3600, 3600)
+DLM_GONE_SEC = 600   # v0.99.794 — a limit Binance does not know for this long (and no position): gone unfilled
 
 
 def dlm_rescan_add(st, t_bar, syms, now=None):
@@ -38656,7 +38657,23 @@ def dlm_bn_tick(orders, trades):
         r = o["real"]
         try:
             x = bnf_order(r["bsym"], r["id"])
+            r.pop("nf_t", None)
         except BinanceError as e:
+            # v0.99.794 — the user's log: "dlm binance order H_USDT: Binance -2013: Order does not exist" every 6 s without an end:
+            # Binance drops an unfilled limit that expired / was cancelled from its history, and the bot kept the order as "on
+            # the exchange" (its place among the 26 held, the error each pass). Unknown to Binance — the order and its history —
+            # for DLM_GONE_SEC and no position on the coin: the limit is gone unfilled. With a position: the take-over decides.
+            if e.code == -2013:
+                r.setdefault("nf_t", int(now))
+                if now - r["nf_t"] >= DLM_GONE_SEC and not pos.get(r["bsym"]):
+                    o["status"] = "EXPIRED" if now >= o["until"] else "CANCELLED"
+                    o["gone"] = "Binance больше не знает эту лимитку (снята или истекла без исполнения)"
+                    changed = True
+                    log_error(f"dlm binance order {o['symbol']}: unknown to Binance for {int(now - r['nf_t'])} s, no position — taken as gone unfilled")
+                    continue
+                if now - float(r.get("nf_log") or 0) < 600:
+                    continue   # one line in 10 minutes, not every pass
+                r["nf_log"] = int(now)
             log_error(f"dlm binance order {o['symbol']}: {e}")
             continue
         filled = float(x.get("executedQty") or 0)
