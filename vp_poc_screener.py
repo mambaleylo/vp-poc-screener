@@ -144,7 +144,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.792"
+APP_VERSION = "0.99.793"
 
 # v0.99.791 — the bundle's state files (the user: "проверку на стабильность и сохранение данных, живучесть при перезапусках"; the
 # check — tools/winrate/t_state_safe.py — broke every one of them three ways): (1) the modules save from several threads (⚡: its
@@ -43956,7 +43956,21 @@ INDEX_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>VP-POC Screener</title>
 <link rel="manifest" href="/manifest.webmanifest">
-<meta name="theme-color" content="#000000">
+<meta name="theme-color" content="#101112" id="metaThemeColor">
+<script>
+// v0.99.793 — the theme before the first paint: 'auto' (the phone's own), 'light' or 'dark' (Settings → Оформление, this device)
+function vpThemeApply() {
+  var t = 'auto';
+  try { t = localStorage.getItem('vp_theme') || 'auto'; } catch (e) {}
+  var light = t === 'light' || (t === 'auto' && window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches);
+  document.documentElement.setAttribute('data-theme', light ? 'light' : 'dark');
+  var m = document.getElementById('metaThemeColor');
+  if (m) m.setAttribute('content', light ? '#efeae0' : '#101112');
+  return t;
+}
+vpThemeApply();
+try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpThemeApply); } catch (e) {}
+</script>
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="icon" href="/app-icon-192.png">
 <style>
@@ -43964,20 +43978,43 @@ INDEX_HTML = """<!doctype html>
      каждый элемент, с расчётом на телефон"). One design system: colour
      tokens, a 6-step type scale, 3 radii, 4px spacing grid. Inline styles
      in the templates were mapped onto the same tokens. */
-  :root {
+  /* v0.99.793 — the palette (the user: "сине-фиолетовая надоела, нужна такая чтобы и ночью и днём хорошо было видно, ночью не
+     слепило" -> "3 вариант ночной, серый … и тёплую бумагу с переключением по теме, ну или жёстко в настройках"): night — a
+     neutral graphite (no hue; the text is not pure white: ~13:1 on a card instead of 21:1), day — a warm paper. The theme is
+     html[data-theme]: by the phone's theme, or fixed in Settings → Оформление (this device). [data-theme="dark"] on an
+     element inside gives it the night tokens again (the charts' canvases stay dark plates in both themes). */
+  :root, [data-theme="dark"] {
     color-scheme: dark;
-    --bg:#07090d; --bg-2:#0c0f15; --card:#11151d; --inset:#0b0e14; --ctl:#1a2030; --ctl-2:#232b3d;
-    --line:#1d2430; --line-2:#2a3342;
-    --tx:#e8ecf2; --tx-2:#a6b0c0; --tx-3:#6c7789;
-    --acc:#7cb1ff; --acc-bg:rgba(124,177,255,.12);
-    --pos:#34d399; --pos-bg:rgba(52,211,153,.12);
-    --neg:#f87171; --neg-bg:rgba(248,113,113,.12);
-    --warn:#fbbf24; --warn-bg:rgba(251,191,36,.12); --warn-line:rgba(251,191,36,.35);
-    --money:#ffd166;
-    --neuro:#b794ff; --snr:#2ec5d9; --prv:#ffa94d; --lsw:#f58fb0; --msnr:#7cb1ff;
+    --bg:#101112; --bg-2:#151617; --card:#1a1b1d; --inset:#131415; --ctl:#25272a; --ctl-2:#303336;
+    --line:#25272a; --line-2:#3a3d41;
+    --tx:#e6e7e8; --tx-2:#aeb1b5; --tx-3:#8a8e94;
+    --acc:#6fd0c4; --acc-bg:rgba(111,208,196,.13);
+    --pos:#78d49c; --pos-bg:rgba(120,212,156,.13); --pos-line:rgba(120,212,156,.32);
+    --neg:#ec8b84; --neg-bg:rgba(236,139,132,.14); --neg-line:rgba(236,139,132,.36);
+    --warn:#e4c26e; --warn-bg:rgba(228,194,110,.13); --warn-line:rgba(228,194,110,.36);
+    --money:#e6c66c; --money-bg:rgba(230,198,108,.11); --money-line:rgba(230,198,108,.32);
+    --neuro:#b9a5e6; --snr:#6cc5d2; --prv:#e6a373; --lsw:#e29ea6; --msnr:#8ec6d6;
+    --m-dlm:#e6c66c; --m-smc:#c2b5a3; --m-ema:#8ec6d6; --m-cfl:#e2b276; --m-htf:#b3d27e; --m-zones:#78d49c; --m-rbx:#e2b276;
+    --m-cas:#7fcfd6; --m-rbs:#e69a80; --m-hdg:#b9a5e6; --m-warn:#e69a80;
+    --ov:255,255,255; --hover:rgba(255,255,255,.06); --on-acc:#0c1413;
     --fs-xs:10.5px; --fs-sm:11.5px; --fs:12.5px; --fs-md:14px; --fs-lg:16px; --fs-xl:19px;
     --r-xs:6px; --r-sm:8px; --r:12px; --r-lg:16px;
     --font: Roboto, -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  html[data-theme="light"] {
+    color-scheme: light;
+    --bg:#efeae0; --bg-2:#f5f1e9; --card:#fbf9f5; --inset:#f1ede4; --ctl:#e7e1d5; --ctl-2:#dcd5c7;
+    --line:#e2dbcd; --line-2:#cfc7b7;
+    --tx:#24211c; --tx-2:#5c5549; --tx-3:#736b5e;
+    --acc:#0b756b; --acc-bg:rgba(11,117,107,.10);
+    --pos:#1c7f52; --pos-bg:rgba(28,127,82,.11); --pos-line:rgba(28,127,82,.30);
+    --neg:#bf4136; --neg-bg:rgba(191,65,54,.10); --neg-line:rgba(191,65,54,.32);
+    --warn:#8f620b; --warn-bg:rgba(143,98,11,.11); --warn-line:rgba(143,98,11,.34);
+    --money:#86610d; --money-bg:rgba(134,97,13,.10); --money-line:rgba(134,97,13,.30);
+    --neuro:#6f55b8; --snr:#12788a; --prv:#b3602a; --lsw:#b2475a; --msnr:#2f7f9e;
+    --m-dlm:#8f6a08; --m-smc:#7a6a57; --m-ema:#2f7f9e; --m-cfl:#a8662a; --m-htf:#55801f; --m-zones:#1c7f52; --m-rbx:#a8662a;
+    --m-cas:#12788a; --m-rbs:#b4522f; --m-hdg:#6f55b8; --m-warn:#b4522f;
+    --ov:70,56,36; --hover:rgba(70,56,36,.06); --on-acc:#ffffff;
   }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html { -webkit-text-size-adjust:100%; }
@@ -44016,7 +44053,7 @@ INDEX_HTML = """<!doctype html>
   #hdrActions .hdrRow { display:flex; align-items:center; gap:6px; }
   #hdrActions .hdrLbl { width:92px; flex-shrink:0; font-size:var(--fs-sm); color:var(--tx-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   #hdrActions button { font-size:var(--fs-sm); height:30px; padding:0 10px; border-radius:var(--r-sm); white-space:nowrap; }
-  #hdrActions button.btnDanger { background:var(--neg-bg); border:1px solid rgba(248,113,113,.35); color:var(--neg); }
+  #hdrActions button.btnDanger { background:var(--neg-bg); border:1px solid var(--neg-line); color:var(--neg); }
   #hdrActions button.btnNeutral { background:var(--ctl); border:1px solid var(--line-2); color:var(--tx); }
   #hdrActions button:active { filter:brightness(1.25); }
   #status { font-size:var(--fs-xs); color:var(--tx-3); }
@@ -44024,8 +44061,8 @@ INDEX_HTML = """<!doctype html>
   #hdrChips { display:flex; flex-wrap:wrap; gap:5px; margin-top:6px; align-items:center; }
   #hdrChips:empty { display:none; }
   .pill { display:inline-flex; align-items:center; gap:5px; height:22px; padding:0 8px; border-radius:999px; font-size:var(--fs-xs); font-weight:600; white-space:nowrap; background:var(--ctl); color:var(--tx-2); border:1px solid var(--line-2); }
-  .pill.neg { background:var(--neg-bg); color:var(--neg); border-color:rgba(248,113,113,.35); }
-  .pill.pos { background:var(--pos-bg); color:var(--pos); border-color:rgba(52,211,153,.3); }
+  .pill.neg { background:var(--neg-bg); color:var(--neg); border-color:var(--neg-line); }
+  .pill.pos { background:var(--pos-bg); color:var(--pos); border-color:var(--pos-line); }
   .pill.warn { background:var(--warn-bg); color:var(--warn); border-color:var(--warn-line); }
   .pill .dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
   /* v0.99.489 — Zones tab cards */
@@ -44043,8 +44080,8 @@ INDEX_HTML = """<!doctype html>
   .ztile .zv { font-size:var(--fs-lg); font-weight:700; margin-top:2px; overflow-wrap:anywhere; }
   .zn { font-size:var(--fs-xs); color:var(--tx-2); font-weight:400; margin-top:2px; }
   .zbanner { padding:8px 10px; border-radius:var(--r-sm); margin-top:10px; border:1px solid var(--line-2); }
-  .zbanner.pos { background:var(--pos-bg); border-color:rgba(52,211,153,.3); }
-  .zbanner.neg { background:var(--neg-bg); border-color:rgba(248,113,113,.35); }
+  .zbanner.pos { background:var(--pos-bg); border-color:var(--pos-line); }
+  .zbanner.neg { background:var(--neg-bg); border-color:var(--neg-line); }
   .zbanner.warn { background:var(--warn-bg); border-color:var(--warn-line); }
   .zkv { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; font-size:var(--fs-sm); }
   .zkv > div:nth-child(odd) { color:var(--tx-2); }
@@ -44092,13 +44129,13 @@ INDEX_HTML = """<!doctype html>
   header details > summary::-webkit-details-marker { display:none; }
   #globalErrorsBox, #riskAutotuneBox { margin-top:0 !important; }
   #globalErrorsBox > summary, #riskAutotuneBox > summary { display:inline-flex; align-items:center; gap:5px; height:22px; padding:0 8px; border-radius:999px; font-size:var(--fs-xs); font-weight:600; background:var(--ctl); border:1px solid var(--line-2); color:var(--tx-2); }
-  #globalErrorsBox > summary.loss { background:var(--neg-bg); color:var(--neg); border-color:rgba(248,113,113,.35); }
+  #globalErrorsBox > summary.loss { background:var(--neg-bg); color:var(--neg); border-color:var(--neg-line); }
   #globalErrorsBox[open], #riskAutotuneBox[open] { flex-basis:100%; }
-  .warnTxt { color:#ffb74d; }   /* v0.99.782 — a warning, not an error */
+  .warnTxt { color:var(--m-warn); }   /* v0.99.782 — a warning, not an error */
   #globalErrorsList, #riskAutotuneLog { background:var(--inset); border:1px solid var(--line); border-radius:var(--r-sm); padding:8px 10px; }
 
   /* ---------- tabs ---------- */
-  .tabs { display:flex; gap:2px; padding:6px 8px; position:sticky; top:0; z-index:6; background:rgba(7,9,13,.92); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); border-bottom:1px solid var(--line); overflow-x:auto; scrollbar-width:none; -webkit-overflow-scrolling:touch; }
+  .tabs { display:flex; gap:2px; padding:6px 8px; position:sticky; top:0; z-index:6; background:var(--bg); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); border-bottom:1px solid var(--line); overflow-x:auto; scrollbar-width:none; -webkit-overflow-scrolling:touch; }
   .tabs::-webkit-scrollbar { display:none; }
   .tab { flex-shrink:0; height:30px; display:inline-flex; align-items:center; padding:0 11px; border-radius:999px; background:transparent; font-size:var(--fs); font-weight:500; cursor:pointer; color:var(--tx-2); border:1px solid transparent; white-space:nowrap; }
   .tab.active { background:var(--ctl); color:var(--tx) !important; border-color:var(--line-2); font-weight:600; }
@@ -44106,7 +44143,7 @@ INDEX_HTML = """<!doctype html>
   .tab[data-tab="neuro"] { --tab-c:var(--neuro); }
   .tab[data-tab="snr"] { --tab-c:var(--snr); }
   .tab[data-tab="prv"] { --tab-c:var(--prv); }
-  .tab[data-tab="emw"] { --tab-c:#7fd1ff; }
+  .tab[data-tab="emw"] { --tab-c:var(--m-ema); }
   #hintsToggleBtn { flex-shrink:0; height:30px; display:inline-flex; align-items:center; padding:0 8px !important; }
 
   /* ---------- panels ---------- */
@@ -44149,7 +44186,7 @@ INDEX_HTML = """<!doctype html>
   /* ---------- semantic text ---------- */
   .long, .win { color:var(--pos); font-weight:600; }
   .short, .loss { color:var(--neg); font-weight:600; }
-  .bal { color:var(--money); background:rgba(255,209,102,.1); border:1px solid rgba(255,209,102,.3); border-radius:var(--r-xs); padding:0 5px; font-weight:600; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .bal { color:var(--money); background:var(--money-bg); border:1px solid var(--money-line); border-radius:var(--r-xs); padding:0 5px; font-weight:600; white-space:nowrap; font-variant-numeric:tabular-nums; }
   .status-open { color:var(--warn); font-weight:600; }
   .status-timeout { color:var(--tx-3); }
 
@@ -44158,14 +44195,14 @@ INDEX_HTML = """<!doctype html>
   @keyframes fxRowIn { from { opacity:0; transform:translateX(-8px); } to { opacity:1; transform:none; } }
   @keyframes fxDraw { from { stroke-dashoffset:1; } to { stroke-dashoffset:0; } }
   @keyframes fxFade { from { opacity:0; } to { opacity:1; } }
-  @keyframes fxPulse { 0% { box-shadow:0 0 0 0 rgba(61,220,151,.45); } 70% { box-shadow:0 0 0 10px rgba(61,220,151,0); } 100% { box-shadow:0 0 0 0 rgba(61,220,151,0); } }
+  @keyframes fxPulse { 0% { box-shadow:0 0 0 0 var(--pos-line); } 70% { box-shadow:0 0 0 10px transparent; } 100% { box-shadow:0 0 0 0 transparent; } }
   .fx-card { transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
   .fx-card:hover, .zcard:hover { transform:translateY(-1px); box-shadow:0 6px 18px rgba(0,0,0,.28); }
   .zcard { transition:transform .18s ease, box-shadow .18s ease; }
   .fx-card.fx-new { animation:fxRise .45s cubic-bezier(.2,.8,.2,1) both; }
   .fx-card.fx-new .fx-row { animation:fxRowIn .35s ease both; animation-delay:calc(var(--i, 0) * 28ms + .25s); }
   .fx-row { transition:background .15s ease; }
-  .fx-row:hover { background:rgba(255,255,255,.06); }
+  .fx-row:hover { background:var(--hover); }
   .fx-row td:first-child { box-shadow:inset 3px 0 0 transparent; }
   .fx-row.fx-w td:first-child { box-shadow:inset 3px 0 0 var(--pos); }
   .fx-row.fx-l td:first-child { box-shadow:inset 3px 0 0 var(--neg); }
@@ -44192,7 +44229,7 @@ INDEX_HTML = """<!doctype html>
   .ztile:hover { transform:translateY(-1px); background:var(--ctl); }
   .fx-new .zbanner { animation:fxFade .7s ease both; animation-delay:.25s; }
   .ztbl tbody tr { transition:background .15s ease; }
-  .ztbl tbody tr:hover td { background:rgba(255,255,255,.05); }
+  .ztbl tbody tr:hover td { background:var(--hover); }
   .fx-zrow { transition:transform .15s ease, background .15s ease; }
   .fx-zrow:hover { transform:translateX(2px); background:var(--ctl) !important; }
   .fx-new .fx-zrow { animation:fxRowIn .35s ease both; animation-delay:calc(var(--i, 0) * 30ms + .2s); }
@@ -44219,10 +44256,11 @@ INDEX_HTML = """<!doctype html>
   #modalHeader h2, #msnrModalHeader h2, #ft5ModalHeader h2, #vgiModalHeader h2, #settingsModalHeader h2 { font-size:var(--fs-lg); font-weight:700; margin:0; }
   #settingsModalHeader { align-items:center; }
   #closeBtn, #optimizeBtn, #msnrCloseBtn, #ft5CloseBtn, #vgiCloseBtn, #settingsCloseBtn { height:34px; padding:0 14px; background:var(--ctl); border:1px solid var(--line-2); border-radius:var(--r-sm); font-size:var(--fs); font-weight:500; }
-  #optimizeBtn { background:var(--pos-bg); color:var(--pos); border-color:rgba(52,211,153,.3); }
+  #optimizeBtn { background:var(--pos-bg); color:var(--pos); border-color:var(--pos-line); }
   #chartWrap, #msnrChartWrap, #ft5ChartWrap, #vgiChartWrap { flex:1; overflow:hidden; padding:8px; touch-action:none; overscroll-behavior:contain; }
   #modal, #msnrModal, #ft5Modal, #vgiModal, #settingsModal { overscroll-behavior:contain; }
   canvas { width:100%; height:100%; display:block; background:var(--inset); border-radius:var(--r); }
+  html[data-theme="light"] canvas { background:#1a1b1d; }   /* v0.99.793 — the charts stay dark plates in the day theme */
 
   /* ---------- settings ---------- */
   #settingsBody { padding:0 12px 24px; overflow-y:auto; }
@@ -44263,72 +44301,91 @@ INDEX_HTML = """<!doctype html>
      bars) — blurring every card is too heavy for a phone GPU, and over the
      already-soft background it would look the same. */
   body.glass {
-    --bg:rgba(8,10,20,.72); --bg-2:rgba(255,255,255,.05);
-    --card:rgba(255,255,255,.065); --inset:rgba(255,255,255,.04);
-    --ctl:rgba(255,255,255,.10); --ctl-2:rgba(255,255,255,.17);
-    --line:rgba(255,255,255,.09); --line-2:rgba(255,255,255,.16);
-    --tx:#f3f5fa; --tx-2:#b9c2d3; --tx-3:#8390a6;
+    --bg:rgba(16,17,18,.72); --bg-2:rgba(255,255,255,.05);
+    --card:rgba(255,255,255,.06); --inset:rgba(255,255,255,.038);
+    --ctl:rgba(255,255,255,.095); --ctl-2:rgba(255,255,255,.16);
+    --line:rgba(255,255,255,.085); --line-2:rgba(255,255,255,.15);
     --r-xs:8px; --r-sm:12px; --r:16px; --r-lg:22px;
-    --glass-hi:inset 0 1px 0 rgba(255,255,255,.22), inset 0 -1px 0 rgba(255,255,255,.05);
-    --glass-sh:0 10px 30px rgba(0,0,0,.35);
-    background:#060812;
+    --glass-hi:inset 0 1px 0 rgba(255,255,255,.20), inset 0 -1px 0 rgba(255,255,255,.045);
+    --glass-sh:0 10px 30px rgba(0,0,0,.34); --glass-sh2:0 6px 20px rgba(0,0,0,.28);
+    --gl-a:rgba(255,255,255,.10); --gl-b:rgba(255,255,255,.035); --gl-bar:rgba(18,19,20,.72);
+    --gl-sel-a:rgba(255,255,255,.24); --gl-sel-b:rgba(255,255,255,.10); --gl-sel-line:rgba(255,255,255,.26);
+    --gl-btn-a:rgba(255,255,255,.16); --gl-btn-b:rgba(255,255,255,.04); --gl-btn-hi:inset 0 1px 0 rgba(255,255,255,.24);
+    --gl-modal:rgba(14,15,16,.88); --gl-th:rgba(18,19,20,.88); --gl-th1:rgba(20,21,22,.94); --gl-canvas:rgba(0,0,0,.28);
+    --gl-sw:rgba(255,255,255,.16); --gl-field:#0e0f10;
+    --gl-f1:rgba(132,140,148,.34); --gl-f2:rgba(60,150,140,.22); --gl-f3:rgba(150,140,124,.18); --gl-f4:rgba(112,120,128,.26);
+    background:var(--gl-field);
+  }
+  html[data-theme="light"] body.glass {
+    --bg:rgba(239,234,224,.74); --bg-2:rgba(255,255,255,.45);
+    --card:rgba(255,255,255,.58); --inset:rgba(70,56,36,.05);
+    --ctl:rgba(70,56,36,.075); --ctl-2:rgba(70,56,36,.13);
+    --line:rgba(70,56,36,.10); --line-2:rgba(70,56,36,.17);
+    --glass-hi:inset 0 1px 0 rgba(255,255,255,.95);
+    --glass-sh:0 8px 24px rgba(90,70,40,.13); --glass-sh2:0 5px 16px rgba(90,70,40,.10);
+    --gl-a:rgba(255,255,255,.82); --gl-b:rgba(255,255,255,.54); --gl-bar:rgba(244,240,232,.72);
+    --gl-sel-a:#ffffff; --gl-sel-b:rgba(255,255,255,.86); --gl-sel-line:rgba(70,56,36,.16);
+    --gl-btn-a:rgba(255,255,255,.90); --gl-btn-b:rgba(255,255,255,.55); --gl-btn-hi:inset 0 1px 0 #fff;
+    --gl-modal:rgba(239,234,224,.90); --gl-th:rgba(239,234,224,.92); --gl-th1:rgba(241,237,228,.96); --gl-canvas:#1a1b1d;
+    --gl-sw:rgba(70,56,36,.20); --gl-field:#efeae0;
+    --gl-f1:rgba(232,178,96,.42); --gl-f2:rgba(140,184,156,.30); --gl-f3:rgba(214,140,110,.24); --gl-f4:rgba(232,196,128,.30);
   }
   body.glass::before {
     content:""; position:fixed; inset:-20%; z-index:-1; pointer-events:none;
     background:
-      radial-gradient(38% 30% at 18% 12%, rgba(183,148,255,.42), transparent 70%),
-      radial-gradient(34% 28% at 88% 22%, rgba(46,197,217,.34), transparent 70%),
-      radial-gradient(40% 32% at 70% 78%, rgba(255,169,77,.26), transparent 70%),
-      radial-gradient(36% 30% at 12% 82%, rgba(124,177,255,.30), transparent 70%),
-      #060812;
-    filter:blur(30px) saturate(140%);
+      radial-gradient(38% 30% at 18% 12%, var(--gl-f1), transparent 70%),
+      radial-gradient(34% 28% at 88% 22%, var(--gl-f2), transparent 70%),
+      radial-gradient(40% 32% at 70% 78%, var(--gl-f3), transparent 70%),
+      radial-gradient(36% 30% at 12% 82%, var(--gl-f4), transparent 70%),
+      var(--gl-field);
+    filter:blur(30px) saturate(130%);
   }
   body.glass header {
     margin:6px 6px 0; border:1px solid var(--line-2); border-radius:var(--r-lg);
-    background:linear-gradient(135deg, rgba(255,255,255,.12), rgba(255,255,255,.04));
-    backdrop-filter:blur(22px) saturate(170%); -webkit-backdrop-filter:blur(22px) saturate(170%);
+    background:linear-gradient(135deg, var(--gl-a), var(--gl-b));
+    backdrop-filter:blur(22px) saturate(160%); -webkit-backdrop-filter:blur(22px) saturate(160%);
     box-shadow:var(--glass-hi), var(--glass-sh);
   }
   body.glass .tabs {
     margin:6px 6px 0; top:6px; border:1px solid var(--line-2); border-radius:999px;
-    background:linear-gradient(135deg, rgba(255,255,255,.14), rgba(255,255,255,.05)), rgba(12,14,28,.72);
-    backdrop-filter:blur(22px) saturate(170%); -webkit-backdrop-filter:blur(22px) saturate(170%);
+    background:linear-gradient(135deg, var(--gl-a), var(--gl-b)), var(--gl-bar);
+    backdrop-filter:blur(22px) saturate(160%); -webkit-backdrop-filter:blur(22px) saturate(160%);
     box-shadow:var(--glass-hi), var(--glass-sh);
   }
   body.glass .tab.active {
-    background:linear-gradient(180deg, rgba(255,255,255,.26), rgba(255,255,255,.10));
-    border-color:rgba(255,255,255,.28); box-shadow:inset 0 1px 0 rgba(255,255,255,.35), 0 2px 8px rgba(0,0,0,.25);
+    background:linear-gradient(180deg, var(--gl-sel-a), var(--gl-sel-b));
+    border-color:var(--gl-sel-line); box-shadow:var(--gl-btn-hi), 0 2px 8px rgba(0,0,0,.14);
   }
   body.glass .panel { padding:6px 8px 24px; }
   /* cards / panels that use the card or inset token inline */
   body.glass [style*="background:var(--card)"], body.glass .sigList, body.glass .settingsGroup,
   body.glass div.hint-block, body.glass #hdrActions {
-    background:linear-gradient(135deg, rgba(255,255,255,.10), rgba(255,255,255,.035)) !important;
+    background:linear-gradient(135deg, var(--gl-a), var(--gl-b)) !important;
     border-color:var(--line-2) !important;
-    box-shadow:var(--glass-hi), 0 6px 20px rgba(0,0,0,.28);
+    box-shadow:var(--glass-hi), var(--glass-sh2);
   }
   body.glass [style*="background:var(--inset)"] { box-shadow:inset 0 1px 0 rgba(255,255,255,.08); }
   body.glass #hdrBtns button, body.glass .pill, body.glass #globalErrorsBox > summary, body.glass #riskAutotuneBox > summary,
   body.glass #closeBtn, body.glass #msnrCloseBtn, body.glass #ft5CloseBtn, body.glass #vgiCloseBtn, body.glass #settingsCloseBtn, body.glass #optimizeBtn {
-    background-image:linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,.04));
-    box-shadow:inset 0 1px 0 rgba(255,255,255,.25);
+    background-image:linear-gradient(180deg, var(--gl-btn-a), var(--gl-btn-b));
+    box-shadow:var(--gl-btn-hi);
   }
   body.glass #hdrBtns button, body.glass #closeBtn, body.glass #settingsCloseBtn { border-radius:999px; }
   body.glass #modal, body.glass #msnrModal, body.glass #ft5Modal, body.glass #vgiModal, body.glass #settingsModal {
-    background:rgba(6,8,18,.86); backdrop-filter:blur(30px) saturate(160%); -webkit-backdrop-filter:blur(26px) saturate(160%);
+    background:var(--gl-modal); backdrop-filter:blur(30px) saturate(150%); -webkit-backdrop-filter:blur(26px) saturate(150%);
   }
   body.glass #modalHeader, body.glass #msnrModalHeader, body.glass #ft5ModalHeader, body.glass #vgiModalHeader, body.glass #settingsModalHeader {
-    background:linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.03));
-    box-shadow:inset 0 -1px 0 rgba(255,255,255,.06);
+    background:linear-gradient(180deg, var(--gl-a), var(--gl-b));
+    box-shadow:inset 0 -1px 0 var(--line);
   }
   body.glass #settingsSearchWrap { background:transparent; backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px); }
-  body.glass .switchSlider { background:rgba(255,255,255,.16); box-shadow:inset 0 1px 2px rgba(0,0,0,.35); }
-  body.glass .switchSlider:before { background:linear-gradient(180deg,#fff,#e6e9f0); box-shadow:0 2px 6px rgba(0,0,0,.35), inset 0 -1px 0 rgba(0,0,0,.08); }
-  body.glass input:checked + .switchSlider { background:linear-gradient(180deg, #4ade9f, #22b07d); }
-  body.glass th { background:rgba(10,12,24,.85); }
-  body.glass canvas { background:rgba(0,0,0,.28); }
+  body.glass .switchSlider { background:var(--gl-sw); box-shadow:inset 0 1px 2px rgba(0,0,0,.22); }
+  body.glass .switchSlider:before { background:linear-gradient(180deg,#fff,#eceae6); box-shadow:0 2px 6px rgba(0,0,0,.30), inset 0 -1px 0 rgba(0,0,0,.08); }
+  body.glass input:checked + .switchSlider { background:var(--pos); }
+  body.glass th { background:var(--gl-th); }
+  body.glass canvas { background:var(--gl-canvas); }
   @media (max-width: 640px) {
-    body.glass th:first-child, body.glass td:first-child { background:rgba(12,14,26,.92); }
+    body.glass th:first-child, body.glass td:first-child { background:var(--gl-th1); }
   }
 
   /* ---------- phone ---------- */
@@ -44344,6 +44401,7 @@ INDEX_HTML = """<!doctype html>
 </style>
 </head>
 <body>
+<span id="chartTokens" data-theme="dark" style="display:none"></span>
 <header>
   <div id="headerTop">
     <h1>VP-POC<span class="ver" id="hdrVer"></span></h1>
@@ -44384,18 +44442,18 @@ INDEX_HTML = """<!doctype html>
   <div id="healthBanner"></div>
 </header>
 <div class="tabs">
-  <div class="tab active" data-tab="dlm" style="color:#ffd54f;">⚡ Лимитки</div>
+  <div class="tab active" data-tab="dlm" style="color:var(--m-dlm);">⚡ Лимитки</div>
   <div class="tab" data-tab="prv" style="color:var(--prv);">Peak Reversal</div>
-  <div class="tab" data-tab="smc" style="color:#a1887f;">🧱 SMC</div>
-  <div class="tab" data-tab="emw" style="color:#7fd1ff;">📐 EMA</div>
-  <div class="tab" data-tab="cfl" style="color:#ffb74d;">🔄 Классика</div>   <!-- v0.99.776: 5th (the user: "по очереди в списке сделай его 5-м") -->
-  <div class="tab" data-tab="htf" style="color:#9ccc65;">📏 HTF</div>
-  <div class="tab" data-tab="zones" style="color:#4caf50;">🎯 Зоны</div>
+  <div class="tab" data-tab="smc" style="color:var(--m-smc);">🧱 SMC</div>
+  <div class="tab" data-tab="emw" style="color:var(--m-ema);">📐 EMA</div>
+  <div class="tab" data-tab="cfl" style="color:var(--m-cfl);">🔄 Классика</div>   <!-- v0.99.776: 5th (the user: "по очереди в списке сделай его 5-м") -->
+  <div class="tab" data-tab="htf" style="color:var(--m-htf);">📏 HTF</div>
+  <div class="tab" data-tab="zones" style="color:var(--pos);">🎯 Зоны</div>
   <div class="tab" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
-  <div class="tab" data-tab="rbx" style="color:#ffb74d;">📈 Пробой</div>
-  <div class="tab" data-tab="cas" style="color:#4dd0e1;">🌊 Каскад</div>
-  <div class="tab" data-tab="rbs" style="color:#ff8a65;">🚀 Пробой 4ч</div>
-  <div class="tab" data-tab="hdg" style="color:#b39ddb;">🪞 Хедж</div>
+  <div class="tab" data-tab="rbx" style="color:var(--m-cfl);">📈 Пробой</div>
+  <div class="tab" data-tab="cas" style="color:var(--m-cas);">🌊 Каскад</div>
+  <div class="tab" data-tab="rbs" style="color:var(--m-rbs);">🚀 Пробой 4ч</div>
+  <div class="tab" data-tab="hdg" style="color:var(--m-hdg);">🪞 Хедж</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
@@ -44489,7 +44547,7 @@ INDEX_HTML = """<!doctype html>
     <div id="settingsSearchWrap">
       <input type="text" id="settingsSearch" placeholder="Поиск по настройкам…">
     </div>
-    <details class="settingsGroup" style="--mod-color:#ffd54f;"><summary class="settingsGroupTitle">⚡ Лимитки 4ч+2ч</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--m-dlm);"><summary class="settingsGroupTitle">⚡ Лимитки 4ч+2ч</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Работа (4ч + 2ч — 210 монет)</div>
@@ -44534,7 +44592,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#ffa726;"><summary class="settingsGroupTitle">Peak Reversal (Keltner Channel)</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--prv);"><summary class="settingsGroupTitle">Peak Reversal (Keltner Channel)</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Работа (каждый час — 120 монет)</div>
@@ -44565,7 +44623,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#a1887f;"><summary class="settingsGroupTitle">🧱 SMC</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--m-smc);"><summary class="settingsGroupTitle">🧱 SMC</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Работа (1ч — 127 монет)</div>
@@ -44582,7 +44640,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#7fd1ff;"><summary class="settingsGroupTitle">📐 EMA — касания</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--m-ema);"><summary class="settingsGroupTitle">📐 EMA — касания</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Работа (уровни каждый час + цена каждые 30 сек)</div>
@@ -44592,7 +44650,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#ffb74d;"><summary class="settingsGroupTitle">🔄 Классика наоборот</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--m-cfl);"><summary class="settingsGroupTitle">🔄 Классика наоборот</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Работа (4ч и день — 127 монет)</div>
@@ -44609,7 +44667,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#9ccc65;"><summary class="settingsGroupTitle">📏 HTF-уровни</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--m-htf);"><summary class="settingsGroupTitle">📏 HTF-уровни</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Работа (1ч — 127 монет, только лонги)</div>
@@ -44626,7 +44684,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#4fc3f7;"><summary class="settingsGroupTitle">💧 Размер позиции по ликвидности</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">💧 Размер позиции по ликвидности</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Урезать позицию, когда она велика для монеты</div>
@@ -44643,7 +44701,7 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div id="liqRecent" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">урезанных позиций пока не было</div>
     </div></details>
-    <details class="settingsGroup" style="--mod-color:#81c784;"><summary class="settingsGroupTitle">💰 Совет по выводу прибыли</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--pos);"><summary class="settingsGroupTitle">💰 Совет по выводу прибыли</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Совет в Telegram 1-го числа</div>
@@ -44669,7 +44727,7 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div id="reportStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;white-space:pre-line;">—</div>
     </div></details>
-    <details class="settingsGroup" style="--mod-color:#ffb74d;"><summary class="settingsGroupTitle">🛡 Сторож: живые сделки против бэктеста</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--m-cfl);"><summary class="settingsGroupTitle">🛡 Сторож: живые сделки против бэктеста</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Предупреждать в Telegram</div>
@@ -44679,7 +44737,7 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div id="watchStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
     </div></details>
-    <details class="settingsGroup" style="--mod-color:#90caf9;"><summary class="settingsGroupTitle">💾 Резервная копия</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">💾 Резервная копия</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Раз в сутки — архив в Telegram</div>
@@ -44691,11 +44749,20 @@ INDEX_HTML = """<!doctype html>
         <button type="button" id="backupNowBtn" onclick="backupNow()">Отправить</button></div>
       <div id="backupStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
     </div></details>
-    <details class="settingsGroup" style="--mod-color:#b0bec5;"><summary class="settingsGroupTitle">🗓 Возраст моделей и переобучение</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--tx-2);"><summary class="settingsGroupTitle">🗓 Возраст моделей и переобучение</summary><div class="settingsGroupBody">
       <div class="sub hintx" style="padding:4px 2px;">P/R переобучается сама 3-го числа каждого месяца на машине GitHub (GitHub Actions, не зависит от подписки): новая модель попадает в бота, только если прошла все проверки, иначе остаётся старая. Остальные модели — запланированная задача в claude.ai 5 января, в бота — только после вашего «да» (порядок — RETRAIN.md в репозитории). Если модель устарела (задача не запустилась — например, закончилась подписка), бот пишет в Telegram не чаще раза в 3 дня.</div>
       <div id="modelAge" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
     </div></details>
     <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">🎨 Оформление</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="name">Тема</div>
+          <div class="sub">«Авто» — как в телефоне: днём светлая «тёплая бумага», ночью нейтральный графит (не слепит в темноте). Можно закрепить одну. Хранится на этом устройстве</div>
+        </div>
+        <select id="setTheme" onchange="setTheme(this.value)" style="flex-shrink:0;">
+          <option value="auto">Авто</option><option value="light">День</option><option value="dark">Ночь</option>
+        </select>
+      </div>
       <div class="settingRow">
         <div>
           <div class="name">Liquid Glass</div>
@@ -44736,7 +44803,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#f06292;"><summary class="settingsGroupTitle">🧠 Neuro</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--neuro);"><summary class="settingsGroupTitle">🧠 Neuro</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -44786,7 +44853,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#ffb74d;"><summary class="settingsGroupTitle">📈 Пробой диапазона</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--m-cfl);"><summary class="settingsGroupTitle">📈 Пробой диапазона</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Работа (день и 12ч — 120 монет)</div>
@@ -44810,7 +44877,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#ff8a65;"><summary class="settingsGroupTitle">🚀 Пробой 4ч</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--m-rbs);"><summary class="settingsGroupTitle">🚀 Пробой 4ч</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Работа (4ч — 127 монет, виртуально)</div>
@@ -44827,7 +44894,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#4dd0e1;"><summary class="settingsGroupTitle">🌊 Каскад EMA</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--m-cas);"><summary class="settingsGroupTitle">🌊 Каскад EMA</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Работа (1ч — 120 монет)</div>
@@ -44844,7 +44911,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#4caf50;"><summary class="settingsGroupTitle">🎯 Зоны</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--pos);"><summary class="settingsGroupTitle">🎯 Зоны</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Свой тейк, % от входа</div>
@@ -44889,7 +44956,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#26a5e4;"><summary class="settingsGroupTitle">Telegram</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">Telegram</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -44991,7 +45058,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#ef5350;" data-warn style="background:rgba(255,112,67,0.05);"><summary class="settingsGroupTitle">Автоторговля</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--neg);" data-warn style="background:rgba(255,112,67,0.05);"><summary class="settingsGroupTitle">Автоторговля</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -45182,6 +45249,12 @@ function toggleHints() {
   document.getElementById('hintsToggleBtn').style.opacity = hidden ? '0.4' : '1';
   localStorage.setItem('vp_hints_hidden', hidden ? '1' : '0');
 }
+// v0.99.793 — the theme: auto (the phone's) / day / night, per device
+function setTheme(mode) {
+  try { localStorage.setItem('vp_theme', ['light', 'dark'].includes(mode) ? mode : 'auto'); } catch (e) {}
+  vpThemeApply();
+}
+(function() { const el = document.getElementById('setTheme'); if (el) el.value = vpThemeApply(); })();
 // v0.99.405 — Liquid Glass theme, per device (on by default)
 function setGlassTheme(on) {
   document.body.classList.toggle('glass', !!on);
@@ -46716,7 +46789,7 @@ function zoneRowHtml(z) {
   const postSym = window._zPostSym && z.post_id ? window._zPostSym[z.post_id] : null;
   const otherCoin = postSym && z.symbol && z.symbol !== postSym ? `<span class="loss" style="font-weight:700;">⚠️ ${z.symbol.replace('_USDT', '')} — не та монета</span> ` : '';
   const canClose = z.status === 'in_trade' || (trL && ['PENDING', 'OPEN'].includes(trL.status) && trL.real && !trL.real.done);
-  return `<div style="margin-top:8px;padding:6px 0 0 8px;border-left:3px solid ${long ? '#4caf50' : '#ef5350'};">
+  return `<div style="margin-top:8px;padding:6px 0 0 8px;border-left:3px solid ${long ? 'var(--pos)' : 'var(--neg)'};">
     <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
       <div>${z.status === 'watch' || z.status === 'in_trade' ? `<span class="fx-dot ${z.status === 'watch' ? 'watch' : 'trade'}" title="${z.status === 'watch' ? 'жду подхода цены' : 'позиция открыта'}"></span>` : ''}${otherCoin}<span class="${long ? 'win' : 'loss'}" style="font-weight:700;">${long ? 'лонг' : 'шорт'}</span> <span class="dim">· ${stTxt}</span></div>
       <div style="white-space:nowrap;">
@@ -47461,7 +47534,7 @@ function zutHistFormHtml() {
       <span>дней</span>
     </div>
     <div class="dim" style="font-size:var(--fs-sm);margin-top:4px;">посты пойдут только в обучение (без слежения и сделок) · картинка ~10–30 с · уже взятые пропускаются · остановить можно в любой момент</div>
-    <div style="margin-top:6px;"><button onclick="zutHistoryGo()" style="background:var(--acc);color:#000;border:none;padding:5px 12px;border-radius:var(--r-xs);">▶ загрузить</button>
+    <div style="margin-top:6px;"><button onclick="zutHistoryGo()" style="background:var(--acc);color:var(--on-acc);border:none;padding:5px 12px;border-radius:var(--r-xs);">▶ загрузить</button>
       <button onclick="window._zutHistForm = false; refreshZones();" style="background:var(--ctl);border:none;color:var(--tx);padding:5px 12px;border-radius:var(--r-xs);">отмена</button></div>
   </div>`;
 }
@@ -47607,7 +47680,7 @@ if ('serviceWorker' in navigator) { try { navigator.serviceWorker.register('/sw.
       if (!note) {
         note = document.createElement('div');
         note.id = 'vpReloadNote';
-        note.style.cssText = 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:10001;background:#1f2633;color:#dfe3ea;padding:8px 14px;border-radius:18px;font-size:13px;box-shadow:0 2px 10px rgba(0,0,0,.5);';
+        note.style.cssText = 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:10001;background:#1f2633;color:var(--tx);padding:8px 14px;border-radius:18px;font-size:13px;box-shadow:0 2px 10px rgba(0,0,0,.5);';
         document.body.appendChild(note);
       }
       note.textContent = `бот перезапущен (v${r.version}) — обновляю страницу…`;
@@ -47726,7 +47799,7 @@ function zoneTradesHtml(list) {
   const rs = list.map(z => z.trade.pnl_r || 0);
   const wins = rs.filter(r => r > 0).length, sum = rs.reduce((a, b) => a + b, 0);
   const rows = list.map((z, i) => { const t = z.trade, w = t.result === 'WIN';
-    return `<div class="fx-zrow" onclick="zoneChart('${z.id}')" style="--i:${Math.min(i, 20)};cursor:pointer;padding:6px 8px;margin-top:4px;background:var(--card);border-radius:var(--r-sm);border-left:3px solid ${w ? '#4caf50' : (t.result === 'LOSS' ? '#ef5350' : '#e0a030')};font-size:var(--fs-sm);">
+    return `<div class="fx-zrow" onclick="zoneChart('${z.id}')" style="--i:${Math.min(i, 20)};cursor:pointer;padding:6px 8px;margin-top:4px;background:var(--card);border-radius:var(--r-sm);border-left:3px solid ${w ? 'var(--pos)' : (t.result === 'LOSS' ? 'var(--neg)' : 'var(--warn)')};font-size:var(--fs-sm);">
       <b>${(z.symbol || '').replace('_USDT', '')}</b> ${t.direction === 'LONG' ? 'лонг' : 'шорт'} · <b class="${(t.pnl_r || 0) > 0 ? 'win' : 'loss'}">${t.result === 'WIN' ? 'тейк' : t.result === 'LOSS' ? 'стоп' : t.result === 'BE' ? 'безубыток' : t.result === 'AUTHOR_EXIT' ? 'по посту автора' : t.result === 'MANUAL' ? 'вручную' : 'по времени'} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R${t.pnl_pct != null ? ` · ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct}%` : ''}</b>
       <span class="dim">· ${zfmt(t.entry)} → ${zfmt(t.exit_price)} · ${zdate(t.exit_time || t.time)}${t.autotrade_fired ? ' · 💰 биржа' : ''} · 📈</span></div>`; }).join('');
   return `<details style="margin-top:8px;"><summary style="cursor:pointer;">💼 Сделки по зонам: ${list.length} · WR ${Math.round(100 * wins / list.length)}% · итого ${sum > 0 ? '+' : ''}${sum.toFixed(2)}R</summary>${zonesRSpark(list)}${rows}</details>`;
@@ -47739,7 +47812,7 @@ async function zoneChart(zid) {
     box = document.createElement('div');
     box.id = 'zoneChartBox';
     box.style.cssText = 'position:fixed;inset:0;z-index:10000;background:#0b0d12;display:flex;flex-direction:column;padding:10px;box-sizing:border-box;';
-    box.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div id="zoneChartTitle" style="font-size:var(--fs-sm);color:#dfe3ea;"></div>'
+    box.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div id="zoneChartTitle" style="font-size:var(--fs-sm);color:var(--tx);"></div>'
       + '<button onclick="zoneChartClose()" style="background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:20px;width:40px;height:40px;font-size:20px;flex-shrink:0;">✕</button></div>'
       + '<canvas id="zoneChartCanvas" style="flex:1;width:100%;margin-top:8px;"></canvas>';
     document.body.appendChild(box);
@@ -47753,8 +47826,8 @@ async function zoneChart(zid) {
   if (!d.ok) { document.getElementById('zoneChartTitle').textContent = d.error || 'не получилось'; return; }
   const t = d.trade, sg = v => (v > 0 ? '+' : '') + v;
   document.getElementById('zoneChartTitle').innerHTML = `<b>${d.symbol.replace('_USDT', '')}</b> · <b>${d.tf || ''}</b> · ${d.side === 'long' ? 'лонг' : 'шорт'} ${d.levels.map(zfmt).join(' / ')}`
-    + (t ? ` · <b style="color:${(t.r || 0) > 0 ? '#3ddc97' : '#ff6b6b'}">${t.result === 'WIN' ? 'тейк' : t.result === 'LOSS' ? 'стоп' : t.result ? 'по времени' : 'в сделке'}${t.r != null ? ' ' + sg(t.r) + 'R' : ''}${t.pct != null ? ' · ' + sg(t.pct) + '%' : ''}</b>` : ' · входа не было')
-    + `<div style="color:#8a93a3;margin-top:2px;">${d.source}${t && t.real ? ' · 💰 сделка на бирже' : ''}</div>`;
+    + (t ? ` · <b style="color:${(t.r || 0) > 0 ? 'var(--pos)' : 'var(--neg)'}">${t.result === 'WIN' ? 'тейк' : t.result === 'LOSS' ? 'стоп' : t.result ? 'по времени' : 'в сделке'}${t.r != null ? ' ' + sg(t.r) + 'R' : ''}${t.pct != null ? ' · ' + sg(t.pct) + '%' : ''}</b>` : ' · входа не было')
+    + `<div style="color:var(--tx-3);margin-top:2px;">${d.source}${t && t.real ? ' · 💰 сделка на бирже' : ''}</div>`;
   drawZoneChart(d);
 }
 function drawZoneChart(d) {
@@ -47941,7 +48014,7 @@ async function emwChart(o) {
   draw();
 }
 function emwPanel(ctx, box, cs, opt) {
-  const cssv = (n, f) => (getComputedStyle(document.body).getPropertyValue(n) || '').trim() || f;
+  const cssv = (n, f) => (getComputedStyle(document.getElementById('chartTokens') || document.body).getPropertyValue(n) || '').trim() || f;   // v0.99.793 — the night tokens
   const grid = cssv('--line', '#26304a'), mut = cssv('--tx-3', '#6c7789'), ink = cssv('--tx', '#e8ecf2');
   const up = cssv('--pos', '#34d399'), dn = cssv('--neg', '#f87171');
   // v0.99.590 — user: "лейблы — непонятно, где тейк, стоп, а где EMA": each tag on the price scale
@@ -48447,7 +48520,7 @@ function liveCheckHtml(lc) {   // v0.99.648 — the live trades under the curren
 window._btg = window._btg || {};
 function btGateHtml(mod) {   // v0.99.648 — the last year's trades re-walked on Gate's candles
   const g = window._btg[mod];
-  const btn = `<span onclick="btGateStart('${mod}')" style="cursor:pointer;color:var(--accent,#7fd1ff);">🔁 сверить с Gate (12 мес)</span>`;
+  const btn = `<span onclick="btGateStart('${mod}')" style="cursor:pointer;color:var(--accent,var(--m-ema));">🔁 сверить с Gate (12 мес)</span>`;
   if (!g) return btn;
   if (g.running) return `<span class="dim">сверяю со свечами Gate… ${g.done || 0}${g.of ? ' из ' + g.of : ''}</span>`;
   if (g.err) return `<span class="loss">сверка не удалась: ${g.err}</span> · ${btn}`;
@@ -51674,7 +51747,7 @@ let _ssMoveTimer = null;
 async function toggleScreensaver() {
   const overlay = document.getElementById('screensaverOverlay');
   _ssActive = !_ssActive;
-  document.getElementById('screensaverBtn').style.color = _ssActive ? '#3ddc97' : '#5a6a7a';
+  document.getElementById('screensaverBtn').style.color = _ssActive ? 'var(--pos)' : 'var(--tx-3)';
   if (_ssActive) {
     overlay.style.display = 'block';
     // Fullscreen (v0.99.412 — not needed when the page itself already is)
