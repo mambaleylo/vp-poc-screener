@@ -52,7 +52,7 @@ def coin(sym):
                         j += 1
                     if ex is None:
                         j = min(n - 1, i + T); ex = c[j]
-                    res.append((int(t[i + 1]), d, round((d * (ex - en) - FEE * en) / risk, 4), round(risk / en * 100, 3)))
+                    res.append((int(t[i + 1]), int(d), round((d * (ex - en) - FEE * en) / risk, 4), round(risk / en * 100, 3)))
                     i = j + 1
                 out[(s, tk, q, T, e)] = res
     return sym, out
@@ -72,7 +72,7 @@ if __name__ == "__main__":
         st = lambda v: (len(v), round(float(np.mean([x[3] for x in v])), 4) if v else 0, round(100 * float(np.mean([x[3] > 0 for x in v])), 1) if v else 0)
         rows.append({"g": g, "design": st(a), "check": st(b), "risk_pct": round(float(np.median([x[4] for x in r])), 2) if r else 0})
     rows.sort(key=lambda x: -x["design"][1])
-    json.dump({"rows": rows, "best": [list(x) for x in allr[rows[0]["g"]]], "coins": len(syms)}, open(sys.argv[1], "w"), default=list)
+    json.dump({"rows": rows, "best": [list(x) for x in allr[rows[0]["g"]]], "coins": len(syms)}, open(sys.argv[1], "w"), default=float)
     print(f"монет {len(syms)}, {time.time() - t0:.0f}s")
     print("стоп ATR, тейк, квантиль ширины, баров, ER | подбор ≤2024: сделок, средний R, WR | проверка 2025–26: сделок, средний R, WR | стоп, % цены")
     for x in rows[:8] + rows[-3:]:
