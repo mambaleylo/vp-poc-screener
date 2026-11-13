@@ -144,7 +144,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.794"
+APP_VERSION = "0.99.795"
 
 # v0.99.791 — the bundle's state files (the user: "проверку на стабильность и сохранение данных, живучесть при перезапусках"; the
 # check — tools/winrate/t_state_safe.py — broke every one of them three ways): (1) the modules save from several threads (⚡: its
@@ -1375,6 +1375,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "smc_enabled", "autotrade_smc", "telegram_alerts_smc", "risk_pct_smc",   # v0.99.678
                   "htf_enabled", "autotrade_htf", "telegram_alerts_htf", "risk_pct_htf",   # v0.99.732
                   "liq_enabled", "liq_steps",   # v0.99.766
+                  "dlm_boost", "dlm_boost_usd", "dlm_boost_cap",   # v0.99.795
                   "wd_enabled", "wd_pct", "wd_min", "wd_floor", "wd_floor_bal",   # v0.99.779
                   "watch_enabled",   # v0.99.784
                   "backup_enabled",   # v0.99.785
@@ -1466,6 +1467,7 @@ def get_settings():
         "smc_enabled": SMC_ENABLED, "autotrade_smc": AUTOTRADE_ENABLED_SMC, "telegram_alerts_smc": TELEGRAM_ALERTS_SMC, "risk_pct_smc": MODULE_RISK_PCT.get("smc"),   # v0.99.678
         "htf_enabled": HTF_ENABLED, "autotrade_htf": AUTOTRADE_ENABLED_HTF, "telegram_alerts_htf": TELEGRAM_ALERTS_HTF, "risk_pct_htf": MODULE_RISK_PCT.get("htf"),   # v0.99.732
         "liq_enabled": LIQ_ENABLED, "liq_steps": LIQ_STEPS,   # v0.99.766
+        "dlm_boost": DLM_BOOST, "dlm_boost_usd": DLM_BOOST_USD, "dlm_boost_cap": DLM_BOOST_CAP,   # v0.99.795
         "wd_enabled": WD_ENABLED, "wd_pct": WD_PCT, "wd_min": WD_MIN, "wd_floor": WD_FLOOR, "wd_floor_bal": WD_FLOOR_BAL,   # v0.99.779
         "watch_enabled": WATCH_ENABLED,   # v0.99.784
         "backup_enabled": BACKUP_ENABLED,   # v0.99.785
@@ -1756,6 +1758,21 @@ def apply_settings(updates):
         globals()["TELEGRAM_ALERTS_TRADE_RESULTS"] = bool(updates["telegram_alerts_trade_results"])
     if "telegram_trade_results_real_only" in updates:
         globals()["TELEGRAM_TRADE_RESULTS_REAL_ONLY"] = bool(updates["telegram_trade_results_real_only"])
+    if "dlm_boost" in updates:   # v0.99.795 — «Режим разгона»: switched on -> its losses' limit counts from now
+        on_ = bool(updates["dlm_boost"])
+        if on_ and not DLM_BOOST and globals().get("_DLM") is not None:
+            b_ = _boost_st(); b_["base"] = float(b_.get("net") or 0); b_["off"] = None
+            if _DLM.get("loaded"):
+                dlm_save()
+        globals()["DLM_BOOST"] = on_
+    for k_, g_, lo_, hi_ in (("dlm_boost_usd", "DLM_BOOST_USD", 0, 1e7), ("dlm_boost_cap", "DLM_BOOST_CAP", 1, 1000)):
+        if k_ in updates and updates[k_] not in (None, "", False, True):
+            try:
+                v_ = float(updates[k_])
+                if lo_ <= v_ <= hi_:
+                    globals()[g_] = v_
+            except (TypeError, ValueError):
+                log_error(f"settings {k_} «{updates[k_]}» not taken")
     if "liq_enabled" in updates:   # v0.99.766 — the liquidity cut
         globals()["LIQ_ENABLED"] = bool(updates["liq_enabled"])
     if "liq_steps" in updates:
@@ -36972,7 +36989,7 @@ def dlm_load():
         d = state_read(DLM_STATE_FILE, "⚡ Лимитки")   # v0.99.791
         if d is not None:
             with _dlm_lock:
-                for k in ("orders", "trades", "scan", "bar_done"):
+                for k in ("orders", "trades", "scan", "bar_done", "boost"):   # v0.99.795 — boost: the «разгон» tally
                     if d.get(k) is not None:
                         _DLM[k] = d[k]
     except Exception as e:
@@ -36991,7 +37008,8 @@ def dlm_save():
             keep = [o for o in _DLM["orders"] if o["status"] == "OPEN" or (o.get("real") or {}).get("id")]
             rest = [o for o in _DLM["orders"] if not (o["status"] == "OPEN" or (o.get("real") or {}).get("id"))][-400:]
             ids = {id(o) for o in keep + rest}
-            data = json.dumps({"orders": [o for o in _DLM["orders"] if id(o) in ids], "trades": _DLM["trades"][-3000:], "scan": _DLM["scan"], "bar_done": _DLM.get("bar_done")})
+            data = json.dumps({"orders": [o for o in _DLM["orders"] if id(o) in ids], "trades": _DLM["trades"][-3000:], "scan": _DLM["scan"], "bar_done": _DLM.get("bar_done"),
+                               "boost": _DLM.get("boost")})
         state_write(DLM_STATE_FILE, data)   # v0.99.791
     except Exception as e:
         log_error(f"dlm state save: {e}")
@@ -38431,7 +38449,7 @@ def dlm_bn_place(o):
             o["real"] = {"status": "LIMIT", "ex": "binance", "id": str(x.get("orderId")), "bsym": bsym, "scl": scl, "qty": float(x.get("origQty") or 0),
                          "price": float(x.get("price") or 0) / scl, "lev": c.get("lev"), "risk": c.get("risk"), "osc": c.get("osc"), "load": c.get("load"),
                          "dual": bnf_dual(), "tick": info["tick"], "step": info["step"], "tif": x.get("timeInForce"), "margin": c.get("margin"),
-                         "t_place": int(float(x.get("time") or time.time() * 1000) / 1000), "found": True}
+                         "t_place": int(float(x.get("time") or time.time() * 1000) / 1000), "found": True, **({"boost": c["boost"]} if c.get("boost") else {})}
             log_error(f"dlm place {sym}: the limit whose answer was lost stands on Binance ({x.get('status')}) — taken")
             return
         if x is not None:   # it stood and is gone (cancelled / expired): a new one under a new id
@@ -38453,27 +38471,34 @@ def dlm_bn_place(o):
         cap = min(cap, int(_BNF["lev_cap"]))
     mmr = tiers[0][1] if tiers else SCALP_DEFAULT_MMR_PCT
     acct = bnf_account()
-    osc = dlm_osc_mult(sym, s)   # v0.99.704 — x the daily WaveTrend
-    lm = dlm_load_mult()
-    risk = round(dlm_risk(acct["equity"]) * lm * osc * kx * dlm_stream_mult(o), 4)   # v0.99.703 — x the load; v0.99.746 — x the stream & side
-    tb = {bsym: tiers} if tiers else None
-    mt = bn_margin_mode(bsym)   # v0.99.717 — cross (the open risk capped; v0.99.744: the coin's highest leverage) or isolated (the leverage by the emergency stop)
-    if mt == "CROSSED":
-        risk, why = bn_heat_cap(risk, acct["equity"])
-        if why:   # waits (an open trade may close before the price comes) and says why
-            o["hold"] = why; o["real"] = None
-            return
-    margin, lev, skip = bn_size(direction, lv, sl, cap, mmr, acct["equity"], risk, bsym, tb, mt, safety=_dlm_liq_buf())
-    if not skip and margin > acct["free"] * 0.9:   # the free margin checked: the risk scaled down to what the account carries
-        if acct["free"] <= 1:
-            skip = f"нет свободной маржи (свободно {acct['free']:.2f}$)"
-        else:
-            risk = round(risk * acct["free"] * 0.9 / margin, 2)
-            margin, lev, skip = bn_size(direction, lv, sl, cap, mmr, acct["equity"], risk, bsym, tb, mt, safety=_dlm_liq_buf())
+    bst = dlm_boost_plan(o, lv, sl, tiers, cap, acct, info) if dlm_boost_open() else None   # v0.99.795 — the day's «разгон»
+    if bst and _bn_set_margin(bsym, "ISOLATED") != "ISOLATED":
+        bst = None
+    if bst:   # the whole stake at work, never cut: its own isolated margin, the loss at the emergency stop = the stake
+        osc = lm = 1.0; mt = "ISOLATED"; margin, lev, skip = bst["margin"], bst["lev"], None
+        risk = round(bst["stake"] / max(1e-9, acct["equity"]) * 100 * kx, 4)
+    else:
+        osc = dlm_osc_mult(sym, s)   # v0.99.704 — x the daily WaveTrend
+        lm = dlm_load_mult()
+        risk = round(dlm_risk(acct["equity"]) * lm * osc * kx * dlm_stream_mult(o), 4)   # v0.99.703 — x the load; v0.99.746 — x the stream & side
+        tb = {bsym: tiers} if tiers else None
+        mt = bn_margin_mode(bsym)   # v0.99.717 — cross (the open risk capped; v0.99.744: the coin's highest leverage) or isolated (the leverage by the emergency stop)
+        if mt == "CROSSED":
+            risk, why = bn_heat_cap(risk, acct["equity"])
+            if why:   # waits (an open trade may close before the price comes) and says why
+                o["hold"] = why; o["real"] = None
+                return
+        margin, lev, skip = bn_size(direction, lv, sl, cap, mmr, acct["equity"], risk, bsym, tb, mt, safety=_dlm_liq_buf())
+        if not skip and margin > acct["free"] * 0.9:   # the free margin checked: the risk scaled down to what the account carries
+            if acct["free"] <= 1:
+                skip = f"нет свободной маржи (свободно {acct['free']:.2f}$)"
+            else:
+                risk = round(risk * acct["free"] * 0.9 / margin, 2)
+                margin, lev, skip = bn_size(direction, lv, sl, cap, mmr, acct["equity"], risk, bsym, tb, mt, safety=_dlm_liq_buf())
     if skip:
         o["real"] = {"status": "SKIPPED", "ex": "binance", "detail": str(skip)[:160]}
         return
-    qty = bn_fmt(margin * lev / lv, info["step"])
+    qty = bst["qty"] if bst else bn_fmt(margin * lev / lv, info["step"])
     q = float(qty)
     if q < info["min_qty"] or q * lv < info["min_notional"]:
         o["real"] = {"status": "SKIPPED", "ex": "binance", "detail": f"позиция {q * lv:.2f}$ меньше минимума Binance ({info['min_notional']:g}$)"}
@@ -38493,7 +38518,7 @@ def dlm_bn_place(o):
     # v0.99.792 — the order's own client id, kept over the retries: a request whose answer was lost (a timeout) may have
     # placed the limit — asked back by this id before anything is sent again, so a retry never makes a second limit
     cid = o.get("cid") or f"vpdlm{int(time.time() * 1000)}"
-    o["cid"] = cid; o["cid_ctx"] = {"lev": int(lev), "risk": round(risk / kx, 2), "osc": osc, "load": lm, "margin": mt}
+    o["cid"] = cid; o["cid_ctx"] = {"lev": int(lev), "risk": round(risk / kx, 2), "osc": osc, "load": lm, "margin": mt, **({"boost": bst["stake"]} if bst else {})}
     base_p = dict(_bnf_side_params(s, False, dual), symbol=bsym, type="LIMIT", quantity=qty, price=px, newClientOrderId=cid)
     gtd = int(max(float(o["until"]), time.time() + 700) * 1000)   # v0.99.708 — Binance takes a GTD at least 10 min ahead
     try:
@@ -38512,8 +38537,140 @@ def dlm_bn_place(o):
     o.pop("cid", None); o.pop("cid_ctx", None)
     o["real"] = {"status": "LIMIT", "ex": "binance", "id": str(r.get("orderId")), "bsym": bsym, "scl": scl, "qty": q, "price": float(px) / scl,
                  "lev": int(lev), "risk": round(risk / kx, 2), "osc": osc, "load": lm, "dual": dual, "tick": info["tick"], "step": info["step"], "tif": tif,
-                 "margin": mt, "t_place": int(time.time())}   # v0.99.717; v0.99.731 — t_place: from when it stood on the exchange
+                 "margin": mt, "t_place": int(time.time()), **({"boost": bst["stake"]} if bst else {})}   # v0.99.717; v0.99.731 — t_place: from when it stood on the exchange
     _dlm_bn_pre_exits(o, sl)
+
+
+# v0.99.795 — «Режим разгона» (the user: "раз в неделю брать рандомную сделку по лимиткам и заходить в неё на весь депозит" ->
+# tools/winrate/money_boost.py: all-in loses everything, a fixed stake does not -> "Разработай схему, галочкой в настройках
+# включается, режим разгона, одна и та же сумма, указанная мной" -> "первую сделку дня, но ... которая принесла 9$ тейком" (not a
+# trade the sizing cut — the whole stake at work) -> "5" (the losses' limit, in stakes)). Once a day (the Moscow day) the first ⚡
+# limit the bot puts on Binance while the day has no «разгон» trade yet is sized by the stake, not by 4% of the account: its own
+# isolated margin, the size such that the loss at the exchange's emergency stop is the stake (the leverage leaves the
+# liquidation _dlm_liq_buf() (1.25) x beyond that stop) — never cut: when the coin's leverage / the account's cap / the free margin cannot carry the
+# whole stake, that limit goes as a usual ⚡ one and the next one of the day is tried. The same stake every time (a win is not
+# added to the next). Its own tally; the net loss reaching DLM_BOOST_CAP stakes switches the mode off and says so. The rules of
+# the trade (the take, the stops, the time) are ⚡'s own. The lab: per stake +0.11 a trade, a take +0.40, a stop -0.75, ~2.5 a
+# week; the worst run 5.2 stakes (money_boost.py, 2023–2026).
+DLM_BOOST = os.environ.get("VP_DLM_BOOST", "0") == "1"
+DLM_BOOST_USD = float(os.environ.get("VP_DLM_BOOST_USD", "0") or 0)
+DLM_BOOST_CAP = float(os.environ.get("VP_DLM_BOOST_CAP", "5") or 5)
+MSK = 3 * 3600
+
+
+def _boost_st():
+    b = _DLM.get("boost")
+    if not isinstance(b, dict):
+        b = _DLM["boost"] = {"day": None, "n": 0, "wins": 0, "losses": 0, "net": 0.0, "base": 0.0, "off": None, "last": []}
+    return b
+
+
+def _msk_day(t):
+    return time.strftime("%Y-%m-%d", time.gmtime(int(t) + MSK))
+
+
+def dlm_boost_open(now=None):
+    """may the next ⚡ limit be the day's «разгон»: on, a stake, under the losses' limit, no «разгон» trade today, none armed"""
+    now = now or time.time()
+    if not (DLM_BOOST and DLM_BOOST_USD > 0):
+        return False
+    b = _boost_st()
+    if b.get("day") == _msk_day(now):
+        return False
+    with _dlm_lock:
+        armed = any(o["status"] == "OPEN" and (o.get("real") or {}).get("id") and (o.get("real") or {}).get("boost") for o in _DLM["orders"])
+        live = any(t["status"] == "OPEN" and (t.get("real") or {}).get("boost") for t in _DLM["trades"])
+    return not armed and not live
+
+
+def _bn_set_margin(bsym, want):
+    try:
+        bnf_req("POST", "/fapi/v1/marginType", {"symbol": bsym, "marginType": want})
+        return want
+    except BinanceError as e:
+        if e.code == -4046:
+            return want
+        log_error(f"binance margin type {bsym} -> {want}: {e}")
+        return None
+
+
+def dlm_boost_plan(o, lv, sl, tiers, cap, acct, info, stake=None):
+    """the «разгон» limit's size (Binance's prices) -> {"stake", "qty", "lev", "margin"}, or None when the whole stake does not fit"""
+    S = float(stake or DLM_BOOST_USD)
+    em = abs(lv - sl) / lv if lv else 0
+    if S <= 0 or em <= 0:
+        return None
+    notional = S / em
+    qty = bn_fmt(notional / lv, info["step"]); q = float(qty)
+    if q * lv * em < S * 0.97 or q < info["min_qty"] or q * lv < info["min_notional"]:   # the step would cut it
+        qty = bn_fmt(notional / lv + info["step"], info["step"]); q = float(qty)
+    want = int(1 / (em * _dlm_liq_buf()))   # the liquidation _dlm_liq_buf() x beyond the emergency stop
+    brk = next((int(l_) for c_, _m, l_ in sorted(tiers or []) if c_ >= q * lv), None) if tiers else int(cap)
+    lev = min(want, int(cap), brk or 0)
+    if lev < 1:
+        return None
+    margin = q * lv / lev
+    if margin > acct["free"] * 0.9:   # the account cannot carry the whole stake now: no «разгон» on this one
+        return None
+    return {"stake": S, "qty": qty, "lev": lev, "margin": margin}
+
+
+def dlm_boost_opened(t, now=None):
+    now = now or time.time(); b = _boost_st()
+    b["day"] = _msk_day(now); b["n"] = int(b.get("n") or 0) + 1
+    try:
+        send_telegram(f"🚀 Разгон: ставка ${float(t['real'].get('boost')):g} — {t['symbol'].replace('_USDT', '')} "
+                      f"{'лонг' if t['side'] > 0 else 'шорт'} по {t['entry']:.6g} (сделка ⚡, тейк {t['tp']:.6g}). Следующая — завтра.", category="dlm")
+    except Exception as e:
+        log_error(f"dlm boost note: {e}")
+
+
+def dlm_boost_settle():
+    """the closed «разгон» trades into the tally ($ from the real fills), the losses' limit checked -> changed"""
+    b = _boost_st(); changed = False
+    with _dlm_lock:
+        done = [t for t in _DLM["trades"] if t["status"] == "CLOSED" and (t.get("real") or {}).get("boost") and not t["real"].get("boost_done")]
+    for t in done:
+        r = t["real"]; S = float(r["boost"]); scl = float(r.get("scl") or 1.0); q = float(r.get("filled") or 0)
+        e = float(r.get("e_real") or 0) or float(t["entry"]) * scl; x = float(r.get("x_real") or 0) or float(t.get("exit") or t["entry"]) * scl
+        pnl = t["side"] * (x - e) * q - 0.0005 * q * (e + x) if q else 0.0   # the fills, the taker fees
+        pnl = max(pnl, -S * 1.05)   # the isolated margin: never much more than the stake
+        r["boost_done"] = True; r["boost_pnl"] = round(pnl, 2)
+        b["net"] = round(float(b.get("net") or 0) + pnl, 2)
+        b["wins" if pnl > 0 else "losses"] = int(b.get("wins" if pnl > 0 else "losses") or 0) + 1
+        b["last"] = (b.get("last") or [])[-19:] + [{"s": t["symbol"], "t": int(t.get("t_out") or time.time()), "pnl": round(pnl, 2), "stake": S}]
+        changed = True
+        lost = float(b.get("base") or 0) - b["net"]
+        msg = (f"🚀 Разгон: {t['symbol'].replace('_USDT', '')} {'тейк' if pnl > 0 else 'стоп'} {pnl:+.2f}$ (ставка ${S:g}) · "
+               f"итог разгона {b['net']:+.2f}$ за {b['wins'] + b['losses']} ставок ({b['wins']} в плюс)")
+        if DLM_BOOST and lost >= DLM_BOOST_CAP * S - 1e-9:
+            globals()["DLM_BOOST"] = False
+            b["off"] = {"t": int(time.time()), "why": f"потери разгона дошли до {DLM_BOOST_CAP:g} ставок ({lost:.2f}$)"}
+            msg += f"\n⛔ Разгон выключен сам: потери дошли до лимита {DLM_BOOST_CAP:g} ставок ({lost:.2f}$). Включить снова — в настройках."
+            try:
+                save_settings()
+            except Exception as ex:
+                log_error(f"dlm boost off save: {ex}")
+        try:
+            send_telegram(msg, category="dlm")
+        except Exception as ex:
+            log_error(f"dlm boost note: {ex}")
+    if changed:
+        dlm_save()
+    return changed
+
+
+def dlm_boost_status(now=None):
+    now = now or time.time(); b = _boost_st()
+    return {"on": DLM_BOOST, "stake": DLM_BOOST_USD, "cap": DLM_BOOST_CAP, "today": b.get("day") == _msk_day(now), "n": int(b.get("n") or 0),
+            "wins": int(b.get("wins") or 0), "losses": int(b.get("losses") or 0), "net": float(b.get("net") or 0),
+            "left": round(DLM_BOOST_CAP * DLM_BOOST_USD - (float(b.get("base") or 0) - float(b.get("net") or 0)), 2) if DLM_BOOST_USD else None,
+            "off": b.get("off"), "last": (b.get("last") or [])[-5:]}
+
+
+@app.route("/api/dlm/boost")
+def api_dlm_boost():
+    return jsonify(dlm_boost_status())
 
 
 def _dlm_bn_pre_exits(o, sl_x):
@@ -38697,8 +38854,10 @@ def dlm_bn_tick(orders, trades):
         changed = True
         if filled > 0:
             fill = (float(x.get("avgPrice") or 0) / r["scl"]) or r["price"]
-            t = _dlm_open_trade(o, _dlm_grid(now, int(o.get("bs") or 900), _dlm_off(o)), fill, real=dict({k: r.get(k) for k in ("ex", "bsym", "scl", "tick", "step", "dual", "risk", "lev")},
+            t = _dlm_open_trade(o, _dlm_grid(now, int(o.get("bs") or 900), _dlm_off(o)), fill, real=dict({k: r.get(k) for k in ("ex", "bsym", "scl", "tick", "step", "dual", "risk", "lev", "boost") if k in r or k != "boost"},
                                                                                         filled=filled, order=r["id"]))
+            if t and r.get("boost"):   # v0.99.795 — the day's «разгон» is taken
+                dlm_boost_opened(t, now)
             if t:
                 try:
                     _dlm_bn_take_over(t, r)   # v0.99.708 — the exits placed with the limit
@@ -39128,6 +39287,10 @@ def dlm_real_tick():
     orders = [o for o in orders if o not in bo]
     trades = [t for t in trades if t not in bt]
     changed = bool((bo or bt) and dlm_bn_tick(bo, bt))
+    try:
+        changed = dlm_boost_settle() or changed   # v0.99.795
+    except Exception as e:
+        log_error(f"dlm boost settle: {e}")
     if not orders and not trades:
         if changed:
             dlm_save()
@@ -44946,6 +45109,20 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
       </div>
       <div id="liqRecent" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">урезанных позиций пока не было</div>
     </div></details>
+    <details class="settingsGroup" style="--mod-color:var(--m-rbs);" data-warn><summary class="settingsGroupTitle">🚀 Режим разгона (⚡)</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Режим разгона</div>
+          <div class="sub">раз в сутки (по Москве) первая лимитка ⚡, которую бот ставит на Binance, идёт не на 4% счёта, а на вашу ставку: своя изолированная маржа, стоп забирает не больше ставки, тейк по бэктесту — около +40% ставки. Ставка всегда одна и та же, выигрыш в неё не добавляется. Если биржа не даёт поставить ставку целиком (плечо монеты, свободная маржа), берётся следующая лимитка дня. По бэктесту 2023–2026: ~2,5 ставки в неделю, тейком 75%, в среднем +11% ставки за сделку, худшая серия −5,2 ставки</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setDlmBoost"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow"><div><div class="label">↳ Ставка, $</div><div class="sub">сколько теряется на стопе; держите на счёте хотя бы 5 ставок</div></div>
+        <input type="number" id="setDlmBoostUsd" min="0" step="1" placeholder="0" style="width:90px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);"></div>
+      <div class="settingRow subRow"><div><div class="label">↳ Выключить после потерь, ставок</div><div class="sub">разгон выключится сам, когда его итог с момента включения уйдёт в минус на столько ставок</div></div>
+        <input type="number" id="setDlmBoostCap" min="1" step="1" placeholder="5" style="width:90px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);"></div>
+      <div id="boostStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>
+    </div></details>
     <div class="setSection">Уведомления</div>
     <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">🔔 Telegram: общее и сделки</summary><div class="settingsGroupBody">
       <div class="settingRow">
@@ -50687,6 +50864,7 @@ const setInputs = {
   bn_others: document.getElementById('setBnOthers'),   // v0.99.698
   bn_cross: document.getElementById('setBnCross'),   // v0.99.717
   liq_enabled: document.getElementById('setLiqEnabled'),   // v0.99.766
+  dlm_boost: document.getElementById('setDlmBoost'),   // v0.99.795
   wd_enabled: document.getElementById('setWdEnabled'),   // v0.99.779
   watch_enabled: document.getElementById('setWatchEnabled'),   // v0.99.784
   backup_enabled: document.getElementById('setBackupEnabled'),   // v0.99.785
@@ -50720,6 +50898,8 @@ const setValueInputs = {
   risk_pct_htf: document.getElementById('setRiskPctHtf'),   // v0.99.732
   risk_pct_cfl: document.getElementById('setRiskPctCfl'),   // v0.99.740
   liq_steps: document.getElementById('setLiqSteps'),   // v0.99.766
+  dlm_boost_usd: document.getElementById('setDlmBoostUsd'),   // v0.99.795
+  dlm_boost_cap: document.getElementById('setDlmBoostCap'),
   wd_pct: document.getElementById('setWdPct'),   // v0.99.779 — the withdrawal advice
   wd_min: document.getElementById('setWdMin'),
   wd_floor: document.getElementById('setWdFloor'),
@@ -50761,7 +50941,7 @@ async function loadSettings() {
     applySettingsToInputs(s);
     updateHeaderButtonVisibility(s);
   } catch (e) {}
-  loadLiq(); loadModelAge(); loadWd(); loadWatch(); loadBackup(); loadReport();
+  loadLiq(); loadModelAge(); loadWd(); loadWatch(); loadBackup(); loadReport(); loadBoost();   // v0.99.795 — loadBoost
 }
 async function loadModelAge() {   // v0.99.768 — the models' age
   try {
@@ -50769,6 +50949,19 @@ async function loadModelAge() {   // v0.99.768 — the models' age
     if (!el) return;
     const dt = t => t ? new Date(t * 1000).toLocaleDateString('ru-RU') : '—';
     el.innerHTML = (d.models || []).map(x => `${x.stale ? '⚠️' : '✅'} <b>${x.name}</b> — обучена по ${dt(x.trained_to)}${x.stale ? ' · <span class="loss">устарела, переобучение не пришло</span>' : ''} · план: ${x.kind === 'month' ? 'каждый месяц' : 'раз в год'} (${x.next})`).join('<br>');
+  } catch (e) {}
+}
+async function loadBoost() {   // v0.99.795 — «Режим разгона»: its tally
+  try {
+    const d = await (await fetch('/api/dlm/boost')).json(), el = document.getElementById('boostStatus');
+    if (!el) return;
+    const p = [];
+    if (d.off) p.push(`<span class="loss">выключен сам: ${d.off.why}</span>`);
+    if (d.on && !(d.stake > 0)) p.push('<span class="warnTxt">укажите ставку — без неё разгон не работает</span>');
+    if (d.n) p.push(`ставок ${d.n}: в плюс ${d.wins}, в минус ${d.losses} · итог <b class="${d.net >= 0 ? 'win' : 'loss'}">${d.net >= 0 ? '+' : ''}${d.net.toFixed(2)}$</b>`
+                    + (d.on && d.left !== null ? ` · до лимита потерь ${d.left.toFixed(2)}$` : ''));
+    if (d.on && d.stake > 0) p.push(d.today ? 'сегодняшняя ставка уже сделана' : 'ждёт первой лимитки дня');
+    el.innerHTML = p.join('<br>') || (d.on ? '—' : 'выключен');
   } catch (e) {}
 }
 async function loadWd() {   // v0.99.779 — the withdrawal advice: the last one and what it would be now
