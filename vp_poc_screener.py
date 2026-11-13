@@ -38552,8 +38552,8 @@ def dlm_bn_place(o):
 # added to the next). Its own tally; the net loss reaching DLM_BOOST_CAP stakes switches the mode off and says so. The rules of
 # the trade (the take, the stops, the time) are ⚡'s own. The lab: per stake +0.11 a trade, a take +0.40, a stop -0.75, ~2.5 a
 # week; the worst run 5.2 stakes (money_boost.py, 2023–2026).
-DLM_BOOST = os.environ.get("VP_DLM_BOOST", "0") == "1"
-DLM_BOOST_USD = float(os.environ.get("VP_DLM_BOOST_USD", "0") or 0)
+DLM_BOOST = os.environ.get("VP_DLM_BOOST", "1") == "1"   # the user: "по умолчанию включи и сумма 100$"
+DLM_BOOST_USD = float(os.environ.get("VP_DLM_BOOST_USD", "100") or 0)
 DLM_BOOST_CAP = float(os.environ.get("VP_DLM_BOOST_CAP", "5") or 5)
 MSK = 3 * 3600
 
@@ -45118,7 +45118,7 @@ try { matchMedia('(prefers-color-scheme: light)').addEventListener('change', vpT
         <label class="switch"><input type="checkbox" id="setDlmBoost"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow subRow"><div><div class="label">↳ Ставка, $</div><div class="sub">сколько теряется на стопе; держите на счёте хотя бы 5 ставок</div></div>
-        <input type="number" id="setDlmBoostUsd" min="0" step="1" placeholder="0" style="width:90px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);"></div>
+        <input type="number" id="setDlmBoostUsd" min="0" step="1" placeholder="100" style="width:90px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);"></div>
       <div class="settingRow subRow"><div><div class="label">↳ Выключить после потерь, ставок</div><div class="sub">разгон выключится сам, когда его итог с момента включения уйдёт в минус на столько ставок</div></div>
         <input type="number" id="setDlmBoostCap" min="1" step="1" placeholder="5" style="width:90px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);"></div>
       <div id="boostStatus" class="dim" style="font-size:var(--fs-sm);padding:4px 2px;">—</div>

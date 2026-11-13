@@ -38,6 +38,10 @@ def order(sym, lv=1.0, atr=0.02, side=1):
          "until": now + 40000, "status": "OPEN", "real": None}
     V._DLM["orders"].append(o); return o
 rule = (V._DLM["model"].get("rule") or {})
+# (0) the bot's defaults (the user: "по умолчанию включи и сумма 100$")
+import re as _re
+_src = open(V.__file__).read()
+chk("по умолчанию в боте: включён, ставка $100, лимит 5 ставок", 'os.environ.get("VP_DLM_BOOST", "1")' in _src and 'os.environ.get("VP_DLM_BOOST_USD", "100")' in _src and 'os.environ.get("VP_DLM_BOOST_CAP", "5")' in _src)
 # (1) off
 V.DLM_BOOST = False; V.DLM_BOOST_USD = 20.0
 a = order("AAA_USDT"); V.dlm_bn_place(a)

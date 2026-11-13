@@ -12,6 +12,7 @@ for fn in glob.glob(os.path.join(REPO, "vp_*_model.json")) + [os.path.join(REPO,
     if os.path.exists(fn):
         shutil.copy(fn, TMP)
 os.environ.setdefault("VP_TELEGRAM_ENABLED", "0")
+os.environ.setdefault("VP_DLM_BOOST", "0")   # v0.99.795 — «разгон» on by default in the bot; the tests size ⚡ as always unless they switch it on
 _spec = importlib.util.spec_from_file_location("vp_poc_screener", os.path.join(TMP, "vp_poc_screener.py"))
 V = importlib.util.module_from_spec(_spec)
 sys.modules["vp_poc_screener"] = V
