@@ -1,5 +1,5 @@
 """v0.99.795 — «Режим разгона»: (1) off -> the ⚡ limit sized as always; (2) on with a stake -> the day's first ⚡ limit: isolated, the
-loss at the emergency stop = the stake (never cut), the leverage leaving the liquidation 1.5x beyond that stop; the next limit while
+loss at the emergency stop = the stake (never cut), the leverage leaving the liquidation _dlm_liq_buf() x beyond that stop; the next limit while
 it is armed -> a usual one; (3) the stake does not fit (the coin's leverage / the free margin) -> that limit usual, the next one of
 the day tried; (4) the fill -> the trade carries the stake, the day taken: no second «разгон» today, again tomorrow (Moscow day);
 (5) the close -> the tally in $ from the fills, Telegram; the losses reaching the limit (in stakes) switch the mode off and say so;
