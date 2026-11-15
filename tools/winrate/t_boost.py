@@ -84,13 +84,13 @@ try:
 finally:
     time.time = real_t
 # (5) the tally, the limit
-t0 = tr[0]; t0["real"].update(e_real=1.0, x_real=1.012, filled=t0["real"].get("filled") or e["real"]["qty"]); t0["result"] = "WIN"
+t0 = tr[0]; t0["real"].update(fills=2, e_real=1.0, x_real=1.012, filled=t0["real"].get("filled") or e["real"]["qty"]); t0["result"] = "WIN"
 tg.clear(); V.dlm_boost_settle(); st = V.dlm_boost_status()
 chk(f"тейк в итоге разгона: {st['net']:+.2f}$, сообщение «{(tg or [''])[0][:70]}…»", st["wins"] == 1 and st["net"] > 0 and "тейк" in tg[0])
 def loss_trade(i):
     q = 20 / 0.06
     V._DLM["trades"].append({"id": f"x{i}", "symbol": "AAA_USDT", "side": 1, "direction": "LONG", "entry": 1.0, "exit": 0.94, "tp": 1.02, "status": "CLOSED", "result": "LOSS",
-                             "t_in": int(now), "t_out": int(now) + i, "real": {"ex": "binance", "bsym": "AAAUSDT", "scl": 1.0, "filled": q, "boost": 20.0, "e_real": 1.0, "x_real": 0.94}})
+                             "t_in": int(now), "t_out": int(now) + i, "real": {"ex": "binance", "bsym": "AAAUSDT", "scl": 1.0, "filled": q, "boost": 20.0, "e_real": 1.0, "x_real": 0.94, "fills": 2}})
 for i in range(4): loss_trade(i)
 tg.clear(); V.dlm_boost_settle(); st = V.dlm_boost_status()
 chk(f"четыре стопа: итог {st['net']:+.2f}$, до лимита {st['left']}$ — ещё работает", V.DLM_BOOST and st["losses"] == 4)

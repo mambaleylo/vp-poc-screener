@@ -144,7 +144,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.795"
+APP_VERSION = "0.99.796"
 
 # v0.99.791 — the bundle's state files (the user: "проверку на стабильность и сохранение данных, живучесть при перезапусках"; the
 # check — tools/winrate/t_state_safe.py — broke every one of them three ways): (1) the modules save from several threads (⚡: its
@@ -33523,6 +33523,21 @@ def prx_scan_once(late=False):
     prx_save()
 
 
+def prx_entry_open(sym, t_hour, px):
+    """v0.99.796 — the open of the entry bar (the hour the scan runs in), the price the research's limit is counted from (prx_settle:
+    lv = the bar's open - side x lim ATR). The live limit was counted from the price at the scan (~40 s into the hour): ATOM 11.11 —
+    the research's limit 1.4326 was reached (+0.73R), the live one at 1.4356 never; FET — filled 0.4% away from the research's
+    price. Binance's forming 1h bar (the exchange the trade is on); the scan's price when Binance does not answer."""
+    try:
+        if bn_routed("prv"):
+            k = next((c for c in binance_klines(sym, "1h", t_hour, t_hour + 3599) or [] if int(c["time"]) == int(t_hour)), None)
+            if k and k.get("open"):
+                return float(k["open"])
+    except Exception as e:
+        log_error(f"p/r entry bar open {sym}: {e}")
+    return px
+
+
 def prx_open(m, c, t_hour, live_px=None, late=False):
     rule = m["rule"]
     s, sym, hrs = c["side"], c["symbol"], c["tf"]
@@ -33537,7 +33552,7 @@ def prx_open(m, c, t_hour, live_px=None, late=False):
           "rv": PRX_MODEL_VER, "atr": c["atr"]}
     lim = float(rule.get("entry_lim_atr") or 0)
     if lim:   # v0.99.662 — the entry by a limit lim ATR better than the bar's open, waiting entry_wait bars (no fill = no trade)
-        tr.update({"status": "PENDING", "lim_atr": lim, "wait": int(rule.get("entry_wait") or 3), "lv": px - s * lim * c["atr"]})
+        tr.update({"status": "PENDING", "lim_atr": lim, "wait": int(rule.get("entry_wait") or 3), "lv": prx_entry_open(sym, t_hour, px) - s * lim * c["atr"]})
     if rule.get("stop_close") and rule.get("hard_atr"):
         # v0.99.641 — the stop by the CLOSE of the trade's bar (a wick through it no longer stops the trade); the exchange
         # holds only the hard stop further away, and the position is sized on it ("risk" = the hard stop's distance)
@@ -38628,11 +38643,14 @@ def dlm_boost_opened(t, now=None):
 def dlm_boost_settle():
     """the closed «разгон» trades into the tally ($ from the real fills), the losses' limit checked -> changed"""
     b = _boost_st(); changed = False
-    with _dlm_lock:
-        done = [t for t in _DLM["trades"] if t["status"] == "CLOSED" and (t.get("real") or {}).get("boost") and not t["real"].get("boost_done")]
+    now = time.time()
+    with _dlm_lock:   # v0.99.796 — after the real fills came (_dlm_bn_fills, 20 s+ after the close), or 15 min after it without them
+        done = [t for t in _DLM["trades"] if t["status"] == "CLOSED" and (t.get("real") or {}).get("boost") and not t["real"].get("boost_done")
+                and ("fills" in t["real"] or now - int(t.get("t_out") or 0) >= 900)]
     for t in done:
         r = t["real"]; S = float(r["boost"]); scl = float(r.get("scl") or 1.0); q = float(r.get("filled") or 0)
-        e = float(r.get("e_real") or 0) or float(t["entry"]) * scl; x = float(r.get("x_real") or 0) or float(t.get("exit") or t["entry"]) * scl
+        # e_real / x_real are in the bot's prices (divided by scl): back to Binance's, the quantity's unit (a 1000-coin was 1000x off)
+        e = (float(r.get("e_real") or 0) or float(t["entry"])) * scl; x = (float(r.get("x_real") or 0) or float(t.get("exit") or t["entry"])) * scl
         pnl = t["side"] * (x - e) * q - 0.0005 * q * (e + x) if q else 0.0   # the fills, the taker fees
         pnl = max(pnl, -S * 1.05)   # the isolated margin: never much more than the stake
         r["boost_done"] = True; r["boost_pnl"] = round(pnl, 2)
@@ -39287,6 +39305,11 @@ def dlm_real_tick():
     orders = [o for o in orders if o not in bo]
     trades = [t for t in trades if t not in bt]
     changed = bool((bo or bt) and dlm_bn_tick(bo, bt))
+    if DLM_BINANCE and BINANCE_API_KEY and not (bo or bt):   # v0.99.796 — dlm_bn_tick (and its fills) ran only while a ⚡ limit / trade stood
+        try:                                                   # on Binance: the last trade's real fills never came (H_USDT 10.11)
+            changed = _dlm_bn_fills(now) or changed
+        except Exception as e:
+            log_error(f"dlm binance fills: {e}")
     try:
         changed = dlm_boost_settle() or changed   # v0.99.795
     except Exception as e:
