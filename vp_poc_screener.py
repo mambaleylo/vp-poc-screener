@@ -144,7 +144,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.796"
+APP_VERSION = "0.99.797"
 
 # v0.99.791 — the bundle's state files (the user: "проверку на стабильность и сохранение данных, живучесть при перезапусках"; the
 # check — tools/winrate/t_state_safe.py — broke every one of them three ways): (1) the modules save from several threads (⚡: its
@@ -2065,6 +2065,29 @@ def load_credentials():
         log_error(f"load_credentials: {e}")
 
 
+_GATE_T = {"offset": 0.0, "synced": 0.0}
+
+
+def gate_time_sync():
+    """v0.99.797 — Gate's clock against the phone's (the signed requests' timestamp must be within 60 s of Gate's)"""
+    t0 = time.time()
+    r = requests.get(GATE_BASE + "/spot/time", timeout=10)
+    r.raise_for_status()
+    t1 = time.time()
+    _GATE_T["offset"] = float(r.json()["server_time"]) / 1000 - (t0 + t1) / 2
+    _GATE_T["synced"] = t1
+
+
+def gate_now():
+    if time.time() - _GATE_T["synced"] > 300:
+        try:
+            gate_time_sync()
+        except Exception as e:
+            _GATE_T["synced"] = time.time() - 240   # tried again in a minute
+            log_error(f"gate time sync: {e}")
+    return round(time.time() + _GATE_T["offset"], 3)
+
+
 def gate_signed_request(method, url_path, query_string="", body=None, timeout=HTTP_TIMEOUT, retry_on_timeout=False):
     """One request to Gate's authenticated futures API. url_path is the path
     only (e.g. "/futures/usdt/orders"), no host/prefix. body, if given, is
@@ -2104,8 +2127,11 @@ def gate_signed_request(method, url_path, query_string="", body=None, timeout=HT
     # once risks the retry itself being rejected as stale.
     attempts = 3 if retry_on_timeout else 1
     last_timeout_error = None
-    for attempt in range(attempts):
-        ts = str(time.time())
+    expired_retry = False
+    for attempt in range(attempts + 1):
+        if attempt >= attempts and not expired_retry:
+            break
+        ts = str(gate_now())   # v0.99.797 — Gate's clock, not the phone's (16.11: "gap between request Timestamp and server time exceeds 60")
         sign_string = f"{method}\n{full_url_path}\n{query_string}\n{hashed_payload}\n{ts}"
         sign = hmac.new(api_secret.encode("utf-8"), sign_string.encode("utf-8"), hashlib.sha512).hexdigest()
         headers = {
@@ -2128,6 +2154,13 @@ def gate_signed_request(method, url_path, query_string="", body=None, timeout=HT
                 detail = r.json()
             except Exception:
                 detail = r.text
+            if r.status_code == 403 and "REQUEST_EXPIRED" in str(detail) and not expired_retry:   # v0.99.797 — the clock: refused, nothing done
+                expired_retry = True
+                try:
+                    gate_time_sync()
+                except Exception as e:
+                    log_error(f"gate time sync: {e}")
+                continue
             raise requests.exceptions.HTTPError(f"{r.status_code} error for {method} {url_path}: {detail}", response=r)
         return r.json() if r.text else None
     raise last_timeout_error
@@ -3609,7 +3642,8 @@ _LVL_WARN = ("Read timed out", "ReadTimeout", "timed out", "Timeout", "Connectio
              "Failed to establish a new connection", "Max retries", "NameResolution", "RemoteDisconnected", "network error", "нет связи",
              "500 Server Error", "502 ", "503 ", "504 ", "(502)", "(503)", "(504)", "Bad Gateway", "Service Unavailable", "Too Many Requests",
              "TOO_MANY_REQUESTS", "RATE_LIMIT", "429 Client Error", "GitHub не ответил", "JSONDecodeError", "Expecting value", "— skipping",
-             "restored from", "сторож: ", "больше не принимает (-4509", "checked again next tick")   # v0.99.784 — the watchdog's notes: a warning, not an error
+             "restored from", "сторож: ", "больше не принимает (-4509", "checked again next tick",
+             "-2013: Order does not exist")   # v0.99.797 — a ⚡ limit Binance does not know: settled by itself (v0.99.794)   # v0.99.784 — the watchdog's notes: a warning, not an error
 
 
 def log_level(text):
@@ -33382,9 +33416,14 @@ def api_bt_chart(symbol):
         end = min(int(time.time()), max(max(x, t) + after * sec, t + (24 if ch == "15m" else 60) * sec))
         if (end - start) // sec > 600:          # a very long trade: the window shortened from the start
             start = end - 600 * sec
-        bars = bt_gate_bars(symbol, ch, start, end)
+        try:
+            bars = bt_gate_bars(symbol, ch, start, end)
+        except Exception as e:   # v0.99.797 — the user's BROCCOLI714: Gate dropped the coin (400 CONTRACT_NOT_FOUND) -> Binance's candles
+            bars = []
+            if "400" not in str(e) and "CONTRACT_NOT_FOUND" not in str(e):
+                log_error(f"trade chart {symbol}: Gate candles: {e}")
         used, src = ch, "gate"
-        if not bars and ch in ("1h", "2h", "4h"):   # the user: "может с бинанса тогда подгружать? просто указывать это"
+        if not bars and ch in ("1h", "2h", "4h", "1d"):   # the user: "может с бинанса тогда подгружать? просто указывать это"
             bars = binance_klines(symbol, ch, start, end)
             src = "binance" if bars else "gate"
         if not bars and ch in ("15m", "1h", "2h", "4h"):
@@ -33393,7 +33432,10 @@ def api_bt_chart(symbol):
                 a_sec = {"1h": 1, "4h": 4, "1d": 24}[alt] * 3600
                 a_start = t - max(6, before * sec // a_sec) * a_sec
                 a_end = min(int(time.time()), max(max(x, t) + after * a_sec, t + 60 * a_sec))
-                bars = bt_gate_bars(symbol, alt, a_start, a_end)
+                try:
+                    bars = bt_gate_bars(symbol, alt, a_start, a_end)
+                except Exception:
+                    bars = []
                 if bars:
                     used = alt
                     break
@@ -36344,7 +36386,7 @@ def bnf_req(method, path, params=None, signed=True, base=BNF_BASE, timeout=15):
     p = {k: v for k, v in (params or {}).items() if v is not None}
     qs = "&".join(f"{k}={requests.utils.quote(str(v), safe='')}" for k, v in p.items())
     if signed:
-        if time.time() - _BNF["synced"] > 1800:
+        if time.time() - _BNF["synced"] > BNF_SYNC_SEC:   # v0.99.797 — 30 -> 5 min: the phone's clock jumps (16.11: 105 s behind)
             try:
                 bnf_time_sync()
             except Exception as e:
@@ -36366,8 +36408,25 @@ def bnf_req(method, path, params=None, signed=True, base=BNF_BASE, timeout=15):
         msg = (j.get("msg") if isinstance(j, dict) else None) or (r.text or "")[:200]
         if code == -1021:
             _BNF["synced"] = 0.0   # the clock is off: synced again on the next call
+            # v0.99.797 — the user's log: "-1021 Timestamp ... outside of the recvWindow" on a position read and on a limit (RED, HBAR):
+            # the phone's clock had jumped. Binance refused the request (nothing done), so it is sent once more with the clock synced now
+            if signed and not getattr(_BNF_TL, "retry", False):
+                try:
+                    bnf_time_sync()
+                    _BNF_TL.retry = True
+                    return bnf_req(method, path, params, signed, base, timeout)
+                except BinanceError:
+                    raise
+                except Exception as e:
+                    log_error(f"binance time sync after -1021: {e}")
+                finally:
+                    _BNF_TL.retry = False
         raise BinanceError(code, msg, r.status_code)
     return j
+
+
+BNF_SYNC_SEC = 300
+_BNF_TL = threading.local()
 
 
 # v0.99.792 — the user: "А что на счёт проблем с сетью" -> "1 и 2 пункт надо сделать". An error that says nothing about the
