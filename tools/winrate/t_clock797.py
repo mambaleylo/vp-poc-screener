@@ -62,4 +62,22 @@ with V.app.test_client() as c:
 chk(f"график сделки по монете, которой больше нет на Gate: свечи Binance ({j.get('src')}, {len(j.get('bars') or [])} шт.), без ошибки", j.get("src") == "binance" and j.get("bars") and not j.get("error"))
 # (4) the level
 chk("«-2013 Order does not exist» у лимитки ⚡ — предупреждение, не ошибка", V.log_level("dlm binance order TAO_USDT: Binance -2013: Order does not exist.") == "warn")
+# (5) no free margin: the ⚡ order waits, not "no trade" (the user: "вдруг она освободилась")
+V.DLM_BINANCE = True; V.AUTOTRADE_DRY_RUN = False; V.DLM_BOOST = False
+V.bn_map = lambda sym: (sym.replace("_", ""), 1.0)
+V.bnf_symbols = lambda: {"AAAUSDT": {"tick": 0.0001, "step": 0.1, "min_qty": 0.1, "min_notional": 5.0, "ok": True}}
+V.bnf_positions = lambda: {}; V.bnf_dual = lambda: False; V.bnf_tiers = lambda b: [(1e9, 0.005, 50)]; V._BNF["lev_cap"] = 20
+ACC = {"equity": 1000.0, "free": 0.5}; V.bnf_account = lambda: dict(ACC)
+V.dlm_osc_mult = lambda *a, **k: 1.0; V.dlm_load_mult = lambda: 1.0; V._dlm_bn_pre_exits = lambda o_, sl: None
+V.bn_margin_mode = lambda b: "CROSSED"; V.bn_heat_cap = lambda risk, eq, mode=None: (risk, None)
+posts = []
+def fq(method, path, params=None, **k):
+    if path == "/fapi/v1/order": posts.append(params); return {"orderId": 7}
+    return {}
+V.bnf_req = fq; V._DLM["model"] = dict(V.dlm_model() or {})
+o = {"id": "dlm_AAA_USDT_1_1", "symbol": "AAA_USDT", "side": 1, "lv": 1.0, "atr": 0.02, "score": 0.9, "bs": 14400, "st": "wick4h", "t0": int(time.time()), "until": time.time() + 40000, "status": "OPEN", "real": None}
+V.dlm_bn_place(o)
+chk(f"нет свободной маржи — лимитка не «пропущена», а ждёт: «{o.get('hold', '')[:60]}…»", o["real"] is None and "ждёт" in o.get("hold", "") and not posts)
+ACC["free"] = 900.0; V.dlm_bn_place(o)
+chk("маржа освободилась — лимитка встала на биржу", (o.get("real") or {}).get("id") == "7" and posts)
 print("t_clock797 OK" if ok else "t_clock797 FAIL")

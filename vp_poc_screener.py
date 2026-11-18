@@ -38565,7 +38565,12 @@ def dlm_bn_place(o):
         margin, lev, skip = bn_size(direction, lv, sl, cap, mmr, acct["equity"], risk, bsym, tb, mt, safety=_dlm_liq_buf())
         if not skip and margin > acct["free"] * 0.9:   # the free margin checked: the risk scaled down to what the account carries
             if acct["free"] <= 1:
-                skip = f"нет свободной маржи (свободно {acct['free']:.2f}$)"
+                # v0.99.797 — the user: "маржи не хватает и сделка открылась виртуальной, но ведь можно отслеживать, вдруг она
+                # освободилась": 17.11 16:02 six limits SKIPPED for good at once, five of them takes. No free margin now is not
+                # "no trade": the order waits (as with the open-risk cap) and goes on the exchange when the margin frees, while the
+                # price has not reached its level (reached with no room — no trade, as before: _dlm_arm)
+                o["hold"] = f"нет свободной маржи (свободно {acct['free']:.2f}$) — лимитка ждёт, пока маржа освободится"; o["real"] = None
+                return
             else:
                 risk = round(risk * acct["free"] * 0.9 / margin, 2)
                 margin, lev, skip = bn_size(direction, lv, sl, cap, mmr, acct["equity"], risk, bsym, tb, mt, safety=_dlm_liq_buf())
